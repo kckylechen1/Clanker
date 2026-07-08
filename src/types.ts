@@ -1,8 +1,8 @@
 /** Shared TypeScript types for the Clanker MCP server. */
 
-export type LaneName = "codex" | "opencode" | "grok";
+export const LANE_NAMES = ["codex", "opencode", "grok"] as const;
 
-export const LANE_NAMES: readonly LaneName[] = ["codex", "opencode", "grok"];
+export type LaneName = (typeof LANE_NAMES)[number];
 
 export type RunStatus = "running" | "done" | "error" | "cancelled";
 

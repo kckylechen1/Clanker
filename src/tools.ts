@@ -11,8 +11,13 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { DEFAULT_WAIT_MS, MAX_WAIT_MS, PROGRESS_EXPERIMENTAL } from "./constants.js";
 import type { LaneManager, WaitResult } from "./manager.js";
+import { LANE_NAMES } from "./types.js";
 
-const laneEnum = z.enum(["codex", "opencode", "grok"]);
+// Single source of truth: LANE_NAMES (src/types.ts) drives this enum, so
+// adding/removing a lane only requires touching that one array. Exported
+// only so tests can assert the actual dispatch-shape schema without
+// reconstructing it (see test/lane-enum.test.ts).
+export const laneEnum = z.enum(LANE_NAMES);
 
 const dispatchShape = {
   lane: laneEnum.describe("Backend Clanker to drive: codex | opencode | grok"),

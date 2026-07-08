@@ -412,7 +412,13 @@ export class LaneManager {
       try {
         const removed = await removeIfClean(run.worktreePath, this.baseRepo);
         if (!removed) run.worktreeRetained = run.worktreePath;
-      } catch {
+      } catch (err) {
+        // Never let cleanup failure vanish silently — this is a stdio MCP
+        // server, so diagnostics can only go to stderr (stdout is the wire
+        // protocol). Control flow is unchanged: still retain, never rethrow.
+        console.error(
+          `[clanker] worktree cleanup failed for '${run.worktreePath}': ${errMessage(err)}`,
+        );
         run.worktreeRetained = run.worktreePath;
       }
     }

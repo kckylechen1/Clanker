@@ -94,7 +94,3 @@ export function buildSpawnSpec(
     }
   }
 }
-
-export function laneSupportsModel(lane: LaneName): boolean {
-  return CAPS[lane].model;
-}
