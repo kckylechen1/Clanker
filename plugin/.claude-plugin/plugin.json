@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "clanker",
+  "displayName": "Clanker",
+  "version": "0.1.2",
+  "description": "Run Codex, Opencode, and Grok as Claude-owned Clanker tasks over ACP.",
+  "author": {
+    "name": "kckylechen1"
+  },
+  "keywords": [
+    "acp",
+    "clanker",
+    "codex",
+    "opencode",
+    "grok",
+    "glm",
+    "deepseek",
+    "kimi",
+    "dispatch"
+  ]
+}

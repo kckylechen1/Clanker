@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "clanker",
+  "description": "Local marketplace for Clanker — unified Codex / Opencode / Grok ACP dispatch.",
+  "owner": {
+    "name": "kckylechen1"
+  },
+  "plugins": [
+    {
+      "name": "clanker",
+      "source": "./plugin",
+      "description": "Run Codex, Opencode, Grok, GLM, DeepSeek, and Kimi as Claude-owned Clanker tasks over ACP."
+    }
+  ]
+}

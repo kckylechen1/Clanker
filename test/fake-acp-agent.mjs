@@ -1,0 +1,216 @@
+#!/usr/bin/env node
+/**
+ * Scripted fake ACP agent for tests. Speaks newline-delimited JSON-RPC 2.0 on
+ * stdin/stdout (the agent side), so the real @agentclientprotocol/sdk client in
+ * src/acp-client.ts is exercised end-to-end against controlled behavior.
+ *
+ * Turn behavior is selected by the prompt text so tests can script scenarios:
+ *   PLAN     -> emit a plan (completed/in_progress/pending) + a tool_call whose
+ *               location is <cwd>/planned.txt, an agent message, then end_turn.
+ *   SLOW     -> stream two message chunks with delays, then end_turn.
+ *   STALL    -> emit one tool_call then never respond (simulated hang).
+ *   CANCELME -> emit a tool_call then wait; respond `cancelled` on session/cancel.
+ *   <other>  -> emit one agent_message_chunk equal to the prompt, then end_turn.
+ */
+import readline from "node:readline";
+
+const out = process.stdout;
+function send(msg) {
+  out.write(JSON.stringify(msg) + "\n");
+}
+function respond(id, result) {
+  send({ jsonrpc: "2.0", id, result });
+}
+function notify(method, params) {
+  send({ jsonrpc: "2.0", method, params });
+}
+function update(sessionId, update) {
+  notify("session/update", { sessionId, update });
+}
+
+let sessionCounter = 0;
+let cwd = process.cwd();
+/** pending prompt awaiting a cancel, keyed by sessionId */
+const pendingCancel = new Map();
+/** requests this agent sent to the client, awaiting a response, keyed by id */
+const pendingAgentRequests = new Map();
+let agentReqId = 1000;
+
+function sendRequest(method, params, onResult) {
+  const rid = ++agentReqId;
+  pendingAgentRequests.set(rid, onResult);
+  send({ jsonrpc: "2.0", id: rid, method, params });
+}
+
+function textBlock(text) {
+  return { type: "text", text };
+}
+
+async function runPrompt(id, sessionId, promptText) {
+  const p = promptText.toUpperCase();
+
+  if (p.includes("STALL")) {
+    update(sessionId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-stall",
+      title: "stalling tool",
+      status: "in_progress",
+    });
+    // Never respond — simulates a hung turn.
+    return;
+  }
+
+  if (p.includes("CANCELME")) {
+    update(sessionId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-cancel",
+      title: "long running op",
+      status: "in_progress",
+    });
+    pendingCancel.set(sessionId, id);
+    return;
+  }
+
+  if (p.includes("CRASH")) {
+    // Emit one event then exit mid-turn without responding (simulated crash).
+    update(sessionId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-crash",
+      title: "about to crash",
+      status: "in_progress",
+    });
+    setTimeout(() => process.exit(1), 30);
+    return;
+  }
+
+  if (p.includes("OVERFLOW")) {
+    // Emit many tool_calls so the accumulated digest exceeds the char budget.
+    for (let i = 0; i < 60; i++) {
+      update(sessionId, {
+        sessionUpdate: "tool_call",
+        toolCallId: `tc-of-${i}`,
+        title: `overflow tool call number ${i} with a deliberately longish title`,
+        status: "completed",
+      });
+    }
+    respond(id, { stopReason: "end_turn" });
+    return;
+  }
+
+  if (p.includes("PERMWRITE")) {
+    // Ask the client for permission with ONLY an allow option; the client's
+    // read-only gate must decline (cancelled) rather than approve.
+    sendRequest(
+      "session/request_permission",
+      {
+        sessionId,
+        toolCall: { toolCallId: "w1", title: "write to a file", kind: "edit", status: "pending" },
+        options: [{ optionId: "allow-1", name: "Allow", kind: "allow_once" }],
+      },
+      (result) => {
+        const outcome = result && result.outcome && result.outcome.outcome;
+        const text = outcome === "selected" ? "PERMISSION_GRANTED" : "PERMISSION_DENIED";
+        update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock(text) });
+        respond(id, { stopReason: "end_turn" });
+      },
+    );
+    return;
+  }
+
+  if (p.includes("PLAN")) {
+    update(sessionId, {
+      sessionUpdate: "plan",
+      entries: [
+        { content: "read the spec", priority: "high", status: "completed" },
+        { content: "write the accessor", priority: "high", status: "in_progress" },
+        { content: "migrate call sites", priority: "medium", status: "pending" },
+      ],
+    });
+    update(sessionId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-edit",
+      title: "edit planned.txt",
+      kind: "edit",
+      status: "completed",
+      locations: [{ path: `${cwd}/planned.txt` }],
+    });
+    update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock("planned") });
+    respond(id, { stopReason: "end_turn" });
+    return;
+  }
+
+  if (p.includes("SLOW")) {
+    update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock("first-chunk-marker ") });
+    await delay(120);
+    update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock("second-chunk-marker") });
+    await delay(120);
+    respond(id, { stopReason: "end_turn" });
+    return;
+  }
+
+  // Default: echo the prompt as the final message.
+  update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock(promptText) });
+  respond(id, { stopReason: "end_turn" });
+}
+
+function delay(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let msg;
+  try {
+    msg = JSON.parse(trimmed);
+  } catch {
+    return;
+  }
+
+  // Response to a request this agent sent (has id, no method).
+  if (msg.id !== undefined && msg.method === undefined) {
+    const cb = pendingAgentRequests.get(msg.id);
+    if (cb) {
+      pendingAgentRequests.delete(msg.id);
+      cb(msg.result, msg.error);
+    }
+    return;
+  }
+
+  // Notifications (no id).
+  if (msg.id === undefined) {
+    if (msg.method === "session/cancel") {
+      const sessionId = msg.params?.sessionId;
+      const pendingId = pendingCancel.get(sessionId);
+      if (pendingId !== undefined) {
+        pendingCancel.delete(sessionId);
+        respond(pendingId, { stopReason: "cancelled" });
+      }
+    }
+    return;
+  }
+
+  switch (msg.method) {
+    case "initialize":
+      respond(msg.id, { protocolVersion: 1, agentCapabilities: {}, agentInfo: { name: "fake-acp-agent" } });
+      break;
+    case "session/new": {
+      cwd = msg.params?.cwd ?? cwd;
+      const sessionId = `sess-${++sessionCounter}`;
+      respond(msg.id, { sessionId });
+      break;
+    }
+    case "session/prompt": {
+      const sessionId = msg.params?.sessionId;
+      const blocks = msg.params?.prompt ?? [];
+      const promptText = blocks.map((b) => (b?.type === "text" ? b.text : "")).join("");
+      void runPrompt(msg.id, sessionId, promptText);
+      break;
+    }
+    default:
+      // Unknown request: reply with an empty result to keep the stream alive.
+      respond(msg.id, {});
+      break;
+  }
+});

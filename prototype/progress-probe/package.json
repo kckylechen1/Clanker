@@ -1,0 +1,12 @@
+{
+  "name": "progress-probe",
+  "version": "0.1.0",
+  "description": "Minimal MCP server that emits notifications/progress, to test whether Claude Code bubbles nested-subagent MCP progress to the bottom task line (Clanker spec Step 0 / channel one).",
+  "private": true,
+  "type": "module",
+  "bin": { "progress-probe": "index.mjs" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "3.25.76"
+  }
+}
