@@ -11,7 +11,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { DEFAULT_WAIT_MS, MAX_WAIT_MS, PROGRESS_EXPERIMENTAL } from "./constants.js";
 import type { LaneManager, WaitResult } from "./manager.js";
-import { LANE_NAMES } from "./types.js";
+import { LANE_NAMES, type LaneName } from "./types.js";
 
 // Single source of truth: LANE_NAMES (src/types.ts) drives this enum, so
 // adding/removing a lane only requires touching that one array. Exported
@@ -204,7 +204,7 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
 }
 
 function toDispatch(args: {
-  lane: "codex" | "opencode" | "grok";
+  lane: LaneName;
   prompt: string;
   cwd?: string;
   worktree?: string;
