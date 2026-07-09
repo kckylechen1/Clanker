@@ -29,6 +29,14 @@ export type SessionState = "working" | "idle" | "stalled" | "closed";
 interface DigestEntry {
   seq: number;
   text: string;
+  /**
+   * True for entries that count as a "significant event" for quiet-mode
+   * long-poll (clanker_wait's debounce): plan/status change, tool error, or a
+   * turn-boundary transition. False for high-frequency chatter (tool_call
+   * start, file-location echoes, message-chunk fragments) — the exact noise
+   * that made every grep/read wake a waiting poller early.
+   */
+  significant: boolean;
 }
 
 const EMPTY_PLAN: PlanState = {
@@ -82,6 +90,8 @@ export class LaneRun {
   private lastFinalMessage = "";
   private lastEventAt = Date.now();
   private idleSince: number | null = null;
+  /** Cleared on every real event; see `suspectedStallEdge`. */
+  private stallAcknowledged = false;
 
   private seq = 0;
   reportedSeq = 0;
@@ -123,7 +133,7 @@ export class LaneRun {
     this.lastEmittedMsgLen = 0;
     this.idleSince = null;
     this.touch("turn_start");
-    this.pushDigest(`▶ turn ${this.turnsCount}: ${truncate(prompt, 160)}`);
+    this.pushDigest(`▶ turn ${this.turnsCount}: ${truncate(prompt, 160)}`, true);
     this.writeEvent({ t: "turn_start", turn: this.turnsCount, prompt });
   }
 
@@ -132,7 +142,7 @@ export class LaneRun {
     this.turnStatus = "done";
     this.lastFinalMessage = this.currentTurnMessage.trim();
     this.idleSince = Date.now();
-    this.pushDigest(`✓ turn ${this.turnsCount} done (${this.toolCallCount} tools)`);
+    this.pushDigest(`✓ turn ${this.turnsCount} done (${this.toolCallCount} tools)`, true);
     this.writeEvent({ t: "turn_done", turn: this.turnsCount, stopReason: "end_turn" });
     this.touch("turn_done");
   }
@@ -148,7 +158,7 @@ export class LaneRun {
     this.failureClass = failureClass;
     this.idleSince = Date.now();
     const tag = failureClass ? ` [${failureClass}]` : "";
-    this.pushDigest(`✗ error: ${truncate(message, 200)}${tag}`);
+    this.pushDigest(`✗ error: ${truncate(message, 200)}${tag}`, true);
     this.writeEvent({ t: "turn_error", turn: this.turnsCount, message, failureClass });
     this.touch("turn_error");
   }
@@ -172,7 +182,7 @@ export class LaneRun {
     this.flushMessageDigest();
     this.turnStatus = "cancelled";
     this.idleSince = Date.now();
-    this.pushDigest(`⊘ turn ${this.turnsCount} cancelled`);
+    this.pushDigest(`⊘ turn ${this.turnsCount} cancelled`, true);
     this.writeEvent({ t: "turn_cancelled", turn: this.turnsCount });
     this.touch("turn_cancelled");
   }
@@ -208,7 +218,7 @@ export class LaneRun {
         this.collectLocations(update.locations);
         if (update.status === "failed") {
           const title = this.toolCallTitles.get(update.toolCallId) ?? update.toolCallId;
-          this.pushDigest(`⚠ tool failed: ${truncate(title, 100)}`);
+          this.pushDigest(`⚠ tool failed: ${truncate(title, 100)}`, true);
         }
         break;
       }
@@ -242,7 +252,7 @@ export class LaneRun {
     const pending = snap.filter((e) => e.status === "pending").length;
     const currentStep = snap.find((e) => e.status === "in_progress")?.content ?? null;
     this.plan = { entries: snap, completed, inProgress, pending, total: snap.length, currentStep };
-    this.pushDigest(`📋 ${this.planSummary()}`);
+    this.pushDigest(`📋 ${this.planSummary()}`, true);
   }
 
   private collectLocations(locations: ToolCallLocation[] | null | undefined): void {
@@ -296,6 +306,22 @@ export class LaneRun {
     return this.turnStatus === "running" && this.lastEventAgeMs() > stallThresholdMs;
   }
 
+  /**
+   * Edge-triggered variant of `suspectedStall` for quiet-mode long-poll: true
+   * only the first time it's observed stalled since the last real event —
+   * subsequent calls while still silently stalled return false so a caller
+   * polling in a loop blocks out its full timeout budget each time instead of
+   * spinning (every call re-observing "still stalled" would otherwise make
+   * clanker_wait return near-instantly forever, starving the event loop of
+   * the real timers — e.g. the hard per-turn timeout — that need to run).
+   */
+  suspectedStallEdge(stallThresholdMs: number): boolean {
+    if (!this.suspectedStall(stallThresholdMs)) return false;
+    if (this.stallAcknowledged) return false;
+    this.stallAcknowledged = true;
+    return true;
+  }
+
   sessionState(stallThresholdMs: number): SessionState {
     if (this.sessionClosed) return "closed";
     if (this.turnStatus === "running") {
@@ -315,6 +341,23 @@ export class LaneRun {
 
   hasUnreported(): boolean {
     return this.seq > this.reportedSeq;
+  }
+
+  /**
+   * True if any digest entry since the last drain is `significant` (plan/status
+   * change, tool error, or turn-boundary transition) — as opposed to the
+   * high-frequency chatter (tool_call start, file-location echo, message-chunk
+   * fragment) that `hasUnreported()` alone treats as wake-worthy. Used by
+   * clanker_wait's quiet mode so a run that's merely grepping/reading doesn't
+   * wake every long-poller on each tool call.
+   */
+  hasUnreportedSignificant(): boolean {
+    for (let i = this.digestLog.length - 1; i >= 0; i--) {
+      const d = this.digestLog[i];
+      if (d.seq <= this.reportedSeq) return false;
+      if (d.significant) return true;
+    }
+    return false;
   }
 
   finalMessage(): string {
@@ -370,6 +413,7 @@ export class LaneRun {
 
   private touch(_reason: string): void {
     this.lastEventAt = Date.now();
+    this.stallAcknowledged = false;
     const w = this.waiters;
     this.waiters = [];
     for (const fn of w) fn();
@@ -377,9 +421,9 @@ export class LaneRun {
 
   // ---- persistence --------------------------------------------------------
 
-  private pushDigest(text: string): void {
+  private pushDigest(text: string, significant = false): void {
     this.seq += 1;
-    this.digestLog.push({ seq: this.seq, text });
+    this.digestLog.push({ seq: this.seq, text, significant });
     if (this.digestLog.length > 500) this.digestLog.splice(0, this.digestLog.length - 500);
   }
 

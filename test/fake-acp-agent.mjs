@@ -22,6 +22,9 @@
  *   CAPACITY_ALWAYS -> every invocation exits(1) with the same "model at capacity" stderr,
  *               never recovers. Simulates a backend that stays at capacity through the one
  *               automatic retry, so the retry budget (exactly one) must still be respected.
+ *   TRICKLE  -> emit a trivial tool_call, delay, then a significant plan update,
+ *               delay, then end_turn — for clanker_wait quiet-mode debounce tests
+ *               (the tool_call must not cut a wait short; the plan update must).
  *   <other>  -> emit one agent_message_chunk equal to the prompt, then end_turn.
  *
  * Env vars (seat/resume tests, see test/seat.test.ts and test/acp-client.test.ts):
@@ -197,6 +200,26 @@ async function runPrompt(id, sessionId, promptText) {
       locations: [{ path: `${cwd}/planned.txt` }],
     });
     update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock("planned") });
+    respond(id, { stopReason: "end_turn" });
+    return;
+  }
+
+  if (p.includes("TRICKLE")) {
+    // Trivial event first (no wake expected in quiet mode), then — after a
+    // real delay so a live wait is genuinely in-flight — a significant plan
+    // update (wake expected), then end_turn.
+    update(sessionId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-trickle",
+      title: "trivial op",
+      status: "completed",
+    });
+    await delay(150);
+    update(sessionId, {
+      sessionUpdate: "plan",
+      entries: [{ content: "step one", priority: "high", status: "in_progress" }],
+    });
+    await delay(150);
     respond(id, { stopReason: "end_turn" });
     return;
   }

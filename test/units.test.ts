@@ -155,3 +155,96 @@ test("CP4: a large event burst yields a digest at/under the char budget with a t
   assert.ok(digest.startsWith("…"), "over-budget digest starts with the truncation marker");
   run.closeStreams();
 });
+
+// ---- clanker_wait quiet-mode debounce: significant vs trivial events -----
+
+test("hasUnreportedSignificant: trivial tool_call/location events don't count as significant", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-run-"));
+  const run = new LaneRun({ id: "unit-quiet-1", lane: "codex", cwd: os.tmpdir(), runDir, readOnly: true });
+  run.beginTurn("grep the repo");
+  run.drainDigest(); // consume the (significant) turn_start entry first
+  assert.equal(run.hasUnreportedSignificant(), false, "no significant event pending after drain");
+
+  // A run of grep/read-shaped tool calls — exactly the "every grep fires an
+  // event" noise clanker_wait's quiet mode exists to not wake on.
+  for (let i = 0; i < 5; i++) {
+    run.onUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: `t${i}`,
+      title: `grep -n foo file${i}.ts`,
+      status: "completed",
+      locations: [{ path: `${os.tmpdir()}/file${i}.ts` }],
+    } as unknown as SessionUpdate);
+  }
+  assert.equal(run.hasUnreported(), true, "seq did advance (there is a digest to drain)");
+  assert.equal(
+    run.hasUnreportedSignificant(),
+    false,
+    "tool_call + file-location echoes alone are not significant",
+  );
+  run.closeStreams();
+});
+
+test("hasUnreportedSignificant: a plan update is significant", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-run-"));
+  const run = new LaneRun({ id: "unit-quiet-2", lane: "codex", cwd: os.tmpdir(), runDir, readOnly: true });
+  run.beginTurn("do the plan thing");
+  run.drainDigest();
+  run.onUpdate({
+    sessionUpdate: "plan",
+    entries: [{ content: "step one", priority: "high", status: "in_progress" }],
+  } as unknown as SessionUpdate);
+  assert.equal(run.hasUnreportedSignificant(), true, "a plan change is significant");
+  run.drainDigest();
+  assert.equal(run.hasUnreportedSignificant(), false, "drain resets the significant cursor");
+  run.closeStreams();
+});
+
+test("hasUnreportedSignificant: a failed tool_call_update is significant", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-run-"));
+  const run = new LaneRun({ id: "unit-quiet-3", lane: "codex", cwd: os.tmpdir(), runDir, readOnly: true });
+  run.beginTurn("do a thing that fails");
+  run.drainDigest();
+  run.onUpdate({
+    sessionUpdate: "tool_call",
+    toolCallId: "t-fail",
+    title: "risky op",
+    status: "in_progress",
+  } as unknown as SessionUpdate);
+  assert.equal(run.hasUnreportedSignificant(), false, "tool_call start alone is trivial");
+  run.onUpdate({
+    sessionUpdate: "tool_call_update",
+    toolCallId: "t-fail",
+    status: "failed",
+  } as unknown as SessionUpdate);
+  assert.equal(run.hasUnreportedSignificant(), true, "a tool error is significant");
+  run.closeStreams();
+});
+
+test("suspectedStallEdge fires once per stall episode, not on every call while still silent", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-run-"));
+  const run = new LaneRun({ id: "unit-quiet-4", lane: "codex", cwd: os.tmpdir(), runDir, readOnly: true });
+  run.beginTurn("go quiet");
+  // Threshold -1 guarantees "stalled" is true from t=0 regardless of clock
+  // granularity, isolating the edge-vs-level distinction from real timing.
+  assert.equal(run.suspectedStallEdge(-1), true, "first observation of a stall fires the edge");
+  assert.equal(
+    run.suspectedStallEdge(-1),
+    false,
+    "a second call with no new event in between must NOT re-fire (busy-poll guard)",
+  );
+  assert.equal(
+    run.suspectedStallEdge(-1),
+    false,
+    "and a third call still must not re-fire — this is what protected against the busy-spin regression",
+  );
+  // A real event clears the edge so a later stall can fire again.
+  run.onUpdate({
+    sessionUpdate: "tool_call",
+    toolCallId: "t-after-stall",
+    title: "still alive",
+    status: "completed",
+  } as unknown as SessionUpdate);
+  assert.equal(run.suspectedStallEdge(-1), true, "a fresh event re-arms the stall edge");
+  run.closeStreams();
+});

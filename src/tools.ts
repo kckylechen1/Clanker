@@ -121,7 +121,7 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
     "clanker_wait",
     {
       title: "Long-poll a Clanker run",
-      description: `Wait up to timeout_ms (default ${DEFAULT_WAIT_MS}, cap ${MAX_WAIT_MS}) for new events or completion. Returns {status, digest, plan_summary, last_event_age_ms, suspected_stall}; when status is terminal also {final_message, touched_files, plan_final}, and on error also {error, failure_class}. digest is a human-readable summary of events since the previous wait — tool titles, file writes, plan check changes, key message sentences. failure_class="CLANKER-INFRA-FAILURE" means the backend rejected the request shape on turn 1 with zero tool calls — retrying the identical dispatch is pointless; run a smoke check first.`,
+      description: `Wait up to timeout_ms (default ${DEFAULT_WAIT_MS}, cap ${MAX_WAIT_MS}) for new events or completion. Returns {status, digest, plan_summary, last_event_age_ms, suspected_stall}; when status is terminal also {final_message, touched_files, plan_final}, and on error also {error, failure_class}. digest is a human-readable summary of events since the previous wait — tool titles, file writes, plan check changes, key message sentences. failure_class="CLANKER-INFRA-FAILURE" means the backend rejected the request shape on turn 1 with zero tool calls — retrying the identical dispatch is pointless; run a smoke check first. Quiet mode (default on): only wakes before the deadline on a plan/status change, a tool error, a suspected stall, or a terminal state — trivial chatter (a tool_call starting, a file-location echo, a message-chunk fragment) does not cut the wait short, so callers no longer need to repoll tightly just because the run is reading/grepping. Pass quiet:false for the old any-event wake-up.`,
       inputSchema: {
         id: z.string().describe("Run id from clanker_dispatch_start / clanker_dispatch"),
         timeout_ms: z
@@ -130,12 +130,18 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
           .min(0)
           .optional()
           .describe(`Long-poll window in ms (default ${DEFAULT_WAIT_MS}, capped at ${MAX_WAIT_MS})`),
+        quiet: z
+          .boolean()
+          .optional()
+          .describe(
+            "Debounce mode (default true): wake early only on plan/status change, tool error, suspected stall, or terminal state. quiet:false restores waking on every trivial event (tool_call start, file echo, message chunk) — the pre-debounce behavior.",
+          ),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
     async (args, extra) => {
       try {
-        const result = await manager.wait(args.id, args.timeout_ms);
+        const result = await manager.wait(args.id, args.timeout_ms, args.quiet);
         progressSender(extra)?.(result);
         return ok(result);
       } catch (e) {

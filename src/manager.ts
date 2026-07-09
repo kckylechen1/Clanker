@@ -446,7 +446,15 @@ export class LaneManager {
 
   // ---- long-poll ----------------------------------------------------------
 
-  async wait(id: string, timeoutMs?: number): Promise<WaitResult> {
+  /**
+   * `quiet` (default true) is the debounce mode: the long-poll only wakes early
+   * on a plan/status change, a tool error, a suspected stall, or a terminal
+   * state — not on every trivial event (tool_call start, file-location echo,
+   * message-chunk fragment). That chatter used to make clanker_wait return
+   * near-instantly on every grep/read, forcing callers into tight repolling.
+   * Pass `quiet: false` to restore the legacy any-event wake-up.
+   */
+  async wait(id: string, timeoutMs?: number, quiet = true): Promise<WaitResult> {
     const run = this.runs.get(id);
     if (!run) throw new Error(`run '${id}' not found`);
     // CP6: single-consumer contract — a concurrent clanker_wait on the same id would
@@ -458,7 +466,11 @@ export class LaneManager {
     try {
       const budget = clampWait(timeoutMs);
       const deadline = Date.now() + budget;
-      while (!run.isTerminalTurn() && !run.hasUnreported() && Date.now() < deadline) {
+      const shouldWake = () =>
+        quiet
+          ? run.hasUnreportedSignificant() || run.suspectedStallEdge(this.stallThresholdMs)
+          : run.hasUnreported();
+      while (!run.isTerminalTurn() && !shouldWake() && Date.now() < deadline) {
         const remaining = deadline - Date.now();
         await run.waitForSignal(Math.min(remaining, 1_000));
       }
