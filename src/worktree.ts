@@ -66,6 +66,20 @@ export async function changedFiles(cwd: string): Promise<string[]> {
 export async function removeIfClean(worktreePath: string, baseRepo = BASE_REPO): Promise<boolean> {
   const changes = await changedFiles(worktreePath);
   if (changes.length > 0) return false;
+  // A clean tree can still hold UNPUSHED commits (the lane committed its
+  // work but nothing has shipped it yet). Removing the tree then is how a
+  // finished lane's deliverable vanished mid-review on 2026-07-10 — the
+  // branch ref survived, but every path-based consumer (review dispatches,
+  // verify seats) broke. Retain the tree until its commits are on a remote.
+  try {
+    const ahead = (
+      await git(worktreePath, ["rev-list", "--count", "origin/main..HEAD"])
+    ).trim();
+    if (ahead !== "0") return false;
+  } catch {
+    // If we cannot prove the tree holds nothing unpushed, keep it.
+    return false;
+  }
   try {
     await git(baseRepo, ["worktree", "remove", worktreePath]);
   } catch {
