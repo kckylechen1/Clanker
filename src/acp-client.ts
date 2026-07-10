@@ -171,6 +171,16 @@ export class LaneConnection {
     // PATH that omits node's own bin dir, so `npx`-based lanes (e.g. codex-acp)
     // fail with spawn ENOENT. Prepend the running node's bin dir (where npx lives)
     // — derived, not hard-coded — so those lanes resolve.
+    // A nonexistent cwd makes node's spawn fail with a misleading
+    // "spawn <command> ENOENT" (reads as a PATH problem; cost a real PATH
+    // chase on 2026-07-10 when a reaped worktree was passed as cwd).
+    // Fail loud and name the actual problem instead.
+    if (cwd && !fs.existsSync(cwd)) {
+      throw new Error(
+        `lane cwd does not exist: ${cwd} (worktree reaped or path typo?) — refusing to spawn`,
+      );
+    }
+
     const nodeBinDir = path.dirname(process.execPath);
     const child = spawn(spec.command, spec.args, {
       cwd,
