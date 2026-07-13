@@ -69,6 +69,18 @@ npm run typecheck
 
 `npm run bundle` writes `plugin/dist/clanker-mcp.mjs`, the self-contained server bundle Claude loads from its plugin cache.
 
+### Smoke — canary a lane before a real batch
+
+```bash
+npm run smoke                       # full regression battery: all 3 lanes, "Reply DONE"
+npm run smoke -- codex              # single-lane canary: one 1-turn "Reply PONG" dispatch
+npm run smoke -- codex gpt-5.6-sol  # canary a model override on that lane (e.g. the sol path)
+```
+
+Run the single-lane canary before dispatching a real batch to a lane — it catches a dead/misconfigured
+lane (auth expired, CLI missing, backend rejecting the request shape) in ~20-30s instead of discovering
+it after burning a real dispatch.
+
 ## Runtime Config
 
 | Env | Default | Meaning |
