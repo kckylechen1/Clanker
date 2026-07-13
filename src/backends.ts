@@ -12,6 +12,13 @@
  *           supplied via OPENCODE_CONFIG pointing at a per-run JSON config
  *           ({"model":"provider/model"}). opencode has no ACP-mode reasoning
  *           effort knob (that is the `--variant` run flag), so effort warns.
+ *           Agent-profile selection (LaneRequestOptions.agent) rides the same
+ *           OPENCODE_CONFIG file's `default_agent` field — verified against
+ *           opencode 1.17.18's published config JSON-schema (2026-07-13):
+ *           `default_agent` is "Default agent to use when none is specified.
+ *           Must be a primary agent." There is no ACP session-level agent
+ *           field (schema.NewSessionRequest carries only cwd/mcpServers/
+ *           additionalDirectories/_meta), so config is the only surface.
  * - codex   `npx -y @agentclientprotocol/codex-acp@<CODEX_ACP_VERSION>` — model +
  *           reasoning effort via CODEX_CONFIG (JSON merged into the Codex
  *           session config: {"model":...,"model_reasoning_effort":...});
@@ -68,12 +75,14 @@ interface LaneCapabilities {
   nativeReadOnly: boolean;
   /** Whether the CLI exposes a mid-strictness native sandbox tier (see CodexSandboxMode). */
   sandbox: boolean;
+  /** Whether the CLI can select a named agent/profile (see LaneRequestOptions.agent). */
+  agent: boolean;
 }
 
 const CAPS: Record<LaneName, LaneCapabilities> = {
-  codex: { model: true, effort: true, nativeReadOnly: true, sandbox: true },
-  opencode: { model: true, effort: false, nativeReadOnly: false, sandbox: false },
-  grok: { model: true, effort: true, nativeReadOnly: false, sandbox: false },
+  codex: { model: true, effort: true, nativeReadOnly: true, sandbox: true, agent: false },
+  opencode: { model: true, effort: false, nativeReadOnly: false, sandbox: false, agent: true },
+  grok: { model: true, effort: true, nativeReadOnly: false, sandbox: false, agent: false },
 };
 
 /**
@@ -111,6 +120,9 @@ export function buildSpawnSpec(
   if (opts.sandbox && !caps.sandbox) {
     warnings.push(`lane '${lane}' does not support sandbox override; ignoring sandbox='${opts.sandbox}'`);
   }
+  if (opts.agent && !caps.agent) {
+    warnings.push(`lane '${lane}' does not support agent profile override; ignoring agent='${opts.agent}'`);
+  }
 
   switch (lane) {
     case "grok": {
@@ -126,12 +138,17 @@ export function buildSpawnSpec(
       // Shortnames (glm/ds/kimi/free) resolve to full provider/model ids from the
       // single source in constants.ts; full ids pass through unchanged.
       const model = resolveOcModel(opts.model);
-      if (model) {
+      const cfg: Record<string, unknown> = { $schema: "https://opencode.ai/config.json" };
+      if (model) cfg.model = model;
+      // opencode's ACP session (session/new) has no per-session agent field —
+      // the only selection surface is config, via `default_agent` (verified
+      // against opencode 1.17.18's published config schema: a top-level
+      // string, "Must be a primary agent"). Names a markdown agent profile
+      // under ~/.config/opencode/agents/<name>.md.
+      if (opts.agent) cfg.default_agent = opts.agent;
+      if (Object.keys(cfg).length > 1) {
         const cfgPath = path.join(runDir, "opencode-config.json");
-        fs.writeFileSync(
-          cfgPath,
-          JSON.stringify({ $schema: "https://opencode.ai/config.json", model }, null, 2),
-        );
+        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
         env.OPENCODE_CONFIG = cfgPath;
       }
       return { command: "opencode", args, env, warnings };

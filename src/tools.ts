@@ -43,6 +43,14 @@ const dispatchShape = {
         "of being Not-checked. Unset preserves legacy behavior (read_only ? read-only : danger-full-access). " +
         "Ignored (warned) on grok/opencode — they have no native sandbox tier.",
     ),
+  agent: z
+    .string()
+    .optional()
+    .describe(
+      "opencode-only: name of a primary agent profile (e.g. a markdown agent under " +
+        "~/.config/opencode/agents/<name>.md) to load via OPENCODE_CONFIG's default_agent. " +
+        "Unset preserves opencode's own default. Ignored (warned) on codex/grok.",
+    ),
 } as const;
 
 function progressSender(extra: unknown): ((r: WaitResult) => void) | undefined {
@@ -222,6 +230,7 @@ function toDispatch(args: {
   effort?: string;
   read_only?: boolean;
   sandbox?: CodexSandboxMode;
+  agent?: string;
 }) {
   return {
     lane: args.lane,
@@ -232,6 +241,7 @@ function toDispatch(args: {
     effort: args.effort,
     readOnly: args.read_only,
     sandbox: args.sandbox,
+    agent: args.agent,
   };
 }
 

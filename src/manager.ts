@@ -175,6 +175,7 @@ export class LaneManager {
       effort: params.effort,
       readOnly,
       sandbox: params.sandbox,
+      agent: params.agent,
     };
     const spec = this.resolveSpec(params.lane, opts, runDir);
     this.warningsById.set(id, spec.warnings);

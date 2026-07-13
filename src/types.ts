@@ -43,6 +43,13 @@ export interface LaneRequestOptions {
   readOnly?: boolean;
   /** codex-only sandbox strictness override — see CodexSandboxMode. */
   sandbox?: CodexSandboxMode;
+  /**
+   * opencode-only: selects a primary agent profile (e.g. a markdown agent
+   * under `~/.config/opencode/agents/<name>.md`) via OPENCODE_CONFIG's
+   * `default_agent`. Ignored (warned) on codex/grok, same pattern as
+   * `model`/`effort`/`sandbox`.
+   */
+  agent?: string;
 }
 
 /** Plan projection derived from ACP `plan` events. */
