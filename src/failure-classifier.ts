@@ -53,3 +53,24 @@ export function classifyTurnFailure(params: {
   }
   return undefined;
 }
+
+/**
+ * Backend transient-capacity signatures — "at capacity", overload, or a bare
+ * 5xx status. Distinct from CLANKER-INFRA-FAILURE (a permanent schema
+ * rejection): these are worth exactly one automatic retry after a backoff,
+ * because the same request will very likely succeed once the backend has
+ * room again. A message classified CLANKER-INFRA-FAILURE by
+ * classifyTurnFailure must never be retried even if it also happens to match
+ * one of these patterns — callers must check classifyTurnFailure first.
+ */
+const CAPACITY_TRANSIENT_PATTERNS: readonly RegExp[] = [
+  /model[ _-]?at[ _-]?capacity/i,
+  /\boverloaded\b/i,
+  /\bservice unavailable\b/i,
+  /\b(500|502|503|504)\b/,
+];
+
+/** True when the error text looks like a transient backend-capacity condition worth one retry. */
+export function isCapacityTransient(message: string): boolean {
+  return CAPACITY_TRANSIENT_PATTERNS.some((re) => re.test(message));
+}

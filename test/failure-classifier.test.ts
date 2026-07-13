@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyTurnFailure, INFRA_FAILURE_TAG } from "../src/failure-classifier.js";
+import { classifyTurnFailure, INFRA_FAILURE_TAG, isCapacityTransient } from "../src/failure-classifier.js";
 
 // ---- CLANKER-INFRA-FAILURE classification --------------------------------
 //
@@ -61,4 +61,25 @@ test("does not tag a capacity/overload message (that's a transient-retry class, 
     toolCalls: 0,
   });
   assert.equal(cls, undefined);
+});
+
+// ---- capacity-transient classification (single-retry class) -------------
+
+test("isCapacityTransient recognizes 'model at capacity' phrasing, with separator variants", () => {
+  assert.equal(isCapacityTransient("model at capacity, please retry"), true);
+  assert.equal(isCapacityTransient("Model_At_Capacity"), true);
+  assert.equal(isCapacityTransient("model-at-capacity: try again shortly"), true);
+});
+
+test("isCapacityTransient recognizes overloaded / service unavailable / 5xx", () => {
+  assert.equal(isCapacityTransient("upstream overloaded, backing off"), true);
+  assert.equal(isCapacityTransient("503 Service Unavailable"), true);
+  assert.equal(isCapacityTransient("request failed with status 502"), true);
+});
+
+test("isCapacityTransient does not match ordinary failures or 4xx client errors", () => {
+  assert.equal(isCapacityTransient("turn exceeded CLANKER_TURN_TIMEOUT_MS"), false);
+  assert.equal(isCapacityTransient("lane process exited mid-turn (code=1 signal=null)"), false);
+  assert.equal(isCapacityTransient('{"error":{"type":"invalid_request_error","param":"tools"}}'), false);
+  assert.equal(isCapacityTransient("HTTP 400 bad request"), false);
 });

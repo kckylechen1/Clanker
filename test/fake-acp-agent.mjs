@@ -19,6 +19,9 @@
  *               subsequent invocation (marker file present, written by the first) succeeds
  *               normally. Simulates a capacity-transient failure that a single automatic
  *               retry should recover from.
+ *   CAPACITY_ALWAYS -> every invocation exits(1) with the same "model at capacity" stderr,
+ *               never recovers. Simulates a backend that stays at capacity through the one
+ *               automatic retry, so the retry budget (exactly one) must still be respected.
  *   <other>  -> emit one agent_message_chunk equal to the prompt, then end_turn.
  */
 import fs from "node:fs";
@@ -99,6 +102,12 @@ async function runPrompt(id, sessionId, promptText) {
     process.stderr.write(
       '{"error":{"type":"invalid_request_error","message":"Invalid Value: \'tools\'. Function \'collaboration.spawn_agent\' is reserved for use by this model and must match the configured schema.","param":"tools"}}\n',
     );
+    setTimeout(() => process.exit(1), 20);
+    return;
+  }
+
+  if (p.includes("CAPACITY_ALWAYS")) {
+    process.stderr.write('{"error":{"type":"overloaded_error","message":"model at capacity, please retry"}}\n');
     setTimeout(() => process.exit(1), 20);
     return;
   }

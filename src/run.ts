@@ -135,6 +135,21 @@ export class LaneRun {
     this.touch("turn_error");
   }
 
+  /**
+   * Record a non-terminal capacity-transient retry (see failure-classifier.ts
+   * isCapacityTransient). Does not touch turnStatus — the turn is still
+   * "running" from a caller's perspective while the retry backoff is in
+   * flight, so a concurrent clanker_wait keeps long-polling instead of
+   * seeing a premature terminal state.
+   */
+  recordTransientRetry(message: string, backoffMs: number, attempt: number): void {
+    this.pushDigest(
+      `↻ transient backend failure, retrying in ${backoffMs}ms (attempt ${attempt}): ${truncate(message, 160)}`,
+    );
+    this.writeEvent({ t: "transient_retry", backoffMs, attempt, message });
+    this.touch("transient_retry");
+  }
+
   cancelTurn(): void {
     this.flushMessageDigest();
     this.turnStatus = "cancelled";

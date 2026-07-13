@@ -88,6 +88,7 @@ it after burning a real dispatch.
 | `CLANKER_STALL_THRESHOLD_MS` | `300000` | Silence before a running turn is flagged as suspected stalled. |
 | `CLANKER_TURN_TIMEOUT_MS` | `2700000` | Hard per-turn ceiling before the subprocess is killed and the turn becomes `error`. |
 | `CLANKER_HANDSHAKE_TIMEOUT_MS` | `30000` | ACP initialize + session/new timeout. |
+| `CLANKER_CAPACITY_RETRY_BACKOFF_MS` | `30000` | Backoff before the single automatic retry of a capacity-transient first-turn failure ("model at capacity" / overloaded / 5xx). Never applies to a CLANKER-INFRA-FAILURE-tagged failure. |
 | `CLANKER_SESSION_TTL_MS` | `600000` | Idle session TTL before reaping. |
 | `CLANKER_WAIT_DEFAULT_MS` / `CLANKER_WAIT_MAX_MS` | `30000` / `55000` | `clanker_wait` long-poll default and cap. |
 | `CLANKER_PROGRESS_EXPERIMENTAL` | unset | `=1` enables MCP progress notifications. |

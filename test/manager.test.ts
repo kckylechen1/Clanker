@@ -1,12 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { LaneManager, type WaitResult } from "../src/manager.js";
 import { INFRA_FAILURE_TAG } from "../src/failure-classifier.js";
 import { fakeResolver, until } from "./helpers.js";
 
 function makeManager(
-  opts: { stallThresholdMs?: number; sessionTtlMs?: number; turnTimeoutMs?: number } = {},
+  opts: {
+    stallThresholdMs?: number;
+    sessionTtlMs?: number;
+    turnTimeoutMs?: number;
+    capacityRetryBackoffMs?: number;
+  } = {},
 ) {
   return new LaneManager({
     resolveSpec: fakeResolver,
@@ -15,6 +22,7 @@ function makeManager(
     stallThresholdMs: opts.stallThresholdMs ?? 300_000,
     sessionTtlMs: opts.sessionTtlMs ?? 600_000,
     turnTimeoutMs: opts.turnTimeoutMs ?? 2_700_000,
+    capacityRetryBackoffMs: opts.capacityRetryBackoffMs,
   });
 }
 
@@ -120,20 +128,82 @@ test("CP1: a subprocess that exits mid-turn drives the run to error and dispatch
   }
 });
 
-test("a turn-1, zero-tool-call API-schema-rejection is tagged CLANKER-INFRA-FAILURE on both wait and status", async () => {
-  const m = makeManager();
+test("a turn-1, zero-tool-call API-schema-rejection is tagged CLANKER-INFRA-FAILURE on both wait and status, and is never retried", async () => {
+  // capacityRetryBackoffMs is set high enough that a retry (which must NOT
+  // happen for this failure class) would blow the test timeout, making a
+  // wrongful retry fail loudly rather than silently passing.
+  const m = makeManager({ capacityRetryBackoffMs: 10_000 });
   try {
+    const t0 = Date.now();
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "SCHEMA400 please", cwd: os.tmpdir(), readOnly: true });
     const r = await waitTerminal(m, id, 5000);
+    const elapsed = Date.now() - t0;
     assert.equal(r.status, "error");
     assert.equal(r.failure_class, INFRA_FAILURE_TAG);
     assert.match(r.error ?? "", /CLANKER-INFRA-FAILURE/);
     assert.match(r.error ?? "", /重试无益/);
+    assert.ok(elapsed < 3000, `INFRA-FAILURE must fail fast, no retry backoff; took ${elapsed}ms`);
 
     const status = m.status(id);
     assert.equal(status.status, "error");
     assert.equal(status.failure_class, INFRA_FAILURE_TAG);
     assert.match(status.error ?? "", /CLANKER-INFRA-FAILURE/);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("a capacity-transient first-turn failure auto-retries once (after backoff) and succeeds", async () => {
+  const m = makeManager({ capacityRetryBackoffMs: 30 });
+  try {
+    const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-capacity-"));
+    const markerPath = path.join(markerDir, "attempted");
+    const { id } = await m.dispatchStart({
+      lane: "codex",
+      prompt: `CAPACITY_ONCE ${markerPath}`,
+      cwd: os.tmpdir(),
+      readOnly: true,
+    });
+
+    let digest = "";
+    let r = await m.wait(id, 500);
+    digest += r.digest;
+    while (r.status === "running") {
+      r = await m.wait(id, 500);
+      digest += "\n" + r.digest;
+    }
+
+    assert.equal(r.status, "done");
+    assert.ok(
+      r.final_message?.includes("capacity-retry-succeeded"),
+      `expected the second-attempt success marker, got ${JSON.stringify(r.final_message)}`,
+    );
+    assert.ok(
+      digest.includes("transient backend failure, retrying"),
+      `expected a retry note in the digest, got: ${JSON.stringify(digest)}`,
+    );
+    assert.ok(fs.existsSync(markerPath), "marker file written by the first (failing) attempt should exist");
+    assert.equal(r.failure_class, undefined, "a recovered retry must not carry a terminal failure_class");
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("a capacity-transient failure on the SECOND attempt is not retried again (single-retry cap)", async () => {
+  // No marker file ever gets created by this scenario keyword, so every
+  // attempt "at capacity"s — proves the retry budget is exactly one, not
+  // unbounded.
+  const m = makeManager({ capacityRetryBackoffMs: 20 });
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "codex",
+      prompt: "CAPACITY_ALWAYS please",
+      cwd: os.tmpdir(),
+      readOnly: true,
+    });
+    const r = await waitTerminal(m, id, 5000);
+    assert.equal(r.status, "error");
+    assert.match(r.error ?? "", /capacity/i);
   } finally {
     await m.shutdown();
   }

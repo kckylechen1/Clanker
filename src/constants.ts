@@ -38,6 +38,13 @@ export const FINAL_MESSAGE_CHAR_BUDGET = envInt(
   20_000,
 );
 
+/**
+ * Backoff before the single automatic retry of a capacity-transient backend
+ * failure (see failure-classifier.ts isCapacityTransient). Applies only to a
+ * fresh dispatch's first turn — CLANKER-INFRA-FAILURE never retries here.
+ */
+export const CAPACITY_RETRY_BACKOFF_MS = envInt("CLANKER_CAPACITY_RETRY_BACKOFF_MS", 30_000);
+
 /** Experimental: project ACP plan progress as MCP notifications/progress. */
 export const PROGRESS_EXPERIMENTAL = process.env.CLANKER_PROGRESS_EXPERIMENTAL === "1";
 

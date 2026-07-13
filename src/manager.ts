@@ -14,6 +14,7 @@ import path from "node:path";
 import { LaneConnection } from "./acp-client.js";
 import {
   BASE_REPO,
+  CAPACITY_RETRY_BACKOFF_MS,
   DEFAULT_STALL_THRESHOLD_MS,
   DEFAULT_WAIT_MS,
   HANDSHAKE_TIMEOUT_MS,
@@ -22,7 +23,12 @@ import {
   TURN_TIMEOUT_MS,
 } from "./constants.js";
 import { buildSpawnSpec } from "./backends.js";
-import { classifyTurnFailure, INFRA_FAILURE_ADVISORY, INFRA_FAILURE_TAG } from "./failure-classifier.js";
+import {
+  classifyTurnFailure,
+  INFRA_FAILURE_ADVISORY,
+  INFRA_FAILURE_TAG,
+  isCapacityTransient,
+} from "./failure-classifier.js";
 import { LaneRun } from "./run.js";
 import type {
   LaneName,
@@ -73,6 +79,9 @@ export interface LaneListEntry {
 
 export type SpecResolver = (lane: LaneName, opts: LaneRequestOptions, runDir: string) => SpawnSpec;
 
+/** Outcome of one prompt-turn attempt; callers decide terminal-fail vs retry. */
+type TurnOutcome = { ok: true } | { ok: false; message: string };
+
 export interface LaneManagerOptions {
   resolveSpec?: SpecResolver;
   stallThresholdMs?: number;
@@ -84,6 +93,8 @@ export interface LaneManagerOptions {
   baseRepo?: string;
   /** Disable the background reaper (tests drive reaping manually). */
   disableReaper?: boolean;
+  /** Backoff before the single automatic retry of a capacity-transient first-turn failure. */
+  capacityRetryBackoffMs?: number;
 }
 
 const DEFAULT_SESSION_TTL_MS = envInt("CLANKER_SESSION_TTL_MS", 600_000);
@@ -97,6 +108,7 @@ export class LaneManager {
   private readonly turnTimeoutMs: number;
   private readonly handshakeTimeoutMs: number;
   private readonly baseRepo: string;
+  private readonly capacityRetryBackoffMs: number;
   private readonly warningsById = new Map<string, string[]>();
   /** CP6: at most one active clanker_wait per id (single-consumer contract). */
   private readonly activeWaits = new Set<string>();
@@ -110,6 +122,7 @@ export class LaneManager {
     this.turnTimeoutMs = opts.turnTimeoutMs ?? TURN_TIMEOUT_MS;
     this.handshakeTimeoutMs = opts.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
     this.baseRepo = opts.baseRepo ?? BASE_REPO;
+    this.capacityRetryBackoffMs = opts.capacityRetryBackoffMs ?? CAPACITY_RETRY_BACKOFF_MS;
     if (!opts.disableReaper) {
       const period = Math.max(5_000, Math.floor(this.sessionTtlMs / 10));
       this.reaperTimer = setInterval(() => void this.reap(), period);
@@ -193,11 +206,37 @@ export class LaneManager {
     if (!conn) {
       throw new Error(`session '${id}' has no live connection`);
     }
-    void this.runTurn(run, conn, prompt);
+    void this.runTurn(run, conn, prompt).then((outcome) => this.settleTurn(run, outcome));
     return { id };
   }
 
+  /** Resolve a runTurn() outcome into terminal failTurn+close, when it failed. Never retries (only the fresh-dispatch path in attemptInitialTurn does). */
+  private async settleTurn(run: LaneRun, outcome: TurnOutcome): Promise<void> {
+    if (outcome.ok) return;
+    const failureClass = classifyTurnFailure({
+      message: outcome.message,
+      turnsCount: run.turnsCount,
+      toolCalls: run.toolCalls(),
+    });
+    run.failTurn(outcome.message, failureClass);
+    await this.close(run.id);
+  }
+
   private async driveNewSession(run: LaneRun, spec: SpawnSpec, prompt: string): Promise<void> {
+    await this.attemptInitialTurn(run, spec, prompt, 1);
+  }
+
+  /**
+   * Drive the first turn of a fresh dispatch, with one automatic retry when
+   * the failure looks like a transient backend-capacity condition (see
+   * failure-classifier.ts isCapacityTransient). CLANKER-INFRA-FAILURE never
+   * retries here — retrying an identical request against a backend that just
+   * rejected its shape wastes a turn and hides the real signal (2026-07-13
+   * incident: exactly that class was hand-retried 3 times before anyone
+   * noticed). Retry scope is intentionally limited to a fresh dispatch's
+   * first turn — clanker_prompt (session continuation) never retries.
+   */
+  private async attemptInitialTurn(run: LaneRun, spec: SpawnSpec, prompt: string, attempt: number): Promise<void> {
     let conn: LaneConnection;
     try {
       conn = await LaneConnection.connect({
@@ -208,22 +247,52 @@ export class LaneManager {
         handshakeTimeoutMs: this.handshakeTimeoutMs,
       });
     } catch (e) {
-      run.failTurn(errMessage(e));
+      const message = errMessage(e);
+      if (attempt === 1 && isCapacityTransient(message)) {
+        await this.retryAfterBackoff(run, message, attempt + 1);
+        return this.attemptInitialTurn(run, spec, prompt, attempt + 1);
+      }
+      run.failTurn(message);
       return;
     }
     this.connections.set(run.id, conn);
     run.sessionId = conn.sessionId;
-    await this.runTurn(run, conn, prompt);
+
+    const outcome = await this.runTurn(run, conn, prompt);
+    if (outcome.ok) return;
+
+    const failureClass = classifyTurnFailure({
+      message: outcome.message,
+      turnsCount: run.turnsCount,
+      toolCalls: run.toolCalls(),
+    });
+    if (attempt === 1 && failureClass !== INFRA_FAILURE_TAG && isCapacityTransient(outcome.message)) {
+      // Kill the half-dead process/connection (NOT run.close() — that would
+      // also reap the worktree, which the retry needs to reuse) so the retry
+      // spawns a clean process against the backend.
+      this.killConnection(run.id);
+      await this.retryAfterBackoff(run, outcome.message, attempt + 1);
+      return this.attemptInitialTurn(run, spec, prompt, attempt + 1);
+    }
+    run.failTurn(outcome.message, failureClass);
+    await this.close(run.id);
+  }
+
+  private async retryAfterBackoff(run: LaneRun, message: string, nextAttempt: number): Promise<void> {
+    run.recordTransientRetry(message, this.capacityRetryBackoffMs, nextAttempt);
+    await delay(this.capacityRetryBackoffMs);
   }
 
   /**
    * Drive one prompt turn to completion, projecting events into run state.
+   * Returns the outcome instead of failing the run itself — callers decide
+   * terminal-fail vs (for a fresh dispatch's first turn only) retry.
    *
    * CP1: every wait races three outcomes — the next ACP update, subprocess exit,
    * and a hard per-turn timeout — so a turn always reaches a terminal state.
    * suspected_stall stays a warning; this loop is the guaranteed terminal path.
    */
-  private async runTurn(run: LaneRun, conn: LaneConnection, prompt: string): Promise<void> {
+  private async runTurn(run: LaneRun, conn: LaneConnection, prompt: string): Promise<TurnOutcome> {
     run.beginTurn(prompt);
     const promptPromise = conn.session.prompt(prompt);
     promptPromise.catch(() => {
@@ -267,28 +336,23 @@ export class LaneManager {
         }
         if (outcome.m.kind === "stop") {
           await this.finalizeTurn(run, outcome.m.stopReason);
-          return;
+          return { ok: true };
         }
         run.onUpdate(outcome.m.update);
       }
     } catch (e) {
-      const message = errMessage(e);
-      // CLANKER-INFRA-FAILURE: a turn-1, zero-tool-call API-schema rejection
-      // means the backend refused the request shape before the agent did
-      // anything — tag it distinctly from an ordinary content/runtime
-      // failure so wait/status callers know retrying the same shape is
-      // pointless (2026-07-13 incident: this class was hand-retried 3x).
-      const failureClass = classifyTurnFailure({
-        message,
-        turnsCount: run.turnsCount,
-        toolCalls: run.toolCalls(),
-      });
-      run.failTurn(message, failureClass);
-      // A turn that ended on exit/timeout means the session is unusable — close
-      // it (kills the process, cleans the worktree) so it is not reused.
-      await this.close(run.id);
+      return { ok: false, message: errMessage(e) };
     } finally {
       turnTimer.cancel();
+    }
+  }
+
+  /** Kill a run's live connection/process without touching worktree state (used by the capacity-retry respawn path; run.close() is the terminal, worktree-reaping teardown). */
+  private killConnection(runId: string): void {
+    const conn = this.connections.get(runId);
+    if (conn) {
+      conn.close();
+      this.connections.delete(runId);
     }
   }
 
@@ -488,6 +552,14 @@ function createTimeout(ms: number): { promise: Promise<void>; cancel: () => void
     handle.unref?.();
   });
   return { promise, cancel: () => clearTimeout(handle) };
+}
+
+/** Un-cancelable backoff delay, used by the capacity-transient retry path. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const handle = setTimeout(resolve, ms);
+    handle.unref?.();
+  });
 }
 
 function dedupe(items: string[]): string[] {
