@@ -90,6 +90,30 @@ test("codex lane spawns a version-pinned codex-acp, never @latest", () => {
   assert.doesNotMatch(pkgArg!, /@latest$/);
 });
 
+// ---- codex multi_agent_v2 reserved-tool guard (2026-07-13 incident) -----
+//
+// codex-acp only runs Codex in app-server mode, which registers a
+// collaboration.spawn_agent tool whenever multi_agent_v2 is on; the backend
+// rejected that reserved schema for both the default and sol-override codex
+// lanes as a turn-1, zero-tool-call HTTP 400. Clanker dispatches are solo by
+// contract, so this must be off for every codex session regardless of model.
+
+test("codex lane always disables multi_agent_v2 in CODEX_CONFIG, with no model override", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-codex-"));
+  const spec = buildSpawnSpec("codex", {}, runDir);
+  assert.ok(spec.env.CODEX_CONFIG, "CODEX_CONFIG env is set even with no model/effort opts");
+  const cfg = JSON.parse(spec.env.CODEX_CONFIG);
+  assert.equal(cfg.features?.multi_agent_v2?.enabled, false);
+});
+
+test("codex lane keeps multi_agent_v2 disabled alongside a model override (e.g. sol lane)", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-codex-sol-"));
+  const spec = buildSpawnSpec("codex", { model: "gpt-5.6-sol" }, runDir);
+  const cfg = JSON.parse(spec.env.CODEX_CONFIG);
+  assert.equal(cfg.model, "gpt-5.6-sol");
+  assert.equal(cfg.features?.multi_agent_v2?.enabled, false);
+});
+
 // ---- CP5: read-only never auto-approves ---------------------------------
 
 test("CP5: read-only with only an allow option declines (cancelled), never selects allow", () => {

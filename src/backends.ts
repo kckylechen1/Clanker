@@ -46,15 +46,32 @@
  *           acp-client.ts CP5) — a second belt, not a substitute for the
  *           worktree boundary.
  *
+ *           codex-acp only starts Codex in `app-server` mode (never `exec`),
+ *           and app-server registers a `collaboration.spawn_agent` tool
+ *           whenever the (currently "under development") multi_agent_v2
+ *           feature is on — reproduced 2026-07-13 as a turn-1, zero-tool-call
+ *           HTTP 400 ("Function 'collaboration.spawn_agent' is reserved for
+ *           use by this model and must match the configured schema") on both
+ *           the default and sol-override codex lanes; `codex exec` with the
+ *           same model + same global config was unaffected, confirming the
+ *           break is app-server-specific, not a Clanker- or model-side bug.
+ *           Every Clanker codex dispatch is solo by contract (no delegation,
+ *           no sub-agent fan-out), so this tool is dead weight for us even
+ *           when it's healthy. Disable multi_agent_v2 for Clanker's own
+ *           session config only — this does not touch the shared
+ *           ~/.codex/config.toml default (owner may still want it on for
+ *           interactive sessions) and forecloses the whole reserved-schema
+ *           failure class for Clanker regardless of upstream cause.
+ *
  *           The npx spec is version-pinned, not `@latest`. 2026-07-13 incident
  *           precedent: an unpinned `@latest` silently picked up a codex-acp
- *           release whose app-server mode registered a reserved
- *           `collaboration.spawn_agent` tool (multi_agent_v2), breaking every
- *           codex dispatch with a turn-1 400 that nobody could pin to a code
- *           change because the dependency itself had moved under us. Upgrading
- *           codex-acp is now an explicit, reviewable act: bump
- *           `CODEX_ACP_VERSION` below and run `npm run smoke -- codex` (and a
- *           sol-model-override smoke) before trusting the new version.
+ *           release whose app-server mode registered the same reserved
+ *           `collaboration.spawn_agent` tool, breaking every codex dispatch
+ *           with a turn-1 400 that nobody could pin to a code change because
+ *           the dependency itself had moved under us. Upgrading codex-acp is
+ *           now an explicit, reviewable act: bump `CODEX_ACP_VERSION` below
+ *           and run `npm run smoke -- codex` (and a sol-model-override smoke)
+ *           before trusting the new version.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -155,12 +172,16 @@ export function buildSpawnSpec(
     }
 
     case "codex": {
-      const codexConfig: Record<string, unknown> = {};
+      // Clanker dispatches are always solo (no delegation, no sub-agent
+      // fan-out) — never advertise Codex's own multi-agent collaboration
+      // tool into these sessions. See the file header for why this is also
+      // a live-incident guard, not just an unused-capability trim.
+      const codexConfig: Record<string, unknown> = {
+        features: { multi_agent_v2: { enabled: false } },
+      };
       if (opts.model) codexConfig.model = opts.model;
       if (opts.effort) codexConfig.model_reasoning_effort = opts.effort;
-      if (Object.keys(codexConfig).length > 0) {
-        env.CODEX_CONFIG = JSON.stringify(codexConfig);
-      }
+      env.CODEX_CONFIG = JSON.stringify(codexConfig);
       // opts.sandbox (workspace-write middle tier) takes precedence when set;
       // otherwise unchanged legacy behavior derived from readOnly.
       const agentMode = opts.sandbox
