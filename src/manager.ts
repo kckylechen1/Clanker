@@ -22,6 +22,7 @@ import {
   TURN_TIMEOUT_MS,
 } from "./constants.js";
 import { buildSpawnSpec } from "./backends.js";
+import { classifyTurnFailure, INFRA_FAILURE_ADVISORY, INFRA_FAILURE_TAG } from "./failure-classifier.js";
 import { LaneRun } from "./run.js";
 import type {
   LaneName,
@@ -56,6 +57,8 @@ export interface WaitResult {
   plan_final?: RunFinal["plan_final"];
   worktree_retained?: string;
   error?: string;
+  /** Present alongside `error` when classifyTurnFailure tagged it (e.g. CLANKER-INFRA-FAILURE). */
+  failure_class?: string;
 }
 
 export interface LaneListEntry {
@@ -269,7 +272,18 @@ export class LaneManager {
         run.onUpdate(outcome.m.update);
       }
     } catch (e) {
-      run.failTurn(errMessage(e));
+      const message = errMessage(e);
+      // CLANKER-INFRA-FAILURE: a turn-1, zero-tool-call API-schema rejection
+      // means the backend refused the request shape before the agent did
+      // anything — tag it distinctly from an ordinary content/runtime
+      // failure so wait/status callers know retrying the same shape is
+      // pointless (2026-07-13 incident: this class was hand-retried 3x).
+      const failureClass = classifyTurnFailure({
+        message,
+        turnsCount: run.turnsCount,
+        toolCalls: run.toolCalls(),
+      });
+      run.failTurn(message, failureClass);
       // A turn that ended on exit/timeout means the session is unusable — close
       // it (kills the process, cleans the worktree) so it is not reused.
       await this.close(run.id);
@@ -349,7 +363,8 @@ export class LaneManager {
       result.final_message = run.finalMessage();
       result.touched_files = run.finalTouched();
       result.plan_final = run.planState();
-      if (run.error) result.error = run.error;
+      if (run.error) result.error = annotatedError(run.error, run.failureClass);
+      if (run.failureClass) result.failure_class = run.failureClass;
       if (run.worktreeRetained) result.worktree_retained = run.worktreeRetained;
     }
     return result;
@@ -360,7 +375,7 @@ export class LaneManager {
   status(id: string): LaneStatusView {
     const run = this.runs.get(id);
     if (!run) throw new Error(`run '${id}' not found`);
-    return {
+    const view: LaneStatusView = {
       id: run.id,
       lane: run.lane,
       status: run.turnStatus,
@@ -372,6 +387,11 @@ export class LaneManager {
       cwd: run.cwd,
       ...(run.worktreePath ? { worktree: run.worktreePath } : {}),
     };
+    if (run.turnStatus === "error" && run.error) {
+      view.error = annotatedError(run.error, run.failureClass);
+      if (run.failureClass) view.failure_class = run.failureClass;
+    }
+    return view;
   }
 
   list(): LaneListEntry[] {
@@ -450,6 +470,14 @@ export class LaneManager {
 
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** Append the human-readable infra-failure advisory to an error message when classified. */
+function annotatedError(message: string, failureClass: string | undefined): string {
+  if (failureClass === INFRA_FAILURE_TAG) {
+    return `${message}\n\n[${INFRA_FAILURE_TAG}] ${INFRA_FAILURE_ADVISORY}`;
+  }
+  return message;
 }
 
 /** A cancelable timeout whose promise resolves after `ms`. */

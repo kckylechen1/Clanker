@@ -53,6 +53,8 @@ export class LaneRun {
   turnsCount = 0;
   sessionClosed = false;
   error?: string;
+  /** Set alongside `error` when the failure was classified (see failure-classifier.ts). */
+  failureClass?: string;
   sessionId?: string;
   worktreeRetained?: string;
 
@@ -117,13 +119,19 @@ export class LaneRun {
     this.touch("turn_done");
   }
 
-  failTurn(message: string): void {
+  /**
+   * @param failureClass optional classification tag (e.g. CLANKER-INFRA-FAILURE)
+   *   from failure-classifier.ts, surfaced verbatim to wait/status callers.
+   */
+  failTurn(message: string, failureClass?: string): void {
     this.flushMessageDigest();
     this.turnStatus = "error";
     this.error = message;
+    this.failureClass = failureClass;
     this.idleSince = Date.now();
-    this.pushDigest(`✗ error: ${truncate(message, 200)}`);
-    this.writeEvent({ t: "turn_error", turn: this.turnsCount, message });
+    const tag = failureClass ? ` [${failureClass}]` : "";
+    this.pushDigest(`✗ error: ${truncate(message, 200)}${tag}`);
+    this.writeEvent({ t: "turn_error", turn: this.turnsCount, message, failureClass });
     this.touch("turn_error");
   }
 

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import { LaneManager, type WaitResult } from "../src/manager.js";
+import { INFRA_FAILURE_TAG } from "../src/failure-classifier.js";
 import { fakeResolver, until } from "./helpers.js";
 
 function makeManager(
@@ -114,6 +115,25 @@ test("CP1: a subprocess that exits mid-turn drives the run to error and dispatch
     const r = await waitTerminal(m, id, 5000);
     assert.equal(r.status, "error");
     assert.match(r.error ?? "", /exited mid-turn/);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("a turn-1, zero-tool-call API-schema-rejection is tagged CLANKER-INFRA-FAILURE on both wait and status", async () => {
+  const m = makeManager();
+  try {
+    const { id } = await m.dispatchStart({ lane: "codex", prompt: "SCHEMA400 please", cwd: os.tmpdir(), readOnly: true });
+    const r = await waitTerminal(m, id, 5000);
+    assert.equal(r.status, "error");
+    assert.equal(r.failure_class, INFRA_FAILURE_TAG);
+    assert.match(r.error ?? "", /CLANKER-INFRA-FAILURE/);
+    assert.match(r.error ?? "", /重试无益/);
+
+    const status = m.status(id);
+    assert.equal(status.status, "error");
+    assert.equal(status.failure_class, INFRA_FAILURE_TAG);
+    assert.match(status.error ?? "", /CLANKER-INFRA-FAILURE/);
   } finally {
     await m.shutdown();
   }

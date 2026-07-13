@@ -10,8 +10,18 @@
  *   SLOW     -> stream two message chunks with delays, then end_turn.
  *   STALL    -> emit one tool_call then never respond (simulated hang).
  *   CANCELME -> emit a tool_call then wait; respond `cancelled` on session/cancel.
+ *   SCHEMA400 -> exit(1) immediately with zero tool_calls and stderr shaped like a
+ *               turn-1 API-schema-rejection 400 (invalid_request_error, param:"tools")
+ *               — simulates the 2026-07-13 incident class for CLANKER-INFRA-FAILURE
+ *               classification tests. Never recovers, never retried.
+ *   CAPACITY_ONCE <marker-file> -> first invocation (marker file absent) exits(1) with
+ *               stderr shaped like a transient "model at capacity" backend error; every
+ *               subsequent invocation (marker file present, written by the first) succeeds
+ *               normally. Simulates a capacity-transient failure that a single automatic
+ *               retry should recover from.
  *   <other>  -> emit one agent_message_chunk equal to the prompt, then end_turn.
  */
+import fs from "node:fs";
 import readline from "node:readline";
 
 const out = process.stdout;
@@ -80,6 +90,30 @@ async function runPrompt(id, sessionId, promptText) {
       status: "in_progress",
     });
     setTimeout(() => process.exit(1), 30);
+    return;
+  }
+
+  if (p.includes("SCHEMA400")) {
+    // Zero tool_call events emitted, then a mid-turn crash whose stderr looks
+    // like an API-level schema rejection — no update at all, straight to exit.
+    process.stderr.write(
+      '{"error":{"type":"invalid_request_error","message":"Invalid Value: \'tools\'. Function \'collaboration.spawn_agent\' is reserved for use by this model and must match the configured schema.","param":"tools"}}\n',
+    );
+    setTimeout(() => process.exit(1), 20);
+    return;
+  }
+
+  if (p.includes("CAPACITY_ONCE")) {
+    const m = promptText.match(/CAPACITY_ONCE\s+(\S+)/);
+    const markerPath = m ? m[1] : null;
+    if (markerPath && !fs.existsSync(markerPath)) {
+      fs.writeFileSync(markerPath, "1");
+      process.stderr.write('{"error":{"type":"overloaded_error","message":"model at capacity, please retry"}}\n');
+      setTimeout(() => process.exit(1), 20);
+      return;
+    }
+    update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock("capacity-retry-succeeded") });
+    respond(id, { stopReason: "end_turn" });
     return;
   }
 

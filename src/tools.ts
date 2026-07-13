@@ -92,7 +92,7 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
     "clanker_wait",
     {
       title: "Long-poll a Clanker run",
-      description: `Wait up to timeout_ms (default ${DEFAULT_WAIT_MS}, cap ${MAX_WAIT_MS}) for new events or completion. Returns {status, digest, plan_summary, last_event_age_ms, suspected_stall}; when status is terminal also {final_message, touched_files, plan_final}. digest is a human-readable summary of events since the previous wait — tool titles, file writes, plan check changes, key message sentences.`,
+      description: `Wait up to timeout_ms (default ${DEFAULT_WAIT_MS}, cap ${MAX_WAIT_MS}) for new events or completion. Returns {status, digest, plan_summary, last_event_age_ms, suspected_stall}; when status is terminal also {final_message, touched_files, plan_final}, and on error also {error, failure_class}. digest is a human-readable summary of events since the previous wait — tool titles, file writes, plan check changes, key message sentences. failure_class="CLANKER-INFRA-FAILURE" means the backend rejected the request shape on turn 1 with zero tool calls — retrying the identical dispatch is pointless; run a smoke check first.`,
       inputSchema: {
         id: z.string().describe("Run id from clanker_dispatch_start / clanker_dispatch"),
         timeout_ms: z
@@ -160,7 +160,7 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
     {
       title: "Cheap status of a Clanker run",
       description:
-        "Return {status, plan (checkbox counts + current step), tool_calls, last_event_age_ms, suspected_stall}. Does not wait. suspected_stall flags a running turn silent past the stall threshold.",
+        "Return {status, plan (checkbox counts + current step), tool_calls, last_event_age_ms, suspected_stall}. Does not wait. suspected_stall flags a running turn silent past the stall threshold. When status is \"error\" also returns {error, failure_class}; failure_class=\"CLANKER-INFRA-FAILURE\" means the backend rejected the request shape before the agent did anything — retrying the identical dispatch is pointless.",
       inputSchema: { id: z.string().describe("Run id") },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },

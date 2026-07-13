@@ -54,6 +54,10 @@ export interface LaneStatusView {
   suspected_stall: boolean;
   cwd: string;
   worktree?: string;
+  /** Present when status is "error" — same text clanker_wait would surface (advisory-annotated for infra failures). */
+  error?: string;
+  /** Present alongside `error` when classifyTurnFailure tagged it (e.g. CLANKER-INFRA-FAILURE). */
+  failure_class?: string;
 }
 
 /** Result payload attached once a run reaches a terminal state. */
