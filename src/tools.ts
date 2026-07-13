@@ -51,6 +51,17 @@ const dispatchShape = {
         "~/.config/opencode/agents/<name>.md) to load via OPENCODE_CONFIG's default_agent. " +
         "Unset preserves opencode's own default. Ignored (warned) on codex/grok.",
     ),
+  seat: z
+    .boolean()
+    .optional()
+    .describe(
+      "If true, this run is a persistent seat: the idle-TTL reaper only kills the backend " +
+        "subprocess (never the session/worktree), and clanker_prompt on a dead-process seat " +
+        "transparently respawns + resumes the same ACP session via session/resume. Verified " +
+        "against opencode; codex/grok backends don't implement session/resume, so resuming a " +
+        "dead-process seat on those lanes surfaces an error instead of reconnecting. Use " +
+        "clanker_close to explicitly end a seat.",
+    ),
 } as const;
 
 function progressSender(extra: unknown): ((r: WaitResult) => void) | undefined {
@@ -219,6 +230,28 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
     },
     async () => ok({ clankers: manager.list() }),
   );
+
+  server.registerTool(
+    "clanker_close",
+    {
+      title: "Explicitly close a Clanker session",
+      description:
+        "Terminal close: disposes the ACP session, kills the subprocess, and cleans the worktree " +
+        "if unchanged (retained if dirty, same as the idle-TTL reaper's non-seat path). Seat runs " +
+        "are never closed by the idle-TTL reaper (it only kills the subprocess, keeping the session " +
+        "resumable) — this is how a seat gets deliberately ended. No-op if already closed.",
+      inputSchema: { id: z.string().describe("Run id") },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    async (args) => {
+      try {
+        await manager.close(args.id);
+        return ok({ id: args.id, closed: true });
+      } catch (e) {
+        return fail(msg(e));
+      }
+    },
+  );
 }
 
 function toDispatch(args: {
@@ -231,6 +264,7 @@ function toDispatch(args: {
   read_only?: boolean;
   sandbox?: CodexSandboxMode;
   agent?: string;
+  seat?: boolean;
 }) {
   return {
     lane: args.lane,
@@ -242,6 +276,7 @@ function toDispatch(args: {
     readOnly: args.read_only,
     sandbox: args.sandbox,
     agent: args.agent,
+    seat: args.seat,
   };
 }
 

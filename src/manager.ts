@@ -46,6 +46,12 @@ export interface DispatchParams extends LaneRequestOptions {
   prompt: string;
   cwd?: string;
   worktree?: string;
+  /**
+   * Persistent seat (see LaneRun.seat doc). Exempts this run from the
+   * idle-TTL reaper's terminal close(); clanker_prompt on a dead-process
+   * seat respawns + session/resumes instead of failing.
+   */
+  seat?: boolean;
 }
 
 export interface WaitResult {
@@ -188,6 +194,8 @@ export class LaneManager {
       readOnly,
       worktreeBranch: params.worktree,
       worktreePath,
+      seat: params.seat,
+      requestOpts: opts,
     });
     this.runs.set(id, run);
 
@@ -195,7 +203,16 @@ export class LaneManager {
     return { id, warnings: spec.warnings };
   }
 
-  /** Start a new turn on an existing, still-open session. */
+  /**
+   * Start a new turn on an existing, still-open session.
+   *
+   * A seat run can lose its live connection without being sessionClosed —
+   * the idle-TTL reaper only kills a seat's subprocess (see reap()), keeping
+   * the run around specifically so this path can respawn + session/resume
+   * instead of failing. Non-seat runs are unaffected: their connection is
+   * only ever missing after a full close() (which also flips sessionClosed),
+   * so they still hit the "not found or already reaped" branch above.
+   */
   async promptExisting(id: string, prompt: string): Promise<{ id: string }> {
     const run = this.runs.get(id);
     if (!run || run.sessionClosed) {
@@ -204,12 +221,63 @@ export class LaneManager {
     if (run.turnStatus === "running") {
       throw new Error(`session '${id}' already has a turn in progress`);
     }
-    const conn = this.connections.get(id);
+    let conn = this.connections.get(id);
     if (!conn) {
-      throw new Error(`session '${id}' has no live connection`);
+      if (!run.seat || !run.sessionId) {
+        throw new Error(`session '${id}' has no live connection`);
+      }
+      conn = await this.resumeConnection(run);
     }
     void this.runTurn(run, conn, prompt).then((outcome) => this.settleTurn(run, outcome));
     return { id };
+  }
+
+  /**
+   * Respawn a seat's subprocess and reconnect to its known ACP session via
+   * session/resume (see acp-client.ts resumeSession). Throws if the backend
+   * doesn't support session/resume or the spawn/handshake otherwise fails —
+   * that failure surfaces straight to the promptExisting caller, since a
+   * failed resume attempt is a real, reportable error, not a silent fallback.
+   */
+  private async resumeConnection(run: LaneRun): Promise<LaneConnection> {
+    const spec = this.resolveSpec(run.lane, run.requestOpts, run.runDir);
+    const conn = await LaneConnection.connect({
+      spec,
+      cwd: run.cwd,
+      readOnly: run.readOnly,
+      onFileWritten: (p) => run.recordFileWritten(p),
+      handshakeTimeoutMs: this.handshakeTimeoutMs,
+      resumeSessionId: run.sessionId,
+    });
+    this.connections.set(run.id, conn);
+    run.sessionId = conn.sessionId;
+    this.writeSeatFile(run);
+    return conn;
+  }
+
+  /**
+   * Persist seat metadata to <runDir>/seat.json. Never deleted by close() —
+   * the file is the durable record a caller can use to know what to resume,
+   * even past a terminal close (clanker_close / a genuine turn failure).
+   * No-op for non-seat runs.
+   */
+  private writeSeatFile(run: LaneRun): void {
+    if (!run.seat) return;
+    const payload = {
+      id: run.id,
+      lane: run.lane,
+      cwd: run.cwd,
+      worktree: run.worktreePath,
+      sessionId: run.sessionId,
+      model: run.requestOpts.model,
+      agent: run.requestOpts.agent,
+      updatedAt: new Date().toISOString(),
+    };
+    try {
+      fs.writeFileSync(path.join(run.runDir, "seat.json"), JSON.stringify(payload, null, 2));
+    } catch (err) {
+      console.error(`[clanker] failed to write seat.json for '${run.id}': ${errMessage(err)}`);
+    }
   }
 
   /** Resolve a runTurn() outcome into terminal failTurn+close, when it failed. Never retries (only the fresh-dispatch path in attemptInitialTurn does). */
@@ -259,6 +327,7 @@ export class LaneManager {
     }
     this.connections.set(run.id, conn);
     run.sessionId = conn.sessionId;
+    this.writeSeatFile(run);
 
     const outcome = await this.runTurn(run, conn, prompt);
     if (outcome.ok) return;
@@ -511,12 +580,29 @@ export class LaneManager {
     run.markClosed();
   }
 
-  /** Reap idle sessions past TTL. Exposed for tests. */
+  /**
+   * Reap idle sessions past TTL. Exposed for tests.
+   *
+   * Seat runs get a soft reap: only the subprocess is killed (process death),
+   * never the session/worktree (session death) — `sessionClosed` stays false
+   * so clanker_prompt can respawn + session/resume later (promptExisting).
+   * Non-seat runs are unaffected: full close() as before.
+   */
   async reap(): Promise<string[]> {
     const reaped: string[] = [];
     for (const run of [...this.runs.values()]) {
       if (run.sessionClosed) continue;
       if (run.turnStatus !== "running" && run.idleMs() > this.sessionTtlMs) {
+        if (run.seat) {
+          // Only soft-reap once: after the first pass connections.has(id) is
+          // false, so subsequent reaper ticks skip a dead seat silently
+          // instead of re-reporting it every tick.
+          if (this.connections.has(run.id)) {
+            this.killConnection(run.id);
+            reaped.push(run.id);
+          }
+          continue;
+        }
         await this.close(run.id);
         reaped.push(run.id);
       }

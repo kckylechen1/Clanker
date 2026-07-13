@@ -18,6 +18,7 @@ import type {
 import { DIGEST_CHAR_BUDGET, FINAL_MESSAGE_CHAR_BUDGET } from "./constants.js";
 import type {
   LaneName,
+  LaneRequestOptions,
   PlanEntrySnapshot,
   PlanState,
   RunStatus,
@@ -48,6 +49,19 @@ export class LaneRun {
   readonly readOnly: boolean;
   readonly runDir: string;
   readonly createdAt = Date.now();
+  /**
+   * True for a persistent seat (clanker_dispatch_start seat=true). Seats are
+   * exempt from the idle-TTL reaper's terminal close(): reap() only kills the
+   * subprocess, leaving `sessionClosed` false so clanker_prompt can respawn +
+   * session/resume the same ACP session (see LaneManager.resumeConnection).
+   */
+  readonly seat: boolean;
+  /**
+   * The exact LaneRequestOptions the spec resolver was originally called
+   * with — retained so a seat can be respawned with an identical spec
+   * (model/agent/sandbox/readOnly) after its subprocess dies.
+   */
+  readonly requestOpts: LaneRequestOptions;
 
   turnStatus: RunStatus = "running";
   turnsCount = 0;
@@ -86,6 +100,8 @@ export class LaneRun {
     readOnly: boolean;
     worktreeBranch?: string;
     worktreePath?: string;
+    seat?: boolean;
+    requestOpts?: LaneRequestOptions;
   }) {
     this.id = init.id;
     this.lane = init.lane;
@@ -94,6 +110,8 @@ export class LaneRun {
     this.readOnly = init.readOnly;
     this.worktreeBranch = init.worktreeBranch;
     this.worktreePath = init.worktreePath;
+    this.seat = init.seat ?? false;
+    this.requestOpts = init.requestOpts ?? {};
   }
 
   // ---- lifecycle ----------------------------------------------------------
