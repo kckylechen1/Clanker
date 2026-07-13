@@ -29,6 +29,22 @@ test("CP3: opencode lane writes the resolved full model id into OPENCODE_CONFIG"
   assert.equal(cfg.model, "zhipuai-coding-plan/glm-5.2");
 });
 
+// ---- codex-acp version pin (2026-07-13 version-drift incident) ----------
+//
+// An unpinned `@latest` npx spec let a codex-acp release change the wire
+// behavior out from under Clanker with no diff to review. The spawn spec
+// must carry an explicit `@<version>`, never bare `@latest`.
+
+test("codex lane spawns a version-pinned codex-acp, never @latest", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-codex-pin-"));
+  const spec = buildSpawnSpec("codex", {}, runDir);
+  assert.equal(spec.command, "npx");
+  const pkgArg = spec.args.find((a) => a.startsWith("@agentclientprotocol/codex-acp"));
+  assert.ok(pkgArg, `expected an @agentclientprotocol/codex-acp arg, got ${JSON.stringify(spec.args)}`);
+  assert.match(pkgArg!, /^@agentclientprotocol\/codex-acp@\d+\.\d+\.\d+$/, "must be pinned to a concrete semver, not @latest");
+  assert.doesNotMatch(pkgArg!, /@latest$/);
+});
+
 // ---- CP5: read-only never auto-approves ---------------------------------
 
 test("CP5: read-only with only an allow option declines (cancelled), never selects allow", () => {

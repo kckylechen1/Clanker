@@ -12,15 +12,32 @@
  *           supplied via OPENCODE_CONFIG pointing at a per-run JSON config
  *           ({"model":"provider/model"}). opencode has no ACP-mode reasoning
  *           effort knob (that is the `--variant` run flag), so effort warns.
- * - codex   `npx -y @agentclientprotocol/codex-acp` — model + reasoning effort
- *           via CODEX_CONFIG (JSON merged into the Codex session config:
- *           {"model":...,"model_reasoning_effort":...}); read-only via
- *           INITIAL_AGENT_MODE (read-only | agent-full-access).
+ * - codex   `npx -y @agentclientprotocol/codex-acp@<CODEX_ACP_VERSION>` — model +
+ *           reasoning effort via CODEX_CONFIG (JSON merged into the Codex
+ *           session config: {"model":...,"model_reasoning_effort":...});
+ *           read-only via INITIAL_AGENT_MODE (read-only | agent-full-access).
+ *
+ *           The npx spec is version-pinned, not `@latest`. 2026-07-13 incident
+ *           precedent: an unpinned `@latest` silently picked up a codex-acp
+ *           release whose app-server mode registered a reserved
+ *           `collaboration.spawn_agent` tool (multi_agent_v2), breaking every
+ *           codex dispatch with a turn-1 400 that nobody could pin to a code
+ *           change because the dependency itself had moved under us. Upgrading
+ *           codex-acp is now an explicit, reviewable act: bump
+ *           `CODEX_ACP_VERSION` below and run `npm run smoke -- codex` (and a
+ *           sol-model-override smoke) before trusting the new version.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { resolveOcModel } from "./constants.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "./types.js";
+
+/**
+ * Pinned `@agentclientprotocol/codex-acp` version. Verified-working as of
+ * 2026-07-13 (see file header). Never widen this back to `@latest` — bump it
+ * deliberately and re-smoke.
+ */
+const CODEX_ACP_VERSION = "1.1.2";
 
 interface LaneCapabilities {
   model: boolean;
@@ -90,7 +107,12 @@ export function buildSpawnSpec(
         env.CODEX_CONFIG = JSON.stringify(codexConfig);
       }
       env.INITIAL_AGENT_MODE = opts.readOnly ? "read-only" : "agent-full-access";
-      return { command: "npx", args: ["-y", "@agentclientprotocol/codex-acp"], env, warnings };
+      return {
+        command: "npx",
+        args: ["-y", `@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}`],
+        env,
+        warnings,
+      };
     }
   }
 }
