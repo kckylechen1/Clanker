@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { LaneManager, type WaitResult } from "../src/manager.js";
+import { LaneManager, type SpecResolver, type WaitResult } from "../src/manager.js";
 import { INFRA_FAILURE_TAG } from "../src/failure-classifier.js";
-import { fakeResolver, until } from "./helpers.js";
+import type { LaneRequestOptions } from "../src/types.js";
+import { fakeResolver, fakeSpec, until } from "./helpers.js";
 
 function makeManager(
   opts: {
@@ -204,6 +205,38 @@ test("a capacity-transient failure on the SECOND attempt is not retried again (s
     const r = await waitTerminal(m, id, 5000);
     assert.equal(r.status, "error");
     assert.match(r.error ?? "", /capacity/i);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("dispatchStart forwards the sandbox override through to the spec resolver", async () => {
+  // Regression coverage: dispatchStart's LaneRequestOptions construction once
+  // dropped `sandbox` on the floor (only model/effort/readOnly were forwarded)
+  // — a resolveSpec spy is the only way to catch that class of gap, since
+  // buildSpawnSpec-level unit tests can't see whether the manager ever calls
+  // it with the field populated.
+  let capturedOpts: LaneRequestOptions | undefined;
+  const spy: SpecResolver = (_lane, opts) => {
+    capturedOpts = opts;
+    return fakeSpec();
+  };
+  const m = new LaneManager({ resolveSpec: spy, disableReaper: true, baseRepo: os.tmpdir() });
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "codex",
+      prompt: "hi",
+      cwd: os.tmpdir(),
+      readOnly: true,
+      sandbox: "workspace-write",
+    });
+    assert.equal(capturedOpts?.sandbox, "workspace-write");
+    // fakeSpec() spawns a real fake-agent process via the fire-and-forget
+    // driveNewSession chain; wait for it to reach a terminal state so
+    // shutdown() below actually has a live connection to close (otherwise
+    // the connect+turn races past this test's own lifecycle and orphans the
+    // child process into whichever test runs next).
+    await waitTerminal(m, id);
   } finally {
     await m.shutdown();
   }

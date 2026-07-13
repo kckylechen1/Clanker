@@ -74,6 +74,22 @@ worktree**: a `--write` dispatch (`read_only: false`) is *required* to run in a
 server-created git worktree cut from `origin/main`, and the server rejects a write whose
 `cwd` resolves inside the primary checkout. Writes never touch the main working tree.
 
+### Review seats that need to actually run tests: `sandbox: "workspace-write"`
+
+`INITIAL_AGENT_MODE=read-only` (codex's native mode under `read_only: true`) blocks *all*
+writes at the OS-sandbox level — including build/test-cache writes a review seat needs for
+`cargo test` / `go test` to run at all, which is why such runs have historically ended up
+Not-checked. `agent-full-access` (the `read_only: false` default) fixes that but drops the
+sandbox entirely.
+
+`clanker_dispatch`'s `sandbox` param (codex-only) exposes the middle tier codex-acp itself
+supports: `sandbox: "workspace-write"` boxes writes to the session cwd + tmp, independent of
+`read_only`. **Recommended review-seat recipe: `worktree: <branch>` (isolation boundary) +
+`sandbox: "workspace-write"` (writes allowed, but boxed to that worktree)** — test tooling
+can now write its caches, and the worktree — not this repo's main checkout — contains the
+blast radius. `read_only: true` can still be set alongside it; it independently gates this
+client's own file-write RPC handler and permission auto-decline, a second belt.
+
 ## Caveat: MCP tool names in agent frontmatter
 
 The Clanker agents restrict `tools:` to `mcp__plugin_clanker_clanker__clanker_dispatch_start` and

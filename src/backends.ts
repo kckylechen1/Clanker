@@ -15,7 +15,29 @@
  * - codex   `npx -y @agentclientprotocol/codex-acp@<CODEX_ACP_VERSION>` — model +
  *           reasoning effort via CODEX_CONFIG (JSON merged into the Codex
  *           session config: {"model":...,"model_reasoning_effort":...});
- *           read-only via INITIAL_AGENT_MODE (read-only | agent-full-access).
+ *           sandbox strictness via INITIAL_AGENT_MODE. Verified against the
+ *           codex-acp 1.1.2 source (src/AgentMode.ts): three modes exist, not
+ *           two — `read-only` (readOnly sandbox, no writes at all), `agent`
+ *           (workspaceWrite sandbox: writes boxed to the session cwd + tmp —
+ *           this is the middle tier `opts.sandbox="workspace-write"` maps
+ *           to), and `agent-full-access` (dangerFullAccess: writes anywhere,
+ *           no sandbox). Without an explicit `opts.sandbox`, behavior is
+ *           unchanged from before this option existed: `readOnly ?
+ *           "read-only" : "agent-full-access"` — the workspace-write middle
+ *           tier is opt-in only.
+ *
+ *           Recommended usage for a review seat that needs to actually run
+ *           `cargo test`/`go test` (not just read code): dispatch into a
+ *           detached worktree (`worktree: <branch>`) with `sandbox:
+ *           "workspace-write"`. That pairing is what closes the "review seat
+ *           can't run tests, everything ends up Not-checked" gap — test
+ *           tooling can write build/test caches inside the worktree, while
+ *           the worktree boundary (not this repo's main checkout) contains
+ *           the blast radius. `read_only: true` can still be set alongside
+ *           it: it independently gates this client's own fs/write_text_file
+ *           RPC handler and permission-request auto-decline (see
+ *           acp-client.ts CP5) — a second belt, not a substitute for the
+ *           worktree boundary.
  *
  *           The npx spec is version-pinned, not `@latest`. 2026-07-13 incident
  *           precedent: an unpinned `@latest` silently picked up a codex-acp
@@ -44,12 +66,25 @@ interface LaneCapabilities {
   effort: boolean;
   /** Whether the CLI enforces read-only at its own layer (vs client gate). */
   nativeReadOnly: boolean;
+  /** Whether the CLI exposes a mid-strictness native sandbox tier (see CodexSandboxMode). */
+  sandbox: boolean;
 }
 
 const CAPS: Record<LaneName, LaneCapabilities> = {
-  codex: { model: true, effort: true, nativeReadOnly: true },
-  opencode: { model: true, effort: false, nativeReadOnly: false },
-  grok: { model: true, effort: true, nativeReadOnly: false },
+  codex: { model: true, effort: true, nativeReadOnly: true, sandbox: true },
+  opencode: { model: true, effort: false, nativeReadOnly: false, sandbox: false },
+  grok: { model: true, effort: true, nativeReadOnly: false, sandbox: false },
+};
+
+/**
+ * Maps the public `sandbox` option (CodexSandboxMode, mirroring codex-acp's
+ * own sandboxMode labels) onto codex-acp's INITIAL_AGENT_MODE id. See the
+ * file header for the codex-acp 1.1.2 source verification.
+ */
+const SANDBOX_TO_AGENT_MODE: Record<string, string> = {
+  "read-only": "read-only",
+  "workspace-write": "agent",
+  "danger-full-access": "agent-full-access",
 };
 
 /**
@@ -72,6 +107,9 @@ export function buildSpawnSpec(
   }
   if (opts.effort && !caps.effort) {
     warnings.push(`lane '${lane}' does not support reasoning-effort override; ignoring effort='${opts.effort}'`);
+  }
+  if (opts.sandbox && !caps.sandbox) {
+    warnings.push(`lane '${lane}' does not support sandbox override; ignoring sandbox='${opts.sandbox}'`);
   }
 
   switch (lane) {
@@ -106,7 +144,14 @@ export function buildSpawnSpec(
       if (Object.keys(codexConfig).length > 0) {
         env.CODEX_CONFIG = JSON.stringify(codexConfig);
       }
-      env.INITIAL_AGENT_MODE = opts.readOnly ? "read-only" : "agent-full-access";
+      // opts.sandbox (workspace-write middle tier) takes precedence when set;
+      // otherwise unchanged legacy behavior derived from readOnly.
+      const agentMode = opts.sandbox
+        ? (SANDBOX_TO_AGENT_MODE[opts.sandbox] ?? (opts.readOnly ? "read-only" : "agent-full-access"))
+        : opts.readOnly
+          ? "read-only"
+          : "agent-full-access";
+      env.INITIAL_AGENT_MODE = agentMode;
       return {
         command: "npx",
         args: ["-y", `@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}`],

@@ -11,7 +11,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { DEFAULT_WAIT_MS, MAX_WAIT_MS, PROGRESS_EXPERIMENTAL } from "./constants.js";
 import type { LaneManager, WaitResult } from "./manager.js";
-import { LANE_NAMES, type LaneName } from "./types.js";
+import { LANE_NAMES, type CodexSandboxMode, type LaneName } from "./types.js";
 
 // Single source of truth: LANE_NAMES (src/types.ts) drives this enum, so
 // adding/removing a lane only requires touching that one array. Exported
@@ -33,6 +33,16 @@ const dispatchShape = {
     .describe("Model override, e.g. 'zhipuai-coding-plan/glm-5.2' (opencode) — warned & echoed if the Clanker can't honor it"),
   effort: z.string().optional().describe("Reasoning effort override (codex/grok only)"),
   read_only: z.boolean().optional().describe("If true, the Clanker is gated read-only (default false)"),
+  sandbox: z
+    .enum(["read-only", "workspace-write", "danger-full-access"])
+    .optional()
+    .describe(
+      "codex-only native sandbox strictness override (independent of read_only). " +
+        "\"workspace-write\" boxes writes to the session cwd + tmp — the review-seat recipe " +
+        "is worktree + sandbox=\"workspace-write\", so cargo/go test can actually run instead " +
+        "of being Not-checked. Unset preserves legacy behavior (read_only ? read-only : danger-full-access). " +
+        "Ignored (warned) on grok/opencode — they have no native sandbox tier.",
+    ),
 } as const;
 
 function progressSender(extra: unknown): ((r: WaitResult) => void) | undefined {
@@ -211,6 +221,7 @@ function toDispatch(args: {
   model?: string;
   effort?: string;
   read_only?: boolean;
+  sandbox?: CodexSandboxMode;
 }) {
   return {
     lane: args.lane,
@@ -220,6 +231,7 @@ function toDispatch(args: {
     model: args.model,
     effort: args.effort,
     readOnly: args.read_only,
+    sandbox: args.sandbox,
   };
 }
 

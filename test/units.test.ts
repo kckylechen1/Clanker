@@ -29,6 +29,51 @@ test("CP3: opencode lane writes the resolved full model id into OPENCODE_CONFIG"
   assert.equal(cfg.model, "zhipuai-coding-plan/glm-5.2");
 });
 
+// ---- codex sandbox override (review-seat workspace-write tier) ----------
+//
+// Verified against codex-acp 1.1.2 source (src/AgentMode.ts): INITIAL_AGENT_MODE
+// accepts three ids ("read-only" | "agent" | "agent-full-access"), not the two
+// this lane previously exposed. `sandbox` maps codex-acp's own sandboxMode
+// vocabulary ("read-only" | "workspace-write" | "danger-full-access") onto
+// those ids and takes precedence over the readOnly-derived legacy default.
+
+test("codex sandbox='workspace-write' maps to INITIAL_AGENT_MODE=agent (the review-seat middle tier)", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-sandbox-"));
+  const spec = buildSpawnSpec("codex", { readOnly: true, sandbox: "workspace-write" }, runDir);
+  assert.equal(spec.env.INITIAL_AGENT_MODE, "agent");
+  assert.deepEqual(spec.warnings, []);
+});
+
+test("codex sandbox='read-only' and 'danger-full-access' map to the matching INITIAL_AGENT_MODE ids", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-sandbox-"));
+  assert.equal(buildSpawnSpec("codex", { sandbox: "read-only" }, runDir).env.INITIAL_AGENT_MODE, "read-only");
+  assert.equal(
+    buildSpawnSpec("codex", { sandbox: "danger-full-access" }, runDir).env.INITIAL_AGENT_MODE,
+    "agent-full-access",
+  );
+});
+
+test("codex with no sandbox override preserves legacy readOnly-derived behavior", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-sandbox-"));
+  assert.equal(buildSpawnSpec("codex", { readOnly: true }, runDir).env.INITIAL_AGENT_MODE, "read-only");
+  assert.equal(buildSpawnSpec("codex", { readOnly: false }, runDir).env.INITIAL_AGENT_MODE, "agent-full-access");
+});
+
+test("codex sandbox override takes precedence over readOnly when both are set", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-sandbox-"));
+  // readOnly: true would legacy-derive "read-only", but sandbox explicitly asks for the middle tier.
+  const spec = buildSpawnSpec("codex", { readOnly: true, sandbox: "workspace-write" }, runDir);
+  assert.equal(spec.env.INITIAL_AGENT_MODE, "agent");
+});
+
+test("grok/opencode warn and ignore a sandbox override (no native sandbox tier)", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-sandbox-"));
+  const grokSpec = buildSpawnSpec("grok", { sandbox: "workspace-write" }, runDir);
+  assert.ok(grokSpec.warnings.some((w) => /sandbox/.test(w)), `expected a sandbox warning, got ${JSON.stringify(grokSpec.warnings)}`);
+  const ocSpec = buildSpawnSpec("opencode", { sandbox: "workspace-write" }, runDir);
+  assert.ok(ocSpec.warnings.some((w) => /sandbox/.test(w)), `expected a sandbox warning, got ${JSON.stringify(ocSpec.warnings)}`);
+});
+
 // ---- codex-acp version pin (2026-07-13 version-drift incident) ----------
 //
 // An unpinned `@latest` npx spec let a codex-acp release change the wire

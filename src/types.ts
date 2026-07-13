@@ -19,11 +19,30 @@ export interface SpawnSpec {
   warnings: string[];
 }
 
+/**
+ * codex-native sandbox strictness, independent of the Clanker-level
+ * `readOnly` gate. Values mirror codex-acp's own AgentMode.sandboxMode
+ * labels (verified against codex-acp 1.1.2 source, INITIAL_AGENT_MODE env):
+ *   - "read-only"          -> INITIAL_AGENT_MODE=read-only (no writes at all)
+ *   - "workspace-write"    -> INITIAL_AGENT_MODE=agent (writes boxed to the
+ *                             session cwd + tmp — the review-seat sweet spot:
+ *                             `cargo test`/`go test` can write build/test
+ *                             caches, but nothing outside the workspace)
+ *   - "danger-full-access" -> INITIAL_AGENT_MODE=agent-full-access (writes
+ *                             anywhere, no sandbox — today's `readOnly:
+ *                             false` default when `sandbox` is unset)
+ * Only the codex lane honors this (grok/opencode have no native sandbox
+ * mode); other lanes warn and ignore it, same pattern as `model`/`effort`.
+ */
+export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+
 /** Per-lane request options that influence the spawn recipe. */
 export interface LaneRequestOptions {
   model?: string;
   effort?: string;
   readOnly?: boolean;
+  /** codex-only sandbox strictness override — see CodexSandboxMode. */
+  sandbox?: CodexSandboxMode;
 }
 
 /** Plan projection derived from ACP `plan` events. */
