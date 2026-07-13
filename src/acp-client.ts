@@ -267,7 +267,16 @@ export class LaneConnection {
         }
       })
       .catch((e) => {
-        if (!resolvedReady) ready.reject(e);
+        if (!resolvedReady) {
+          // A rejection here (e.g. initialize/session-resume/session-new
+          // itself failing at the JSON-RPC level, not a process crash) means
+          // the subprocess is still alive with its stdio pipes open — kill
+          // it, or it leaks forever and keeps the parent's event loop alive
+          // waiting on those pipes (found via a real hang: a rejected
+          // session/resume never terminated its fake-agent child).
+          if (!child.killed) child.kill("SIGKILL");
+          ready.reject(e);
+        }
       });
 
     return ready.promise;

@@ -11,8 +11,8 @@ export function fakeResolver(lane: LaneName, _opts: LaneRequestOptions, _runDir:
   return { command: process.execPath, args: [FAKE_AGENT], env: {}, warnings: [] };
 }
 
-export function fakeSpec(): SpawnSpec {
-  return { command: process.execPath, args: [FAKE_AGENT], env: {}, warnings: [] };
+export function fakeSpec(env: Record<string, string> = {}): SpawnSpec {
+  return { command: process.execPath, args: [FAKE_AGENT], env, warnings: [] };
 }
 
 /** Poll `fn` until it returns true or the deadline passes. */
