@@ -8,13 +8,13 @@ Clanker exposes these slash commands:
 |---|---|
 | `/clanker:codex <task>` | Codex ACP |
 | `/clanker:grok <task>` | Grok ACP |
-| `/clanker:glm <task>` | Opencode with GLM |
+| `/clanker:glm <task>` | Sonnet-supervised GLM over Opencode ACP |
 | `/clanker:deepseek <task>` | Opencode with DeepSeek |
 | `/clanker:kimi <task>` | Opencode with Kimi |
 | `/clanker:free <task>` | Opencode free model |
 | `/clanker:oc <provider/model> <task>` | Advanced Opencode model override |
 
-Default mode is background: the Claude `Agent` task owns the visible bottom task row, while the MCP server owns the ACP backend process. Use `--wait` to run foreground.
+Default mode is background: the Claude `Agent` task owns the visible bottom task row, while the MCP server owns the ACP backend process. `/clanker:glm` uses a Sonnet supervisor that watches the GLM ACP seat, sends bounded corrections back to the same seat, cancels material drift, and escalates product decisions. Use `--wait` to run foreground.
 
 ## Layout
 

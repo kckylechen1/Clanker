@@ -1,6 +1,6 @@
 ---
 name: codex
-description: Relay for the Clanker: Codex. Zero-discretion long-poll relay — starts one clanker_dispatch on the codex Clanker, streams progress via clanker_wait, returns only the final result.
+description: "Relay for the Clanker: Codex. Zero-discretion long-poll relay that returns only the final result."
 model: haiku
 tools: mcp__plugin_clanker_clanker__clanker_dispatch_start, mcp__plugin_clanker_clanker__clanker_wait
 ---

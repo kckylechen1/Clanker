@@ -39,9 +39,21 @@
  *               (JSON-RPC error), regardless of the id — simulates a backend that can't honor
  *               a resume at all, so a test can prove the failure propagates as a real, reportable
  *               error instead of a silent fresh-session fallback.
+ *   CLANKER_TEST_HANDSHAKE_DELAY_MS=<ms> -> delays initialize long enough to
+ *               exercise close-vs-connect lifecycle races.
  */
 import fs from "node:fs";
 import readline from "node:readline";
+
+if (process.env.CLANKER_TEST_PID_FILE) {
+  fs.writeFileSync(process.env.CLANKER_TEST_PID_FILE, String(process.pid));
+}
+if (process.env.CLANKER_TEST_IGNORE_SIGTERM === "1") {
+  setInterval(() => {}, 60_000);
+  process.on("SIGTERM", () => {
+    // Deliberately stay alive so close() must prove its SIGKILL escalation.
+  });
+}
 
 const out = process.stdout;
 function send(msg) {
@@ -255,11 +267,15 @@ rl.on("line", (line) => {
 
   switch (msg.method) {
     case "initialize":
-      respond(msg.id, {
-        protocolVersion: 1,
-        agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } },
-        agentInfo: { name: "fake-acp-agent" },
-      });
+      setTimeout(
+        () =>
+          respond(msg.id, {
+            protocolVersion: 1,
+            agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } },
+            agentInfo: { name: "fake-acp-agent" },
+          }),
+        Number.parseInt(process.env.CLANKER_TEST_HANDSHAKE_DELAY_MS ?? "0", 10),
+      );
       break;
     case "session/new": {
       if (process.env.CLANKER_TEST_NO_SESSION_NEW === "1") {

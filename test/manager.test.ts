@@ -190,6 +190,42 @@ test("a capacity-transient first-turn failure auto-retries once (after backoff) 
   }
 });
 
+test("close during capacity retry backoff prevents a replacement worker from spawning", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-capacity-close-"));
+  const markerPath = path.join(tmp, "attempted");
+  const pidFile = path.join(tmp, "worker.pid");
+  const m = new LaneManager({
+    resolveSpec: () => fakeSpec({ CLANKER_TEST_PID_FILE: pidFile }),
+    disableReaper: true,
+    baseRepo: tmp,
+    capacityRetryBackoffMs: 250,
+  });
+
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "codex",
+      prompt: `CAPACITY_ONCE ${markerPath}`,
+      cwd: tmp,
+      readOnly: true,
+    });
+    let sawRetry = false;
+    for (let i = 0; i < 10 && !sawRetry; i += 1) {
+      const result = await m.wait(id, 100);
+      sawRetry = result.digest.includes("transient backend failure, retrying");
+    }
+    assert.equal(sawRetry, true, "test must close the run during retry backoff");
+
+    await m.close(id);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+
+    const lastPid = Number.parseInt(fs.readFileSync(pidFile, "utf8"), 10);
+    assert.equal(processAlive(lastPid), false, "a closed run must not spawn a retry worker afterward");
+  } finally {
+    await m.shutdown().catch(() => {});
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("a capacity-transient failure on the SECOND attempt is not retried again (single-retry cap)", async () => {
   // No marker file ever gets created by this scenario keyword, so every
   // attempt "at capacity"s — proves the retry budget is exactly one, not
@@ -337,6 +373,144 @@ test("clanker_prompt reuses the session for a second turn", async () => {
   }
 });
 
+test("manager close blocks new turns and waits for a SIGTERM-resistant worker exit", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-manager-close-"));
+  const pidFile = path.join(tmp, "worker.pid");
+  const m = new LaneManager({
+    resolveSpec: () =>
+      fakeSpec({
+        CLANKER_TEST_PID_FILE: pidFile,
+        CLANKER_TEST_IGNORE_SIGTERM: "1",
+      }),
+    disableReaper: true,
+    baseRepo: tmp,
+  });
+  let pid: number | undefined;
+
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "opencode",
+      prompt: "manager-close",
+      cwd: tmp,
+      readOnly: true,
+    });
+    await waitTerminal(m, id);
+    pid = Number.parseInt(fs.readFileSync(pidFile, "utf8"), 10);
+    assert.equal(processAlive(pid), true, "fixture process must be alive before close");
+
+    const closing = m.close(id);
+    assert.strictEqual(m.close(id), closing, "concurrent close calls must share one lifecycle operation");
+    await assert.rejects(() => m.promptExisting(id, "too late"), /closing/);
+    await closing;
+
+    assert.equal(processAlive(pid), false, "manager.close must await the worker's exit");
+  } finally {
+    if (pid !== undefined && processAlive(pid)) process.kill(pid, "SIGKILL");
+    await m.shutdown().catch(() => {});
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("manager close drains a worker that is still handshaking", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-manager-handshake-close-"));
+  const pidFile = path.join(tmp, "worker.pid");
+  const m = new LaneManager({
+    resolveSpec: () =>
+      fakeSpec({
+        CLANKER_TEST_PID_FILE: pidFile,
+        CLANKER_TEST_IGNORE_SIGTERM: "1",
+        CLANKER_TEST_HANDSHAKE_DELAY_MS: "200",
+      }),
+    disableReaper: true,
+    baseRepo: tmp,
+  });
+  let pid: number | undefined;
+
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "opencode",
+      prompt: "close-during-handshake",
+      cwd: tmp,
+      readOnly: true,
+    });
+    assert.equal(await until(() => fs.existsSync(pidFile)), true, "fixture process must start");
+    pid = Number.parseInt(fs.readFileSync(pidFile, "utf8"), 10);
+
+    await m.close(id);
+
+    assert.equal(processAlive(pid), false, "close must drain a child that was still connecting");
+  } finally {
+    if (pid !== undefined && processAlive(pid)) process.kill(pid, "SIGKILL");
+    await m.shutdown().catch(() => {});
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("manager shutdown drains a worker that is still handshaking", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-manager-handshake-shutdown-"));
+  const pidFile = path.join(tmp, "worker.pid");
+  const m = new LaneManager({
+    resolveSpec: () =>
+      fakeSpec({
+        CLANKER_TEST_PID_FILE: pidFile,
+        CLANKER_TEST_HANDSHAKE_DELAY_MS: "200",
+      }),
+    disableReaper: true,
+    baseRepo: tmp,
+  });
+  let pid: number | undefined;
+
+  try {
+    await m.dispatchStart({
+      lane: "opencode",
+      prompt: "shutdown-during-handshake",
+      cwd: tmp,
+      readOnly: true,
+    });
+    assert.equal(await until(() => fs.existsSync(pidFile)), true, "fixture process must start");
+    pid = Number.parseInt(fs.readFileSync(pidFile, "utf8"), 10);
+
+    await m.shutdown();
+
+    assert.equal(processAlive(pid), false, "shutdown must drain a child that was still connecting");
+  } finally {
+    if (pid !== undefined && processAlive(pid)) process.kill(pid, "SIGKILL");
+    await m.shutdown().catch(() => {});
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("manager shutdown refuses dispatches after the lifecycle gate closes", async () => {
+  const m = makeManager();
+  await m.shutdown();
+  await assert.rejects(
+    () => m.dispatchStart({ lane: "codex", prompt: "too-late", cwd: os.tmpdir(), readOnly: true }),
+    /shutting down/,
+  );
+});
+
+test("manager shutdown attempts every run before reporting close failures", async () => {
+  const m = makeManager();
+  const first = await m.dispatchStart({ lane: "codex", prompt: "first", cwd: os.tmpdir(), readOnly: true });
+  const second = await m.dispatchStart({ lane: "codex", prompt: "second", cwd: os.tmpdir(), readOnly: true });
+  await Promise.all([waitTerminal(m, first.id), waitTerminal(m, second.id)]);
+
+  const originalClose = m.close.bind(m);
+  const attempted: string[] = [];
+  m.close = (id: string) => {
+    attempted.push(id);
+    return id === first.id ? Promise.reject(new Error("injected close failure")) : originalClose(id);
+  };
+  try {
+    await assert.rejects(() => m.shutdown(), /failed to close 1 Clanker run/);
+    assert.deepEqual(new Set(attempted), new Set([first.id, second.id]));
+    assert.equal(m.list().some((entry) => entry.id === second.id), false, "healthy run must still close");
+  } finally {
+    m.close = originalClose;
+    await m.shutdown();
+  }
+});
+
 test("reaped session rejects clanker_prompt", async () => {
   const m = makeManager({ sessionTtlMs: 60 });
   try {
@@ -351,3 +525,12 @@ test("reaped session rejects clanker_prompt", async () => {
     await m.shutdown();
   }
 });
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}

@@ -111,6 +111,40 @@ test("seat: sessionId is persisted to <runDir>/seat.json and survives idle-TTL s
   }
 });
 
+test("seat: concurrent prompts cannot start two resumes after a soft reap", async () => {
+  const m = new LaneManager({
+    resolveSpec: makeResumeDiscriminatingResolver(),
+    disableReaper: true,
+    baseRepo: os.tmpdir(),
+    sessionTtlMs: 60,
+  });
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "opencode",
+      prompt: "seat-before-concurrent-resume",
+      cwd: os.tmpdir(),
+      readOnly: true,
+      seat: true,
+    });
+    await waitTerminal(m, id);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.ok((await m.reap()).includes(id), "seat must be soft-reaped before concurrent prompts");
+
+    const first = m.promptExisting(id, "first-resume");
+    await assert.rejects(
+      () => m.promptExisting(id, "second-resume"),
+      /already has a turn starting/,
+    );
+    await first;
+    const resumed = await waitTerminal(m, id);
+    assert.equal(resumed.status, "done");
+    assert.equal(resumed.final_message, "first-resume");
+    assert.equal(m.list().find((entry) => entry.id === id)?.turns_count, 2);
+  } finally {
+    await m.shutdown();
+  }
+});
+
 test("seat: reap() never closes a seat's worktree while resumable (retained until clanker_close)", async () => {
   // Regression guard for the soft- vs full-close split: a seat's worktree
   // must still exist after the idle-TTL reaper has killed its subprocess,

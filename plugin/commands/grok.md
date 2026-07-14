@@ -1,5 +1,5 @@
 ---
-description: Dispatch a task to the Clanker: Grok (ACP) via a Claude-owned Agent task.
+description: "Dispatch a task to the Clanker: Grok (ACP) via a Claude-owned Agent task."
 argument-hint: "[--background|--wait] [--write] [--model <model>] [--effort <effort>] [--read-only] <task>"
 allowed-tools: Agent
 ---

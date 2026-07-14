@@ -1,5 +1,5 @@
 ---
-description: Dispatch a task to Clanker: Free via Opencode ACP.
+description: "Dispatch a task to Clanker: Free via Opencode ACP."
 argument-hint: "[--background|--wait] [--write] [--effort <effort>] <task>"
 allowed-tools: Agent
 ---

@@ -2,8 +2,8 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "clanker",
   "displayName": "Clanker",
-  "version": "0.1.2",
-  "description": "Run Codex, Opencode, and Grok as Claude-owned Clanker tasks over ACP.",
+  "version": "0.2.0",
+  "description": "Run Clanker tasks with a Sonnet-supervised GLM lane and direct Codex, Opencode, and Grok ACP relays.",
   "author": {
     "name": "kckylechen1"
   },
@@ -16,6 +16,7 @@
     "glm",
     "deepseek",
     "kimi",
-    "dispatch"
+    "dispatch",
+    "supervision"
   ]
 }

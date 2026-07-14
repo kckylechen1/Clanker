@@ -8,10 +8,15 @@ Bundles the Clanker dispatch surface over ACP:
   because plugin install copies the plugin directory to a cache and a plugin cannot
   reference files outside itself (so the server cannot live one level up). Regenerate
   it with `npm run bundle` from `/Users/kckylechen/Projects/Clanker` after changing `src/`.
-- **Clankers** `codex` / `grok` / `oc` ([`agents/`](agents)) — haiku,
+- **Direct Clankers** `codex` / `grok` / `oc` ([`agents/`](agents)) — haiku,
   zero-discretion long-poll relays. Each starts one `clanker_dispatch_start` and loops
   `clanker_wait` until the turn completes, returning only `final_message` + result fields.
   Their UI rows read `clanker:codex` / `clanker:grok` / `clanker:oc`.
+- **GLM supervisor** `glm-supervisor` — Sonnet owns the visible task row and directly
+  supervises one persistent GLM ACP seat. It stays silent while work is on track, can
+  cancel a materially drifting turn, sends a bounded prescription back through
+  `clanker_prompt` on the same seat, and escalates specification decisions. It never
+  spawns a nested Claude agent or becomes the implementation worker.
 - **Commands** `/clanker:codex`, `/clanker:grok`, `/clanker:glm`, `/clanker:deepseek`,
   `/clanker:kimi`, `/clanker:oc` ([`commands/`](commands)) —
   argument mapping preserved from the current habits (`--write` → `read_only:false`,
@@ -49,7 +54,7 @@ To uninstall later: `claude plugin uninstall clanker@clanker` and
 |---|---|---|
 | `/codex:dispatch <task>` | `/clanker:codex <task>` | Claude-owned background Clanker task by default; use `--wait` to block |
 | `/grok:dispatch <task>` | `/clanker:grok <task>` | |
-| `/oc-dispatch glm <task>` | `/clanker:glm <task>` | fixed GLM Clanker |
+| `/oc-dispatch glm <task>` | `/clanker:glm <task>` | fixed GLM worker under the Sonnet supervisor |
 | `/oc-dispatch ds <task>` | `/clanker:deepseek <task>` | fixed DeepSeek Clanker |
 | `/oc-dispatch kimi <task>` | `/clanker:kimi <task>` | fixed Kimi Clanker |
 | `/oc-dispatch <provider/model> <task>` | `/clanker:oc <provider/model> <task>` | advanced generic Clanker: Opencode |

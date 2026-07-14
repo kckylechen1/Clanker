@@ -24,6 +24,9 @@ import type {
 import { HANDSHAKE_TIMEOUT_MS } from "./constants.js";
 import type { SpawnSpec } from "./types.js";
 
+const TERMINATE_GRACE_MS = 2_000;
+const KILL_CONFIRM_MS = 2_000;
+
 /** Minimal promise-with-resolvers helper (Node's Promise.withResolvers exists on 22+ but kept explicit). */
 class Deferred<T> {
   readonly promise: Promise<T>;
@@ -107,6 +110,7 @@ export class LaneConnection {
   private readonly shutdown: Deferred<void>;
   private readonly getStderr: () => string;
   private closed = false;
+  private closePromise: Promise<void> | undefined;
 
   private constructor(
     session: ActiveSession,
@@ -134,9 +138,13 @@ export class LaneConnection {
     await this.ctx.notify(acp.methods.agent.session.cancel, { sessionId: this.session.sessionId });
   }
 
-  /** Dispose the session's update routing and terminate the subprocess. */
-  close(): void {
-    if (this.closed) return;
+  /** Dispose update routing and resolve only after the subprocess has exited. */
+  close(): Promise<void> {
+    this.closePromise ??= this.closeOnce();
+    return this.closePromise;
+  }
+
+  private async closeOnce(): Promise<void> {
     this.closed = true;
     this.shutdown.resolve();
     try {
@@ -144,13 +152,20 @@ export class LaneConnection {
     } catch {
       /* already disposed */
     }
-    if (!this.child.killed) {
-      this.child.kill("SIGTERM");
-      // Escalate if the child ignores SIGTERM.
-      setTimeout(() => {
-        if (!this.child.killed) this.child.kill("SIGKILL");
-      }, 2_000).unref();
+    if (this.child.exitCode !== null || this.child.signalCode !== null) {
+      await this.exited;
+      return;
     }
+
+    this.child.kill("SIGTERM");
+    if (await exitsWithin(this.exited, TERMINATE_GRACE_MS)) return;
+
+    this.child.kill("SIGKILL");
+    if (await exitsWithin(this.exited, KILL_CONFIRM_MS)) return;
+
+    throw new Error(
+      `failed to confirm ACP subprocess exit after SIGTERM and SIGKILL; stderr: ${this.stderr().trim().slice(-800)}`,
+    );
   }
 
   stderr(): string {
@@ -281,6 +296,16 @@ export class LaneConnection {
 
     return ready.promise;
   }
+}
+
+async function exitsWithin(exited: Promise<ExitInfo>, timeoutMs: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const timeout = setTimeout(() => resolve(false), timeoutMs);
+    void exited.then(() => {
+      clearTimeout(timeout);
+      resolve(true);
+    });
+  });
 }
 
 /**

@@ -108,6 +108,11 @@ const DEFAULT_SESSION_TTL_MS = envInt("CLANKER_SESSION_TTL_MS", 600_000);
 export class LaneManager {
   private readonly runs = new Map<string, LaneRun>();
   private readonly connections = new Map<string, LaneConnection>();
+  private readonly pendingConnections = new Map<string, Promise<LaneConnection>>();
+  private readonly closingConnections = new Set<string>();
+  private readonly closeOperations = new Map<string, Promise<void>>();
+  private readonly startingTurns = new Set<string>();
+  private readonly dispatchSetups = new Set<Promise<{ id: string; warnings: string[] }>>();
   private readonly resolveSpec: SpecResolver;
   private readonly stallThresholdMs: number;
   private readonly sessionTtlMs: number;
@@ -119,6 +124,7 @@ export class LaneManager {
   /** CP6: at most one active clanker_wait per id (single-consumer contract). */
   private readonly activeWaits = new Set<string>();
   private reaperTimer: NodeJS.Timeout | null = null;
+  private shuttingDown = false;
   private counter = 0;
 
   constructor(opts: LaneManagerOptions = {}) {
@@ -131,7 +137,11 @@ export class LaneManager {
     this.capacityRetryBackoffMs = opts.capacityRetryBackoffMs ?? CAPACITY_RETRY_BACKOFF_MS;
     if (!opts.disableReaper) {
       const period = Math.max(5_000, Math.floor(this.sessionTtlMs / 10));
-      this.reaperTimer = setInterval(() => void this.reap(), period);
+      this.reaperTimer = setInterval(() => {
+        void this.reap().catch((error) =>
+          console.error(`[clanker] reaper failed outside a run lifecycle: ${errMessage(error)}`),
+        );
+      }, period);
       this.reaperTimer.unref?.();
     }
   }
@@ -142,7 +152,20 @@ export class LaneManager {
    * Start a lane turn without blocking. Setup errors (unknown lane, worktree
    * creation) throw here; runtime errors surface through clanker_wait.
    */
-  async dispatchStart(params: DispatchParams): Promise<{ id: string; warnings: string[] }> {
+  dispatchStart(params: DispatchParams): Promise<{ id: string; warnings: string[] }> {
+    if (this.shuttingDown) {
+      return Promise.reject(new Error("Clanker manager is shutting down; new dispatches are refused"));
+    }
+    const setup = this.prepareDispatch(params);
+    this.dispatchSetups.add(setup);
+    void setup.then(
+      () => this.dispatchSetups.delete(setup),
+      () => this.dispatchSetups.delete(setup),
+    );
+    return setup;
+  }
+
+  private async prepareDispatch(params: DispatchParams): Promise<{ id: string; warnings: string[] }> {
     if (!LANE_NAMES.includes(params.lane)) {
       throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
     }
@@ -199,7 +222,9 @@ export class LaneManager {
     });
     this.runs.set(id, run);
 
-    void this.driveNewSession(run, spec, params.prompt);
+    void this.driveNewSession(run, spec, params.prompt).catch((error) =>
+      this.recordDriverFailure(run, error),
+    );
     return { id, warnings: spec.warnings };
   }
 
@@ -218,18 +243,34 @@ export class LaneManager {
     if (!run || run.sessionClosed) {
       throw new Error(`session '${id}' not found or already reaped; start a new dispatch`);
     }
+    if (this.closingConnections.has(id)) {
+      throw new Error(`session '${id}' is closing and cannot accept another turn`);
+    }
     if (run.turnStatus === "running") {
       throw new Error(`session '${id}' already has a turn in progress`);
     }
-    let conn = this.connections.get(id);
-    if (!conn) {
-      if (!run.seat || !run.sessionId) {
-        throw new Error(`session '${id}' has no live connection`);
-      }
-      conn = await this.resumeConnection(run);
+    if (this.startingTurns.has(id)) {
+      throw new Error(`session '${id}' already has a turn starting`);
     }
-    void this.runTurn(run, conn, prompt).then((outcome) => this.settleTurn(run, outcome));
-    return { id };
+    this.startingTurns.add(id);
+    try {
+      let conn = this.connections.get(id);
+      if (!conn) {
+        if (!run.seat || !run.sessionId) {
+          throw new Error(`session '${id}' has no live connection`);
+        }
+        conn = await this.resumeConnection(run);
+      }
+      if (run.sessionClosed || this.closingConnections.has(id)) {
+        throw new Error(`session '${id}' is closing and cannot accept another turn`);
+      }
+      void this.runTurn(run, conn, prompt)
+        .then((outcome) => this.settleTurn(run, outcome))
+        .catch((error) => this.recordDriverFailure(run, error));
+      return { id };
+    } finally {
+      this.startingTurns.delete(id);
+    }
   }
 
   /**
@@ -241,18 +282,38 @@ export class LaneManager {
    */
   private async resumeConnection(run: LaneRun): Promise<LaneConnection> {
     const spec = this.resolveSpec(run.lane, run.requestOpts, run.runDir);
-    const conn = await LaneConnection.connect({
+    return this.connectRun(run, spec, run.sessionId);
+  }
+
+  /**
+   * Register connection establishment before awaiting it so close() can see
+   * and drain a child that is still handshaking instead of overtaking it.
+   */
+  private async connectRun(
+    run: LaneRun,
+    spec: SpawnSpec,
+    resumeSessionId?: string,
+  ): Promise<LaneConnection> {
+    const pending = LaneConnection.connect({
       spec,
       cwd: run.cwd,
       readOnly: run.readOnly,
       onFileWritten: (p) => run.recordFileWritten(p),
       handshakeTimeoutMs: this.handshakeTimeoutMs,
-      resumeSessionId: run.sessionId,
+      resumeSessionId,
     });
-    this.connections.set(run.id, conn);
-    run.sessionId = conn.sessionId;
-    this.writeSeatFile(run);
-    return conn;
+    this.pendingConnections.set(run.id, pending);
+    try {
+      const conn = await pending;
+      this.connections.set(run.id, conn);
+      run.sessionId = conn.sessionId;
+      this.writeSeatFile(run);
+      return conn;
+    } finally {
+      if (this.pendingConnections.get(run.id) === pending) {
+        this.pendingConnections.delete(run.id);
+      }
+    }
   }
 
   /**
@@ -297,6 +358,20 @@ export class LaneManager {
   }
 
   /**
+   * Detached lane drivers cannot reject into the process-level unhandled
+   * rejection path. Project teardown failures into the run's terminal state
+   * so clanker_wait/status report them to the supervising caller.
+   */
+  private recordDriverFailure(run: LaneRun, error: unknown): void {
+    const detail = errMessage(error);
+    const message = run.error
+      ? `${run.error}; teardown failed: ${detail}`
+      : `lane driver failed: ${detail}`;
+    console.error(`[clanker] ${run.id} ${message}`);
+    if (!run.sessionClosed) run.failTurn(message, run.failureClass);
+  }
+
+  /**
    * Drive the first turn of a fresh dispatch, with one automatic retry when
    * the failure looks like a transient backend-capacity condition (see
    * failure-classifier.ts isCapacityTransient). CLANKER-INFRA-FAILURE never
@@ -307,27 +382,22 @@ export class LaneManager {
    * first turn — clanker_prompt (session continuation) never retries.
    */
   private async attemptInitialTurn(run: LaneRun, spec: SpawnSpec, prompt: string, attempt: number): Promise<void> {
+    if (run.sessionClosed || this.closingConnections.has(run.id)) return;
     let conn: LaneConnection;
     try {
-      conn = await LaneConnection.connect({
-        spec,
-        cwd: run.cwd,
-        readOnly: run.readOnly,
-        onFileWritten: (p) => run.recordFileWritten(p),
-        handshakeTimeoutMs: this.handshakeTimeoutMs,
-      });
+      conn = await this.connectRun(run, spec);
     } catch (e) {
+      if (run.sessionClosed || this.closingConnections.has(run.id)) return;
       const message = errMessage(e);
       if (attempt === 1 && isCapacityTransient(message)) {
         await this.retryAfterBackoff(run, message, attempt + 1);
+        if (run.sessionClosed || this.closingConnections.has(run.id)) return;
         return this.attemptInitialTurn(run, spec, prompt, attempt + 1);
       }
       run.failTurn(message);
       return;
     }
-    this.connections.set(run.id, conn);
-    run.sessionId = conn.sessionId;
-    this.writeSeatFile(run);
+    if (run.sessionClosed || this.closingConnections.has(run.id)) return;
 
     const outcome = await this.runTurn(run, conn, prompt);
     if (outcome.ok) return;
@@ -341,8 +411,9 @@ export class LaneManager {
       // Kill the half-dead process/connection (NOT run.close() — that would
       // also reap the worktree, which the retry needs to reuse) so the retry
       // spawns a clean process against the backend.
-      this.killConnection(run.id);
+      await this.killConnection(run.id);
       await this.retryAfterBackoff(run, outcome.message, attempt + 1);
+      if (run.sessionClosed || this.closingConnections.has(run.id)) return;
       return this.attemptInitialTurn(run, spec, prompt, attempt + 1);
     }
     run.failTurn(outcome.message, failureClass);
@@ -419,11 +490,24 @@ export class LaneManager {
   }
 
   /** Kill a run's live connection/process without touching worktree state (used by the capacity-retry respawn path; run.close() is the terminal, worktree-reaping teardown). */
-  private killConnection(runId: string): void {
+  private async killConnection(runId: string, keepReservation = false): Promise<void> {
+    this.closingConnections.add(runId);
     const conn = this.connections.get(runId);
-    if (conn) {
-      conn.close();
-      this.connections.delete(runId);
+    if (!conn) {
+      if (!keepReservation) this.closingConnections.delete(runId);
+      return;
+    }
+    try {
+      await conn.close();
+    } catch (error) {
+      // Keep the failed connection and closing marker authoritative: a retry
+      // must re-surface the same failed termination, never clean the worktree
+      // and claim success while the child may still be alive.
+      throw error;
+    }
+    this.connections.delete(runId);
+    if (!keepReservation && !this.closeOperations.has(runId)) {
+      this.closingConnections.delete(runId);
     }
   }
 
@@ -556,13 +640,27 @@ export class LaneManager {
     return { id, status: run.turnStatus };
   }
 
-  /** Close a session: dispose ACP session, kill subprocess, clean worktree. */
-  async close(id: string): Promise<void> {
+  /**
+   * Close a session exactly once. The reservation spans process termination,
+   * worktree cleanup, and the terminal state transition, including a soft-
+   * reaped seat that currently has no live connection to lock.
+   */
+  close(id: string): Promise<void> {
+    const existing = this.closeOperations.get(id);
+    if (existing) return existing;
     const run = this.runs.get(id);
-    if (!run || run.sessionClosed) return;
-    const conn = this.connections.get(id);
-    conn?.close();
-    this.connections.delete(id);
+    if (!run || run.sessionClosed) return Promise.resolve();
+
+    const operation = this.closeRun(run);
+    this.closeOperations.set(id, operation);
+    return operation;
+  }
+
+  private async closeRun(run: LaneRun): Promise<void> {
+    this.closingConnections.add(run.id);
+    const pending = this.pendingConnections.get(run.id);
+    if (pending) await pending.catch(() => undefined);
+    await this.killConnection(run.id, true);
     if (run.worktreePath && run.worktreeBranch) {
       try {
         const removed = await removeIfClean(run.worktreePath, this.baseRepo);
@@ -578,6 +676,7 @@ export class LaneManager {
       }
     }
     run.markClosed();
+    this.closingConnections.delete(run.id);
   }
 
   /**
@@ -591,20 +690,24 @@ export class LaneManager {
   async reap(): Promise<string[]> {
     const reaped: string[] = [];
     for (const run of [...this.runs.values()]) {
-      if (run.sessionClosed) continue;
-      if (run.turnStatus !== "running" && run.idleMs() > this.sessionTtlMs) {
-        if (run.seat) {
-          // Only soft-reap once: after the first pass connections.has(id) is
-          // false, so subsequent reaper ticks skip a dead seat silently
-          // instead of re-reporting it every tick.
-          if (this.connections.has(run.id)) {
-            this.killConnection(run.id);
-            reaped.push(run.id);
+      try {
+        if (run.sessionClosed) continue;
+        if (run.turnStatus !== "running" && run.idleMs() > this.sessionTtlMs) {
+          if (run.seat) {
+            // Only soft-reap once: after the first pass connections.has(id) is
+            // false, so subsequent reaper ticks skip a dead seat silently
+            // instead of re-reporting it every tick.
+            if (this.connections.has(run.id)) {
+              await this.killConnection(run.id);
+              reaped.push(run.id);
+            }
+            continue;
           }
-          continue;
+          await this.close(run.id);
+          reaped.push(run.id);
         }
-        await this.close(run.id);
-        reaped.push(run.id);
+      } catch (error) {
+        this.recordDriverFailure(run, error);
       }
     }
     return reaped;
@@ -612,10 +715,20 @@ export class LaneManager {
 
   /** Tear down everything (server shutdown). */
   async shutdown(): Promise<void> {
+    this.shuttingDown = true;
     if (this.reaperTimer) clearInterval(this.reaperTimer);
     this.reaperTimer = null;
-    for (const id of [...this.connections.keys()]) {
-      await this.close(id);
+    // A setup may still be creating a worktree and therefore not have a run id
+    // yet. Drain those operations before freezing the authoritative run set.
+    await Promise.allSettled([...this.dispatchSetups]);
+    // Runs, not only live connections, are the authoritative lifecycle set:
+    // a child may still be handshaking in pendingConnections.
+    const results = await Promise.allSettled([...this.runs.keys()].map((id) => this.close(id)));
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason);
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `failed to close ${failures.length} Clanker run(s)`);
     }
   }
 }

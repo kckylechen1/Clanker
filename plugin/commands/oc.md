@@ -1,5 +1,5 @@
 ---
-description: Dispatch a task to the Clanker: Opencode (ACP) via a Claude-owned Agent task.
+description: "Dispatch a task to the Clanker: Opencode (ACP) via a Claude-owned Agent task."
 argument-hint: "[glm|ds|kimi|free|<provider/model>] [--background|--wait] [--write] [--effort <effort>] <task>"
 allowed-tools: Agent
 ---

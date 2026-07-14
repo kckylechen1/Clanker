@@ -1,6 +1,8 @@
 node_modules/
-dist/
-plugin/dist/
+/dist/
+plugin/dist/*
+!plugin/dist/clanker-mcp.mjs
+.tachi/
 .test-tmp/
 .DS_Store
 *.log

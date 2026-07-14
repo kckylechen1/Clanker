@@ -1,13 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
+import path from "node:path";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { LaneConnection } from "../src/acp-client.js";
 import { fakeSpec } from "./helpers.js";
 
 test("handshake: connect completes initialize + session/new", async () => {
   const conn = await LaneConnection.connect({ spec: fakeSpec(), cwd: os.tmpdir(), readOnly: false });
   assert.match(conn.sessionId, /^sess-\d+$/);
-  conn.close();
+  await conn.close();
 });
 
 test("prompt turn completes and yields the agent message as final text", async () => {
@@ -29,7 +31,7 @@ test("prompt turn completes and yields the agent message as final text", async (
   }
   assert.equal(stopReason, "end_turn");
   assert.equal(message, "DONE");
-  conn.close();
+  await conn.close();
 });
 
 // ---- session/resume (seat respawn) ---------------------------------------
@@ -44,7 +46,7 @@ test("prompt turn completes and yields the agent message as final text", async (
 test("resumeSessionId reconnects via session/resume, not session/new, across a fresh process", async () => {
   const first = await LaneConnection.connect({ spec: fakeSpec(), cwd: os.tmpdir(), readOnly: false });
   const originalSessionId = first.sessionId;
-  first.close();
+  await first.close();
 
   const second = await LaneConnection.connect({
     spec: fakeSpec({ CLANKER_TEST_NO_SESSION_NEW: "1" }),
@@ -69,7 +71,7 @@ test("resumeSessionId reconnects via session/resume, not session/new, across a f
     }
     assert.equal(message, "after-resume");
   } finally {
-    second.close();
+    await second.close();
   }
 });
 
@@ -97,5 +99,40 @@ test("two sequential prompts reuse the same session", async () => {
   }
   // Same connection/session id across both turns.
   assert.equal(conn.sessionId, firstSession);
-  conn.close();
+  await conn.close();
 });
+
+test("close waits for a SIGTERM-resistant ACP worker to exit", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "clanker-close-"));
+  const pidFile = path.join(tmp, "worker.pid");
+  let pid: number | undefined;
+
+  try {
+    const conn = await LaneConnection.connect({
+      spec: fakeSpec({
+        CLANKER_TEST_PID_FILE: pidFile,
+        CLANKER_TEST_IGNORE_SIGTERM: "1",
+      }),
+      cwd: os.tmpdir(),
+      readOnly: false,
+    });
+    pid = Number.parseInt(await readFile(pidFile, "utf8"), 10);
+    assert.equal(processAlive(pid), true, "fixture process must be alive before close");
+
+    await conn.close();
+
+    assert.equal(processAlive(pid), false, "close must not resolve before the worker exits");
+  } finally {
+    if (pid !== undefined && processAlive(pid)) process.kill(pid, "SIGKILL");
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}

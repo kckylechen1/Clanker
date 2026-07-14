@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 
 const commands = [
   { file: "codex.md", subagent: "clanker:codex", started: "Clanker: Codex started" },
@@ -9,7 +9,6 @@ const commands = [
 ] as const;
 
 const fixedModelCommands = [
-  { file: "glm.md", label: "GLM", model: "glm" },
   { file: "deepseek.md", label: "DeepSeek", model: "ds" },
   { file: "kimi.md", label: "Kimi", model: "kimi" },
   { file: "free.md", label: "Free", model: "free" },
@@ -32,6 +31,44 @@ for (const command of commands) {
     assert.match(backgroundSection, /Do not wait for the subagent or relay a final result in this turn/);
   });
 }
+
+test("glm command routes through the canonical Sonnet supervisor", async () => {
+  const command = await readFile(new URL("../plugin/commands/glm.md", import.meta.url), "utf8");
+  const supervisor = await readFile(new URL("../plugin/agents/glm-supervisor.md", import.meta.url), "utf8");
+
+  assert.match(command, /subagent_type: "clanker:glm-supervisor"/);
+  assert.match(command, /If neither flag is present, default to background/);
+  assert.match(command, /Do not call MCP dispatch tools in the main conversation/);
+  assert.match(supervisor, /^name: glm-supervisor$/m);
+  assert.match(supervisor, /^model: sonnet$/m);
+  assert.match(supervisor, /lane: `opencode`/);
+  assert.match(supervisor, /model: `glm`/);
+  assert.match(supervisor, /seat: `true`/);
+  assert.match(supervisor, /clanker_prompt/);
+  assert.match(supervisor, /clanker_cancel/);
+  assert.match(supervisor, /clanker_close/);
+  assert.match(supervisor, /after two full 55000 ms waits/);
+  assert.doesNotMatch(supervisor, /Agent\(/);
+});
+
+test("all plugin agents and commands have validator-safe quoted descriptions", async () => {
+  for (const directory of ["agents", "commands"] as const) {
+    const root = new URL(`../plugin/${directory}/`, import.meta.url);
+    for (const file of await readdir(root)) {
+      if (!file.endsWith(".md")) continue;
+      const body = await readFile(new URL(file, root), "utf8");
+      assert.match(body, /^description: "[^"\n]+"$/m, `${directory}/${file} must quote description`);
+    }
+  }
+});
+
+test("the clean plugin tree contains the MCP bundle referenced by .mcp.json", async () => {
+  const mcp = JSON.parse(await readFile(new URL("../plugin/.mcp.json", import.meta.url), "utf8")) as {
+    mcpServers: { clanker: { args: string[] } };
+  };
+  assert.ok(mcp.mcpServers.clanker.args.includes("${CLAUDE_PLUGIN_ROOT}/dist/clanker-mcp.mjs"));
+  await access(new URL("../plugin/dist/clanker-mcp.mjs", import.meta.url));
+});
 
 for (const command of fixedModelCommands) {
   test(`${command.file} exposes Clanker: ${command.label} as a fixed Opencode model`, async () => {
