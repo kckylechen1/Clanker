@@ -14,19 +14,52 @@ import { LaneRun } from "../src/run.js";
 test("CP3: resolveOcModel expands shortnames and passes full ids through", () => {
   assert.equal(resolveOcModel("glm"), "zhipuai-coding-plan/glm-5.2");
   assert.equal(resolveOcModel("ds"), "deepseek/deepseek-v4-pro");
-  assert.equal(resolveOcModel("kimi"), "kimi-for-coding/k2p6");
+  assert.equal(resolveOcModel("kimi"), "kimi-for-coding/k2p7");
   assert.equal(resolveOcModel("free"), "opencode/deepseek-v4-flash-free");
   assert.equal(resolveOcModel("anthropic/claude"), "anthropic/claude");
   assert.equal(resolveOcModel("unknown"), "unknown");
   assert.equal(resolveOcModel(undefined), undefined);
 });
 
-test("CP3: opencode lane writes the resolved full model id into OPENCODE_CONFIG", () => {
+test("CP3: opencode lane pins the resolved model and dedicated worker in inline config", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-"));
   const spec = buildSpawnSpec("opencode", { model: "glm" }, runDir);
   assert.ok(spec.env.OPENCODE_CONFIG, "OPENCODE_CONFIG env is set");
-  const cfg = JSON.parse(fs.readFileSync(spec.env.OPENCODE_CONFIG, "utf8"));
+  assert.ok(spec.env.OPENCODE_CONFIG_CONTENT, "highest-precedence inline config is set");
+  const cfg = JSON.parse(spec.env.OPENCODE_CONFIG_CONTENT);
   assert.equal(cfg.model, "zhipuai-coding-plan/glm-5.2");
+  assert.equal(cfg.default_agent, "clanker-worker");
+  assert.equal(cfg.agent?.["clanker-worker"]?.mode, "primary");
+  assert.equal(cfg.agent?.["clanker-worker"]?.permission?.task, "deny");
+  assert.deepEqual(cfg, JSON.parse(fs.readFileSync(spec.env.OPENCODE_CONFIG, "utf8")));
+});
+
+test("opencode read-only lane denies delegation, skills, external paths, edits, and shell", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-default-"));
+  const spec = buildSpawnSpec("opencode", { readOnly: true }, runDir);
+  assert.ok(spec.env.OPENCODE_CONFIG, "OPENCODE_CONFIG env is set without a model override");
+  assert.equal(spec.env.OPENCODE_DISABLE_CLAUDE_CODE, "1");
+  assert.equal(spec.env.OPENCODE_DISABLE_EXTERNAL_SKILLS, "1");
+  const cfg = JSON.parse(spec.env.OPENCODE_CONFIG_CONTENT);
+  assert.equal(Object.hasOwn(cfg, "model"), false, "the user's normal model resolution remains intact");
+  assert.equal(cfg.default_agent, "clanker-worker");
+  assert.equal(cfg.agent?.["clanker-worker"]?.mode, "primary");
+  assert.deepEqual(cfg.agent?.["clanker-worker"]?.permission, {
+    task: "deny",
+    skill: "deny",
+    external_directory: "deny",
+    edit: "deny",
+    bash: "deny",
+  });
+});
+
+test("opencode write lane keeps worktree-local edit and shell enabled", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-write-"));
+  const spec = buildSpawnSpec("opencode", { readOnly: false }, runDir);
+  const cfg = JSON.parse(spec.env.OPENCODE_CONFIG_CONTENT);
+  assert.equal(cfg.agent?.["clanker-worker"]?.permission?.edit, "allow");
+  assert.equal(cfg.agent?.["clanker-worker"]?.permission?.bash, "allow");
+  assert.equal(cfg.agent?.["clanker-worker"]?.permission?.external_directory, "deny");
 });
 
 // ---- codex sandbox override (review-seat workspace-write tier) ----------
