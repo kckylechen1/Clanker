@@ -45,6 +45,11 @@ test("opencode read-only lane denies delegation, skills, external paths, edits, 
   assert.equal(cfg.default_agent, "clanker-worker");
   assert.equal(cfg.agent?.["clanker-worker"]?.mode, "primary");
   assert.deepEqual(cfg.agent?.["clanker-worker"]?.permission, {
+    // The MCP namespace: OpenCode flattens injected MCP tools to
+    // `${server}_${tool}`, so this glob — not `task`/`skill`, which only match
+    // the native tools of those names — is what stops a lane from reaching
+    // `tachi_task`/`tachi_skill`. Observed live before this was added.
+    "*_*": "deny",
     task: "deny",
     skill: "deny",
     external_directory: "deny",

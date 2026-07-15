@@ -137,6 +137,19 @@ function opencodeClankerAgent(readOnly: boolean) {
     description: "Dedicated OpenCode ACP worker controlled by Clanker.",
     mode: "primary",
     permission: {
+      // OpenCode flattens every injected MCP tool to `${server}_${tool}` and
+      // matches the permission globs against those concrete names before the
+      // LLM request (session/tools.ts -> permission/index.ts). Denying that
+      // namespace is what actually closes the door: a read-only lane was
+      // observed calling `tachi_task` (it really spawned a claude dispatch)
+      // and `tachi_skill`, because `task`/`skill` below only ever matched the
+      // NATIVE tools of those exact names. Native tools are all compact
+      // lowercase — bash/read/glob/grep/edit/write/webfetch/todowrite — so
+      // this costs the worker nothing (`apply_patch` and the MCP resource
+      // helpers are normalized to `edit`/`read` before the glob runs).
+      // Do NOT "simplify" this to `mcp: {}` in the config: configs deep-merge,
+      // so an empty mcp object removes no ambient server. This is the fix.
+      "*_*": "deny",
       task: "deny",
       skill: "deny",
       external_directory: "deny",
