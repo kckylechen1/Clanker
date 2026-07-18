@@ -34,12 +34,22 @@
  *           any other unsupported-capability request). That is a judgment
  *           call made during conflict resolution, not a verified product
  *           decision — flag for explicit sign-off before this lands.
- * - codex   `npx -y @agentclientprotocol/codex-acp@<CODEX_ACP_VERSION>` — model +
- *           reasoning effort via CODEX_CONFIG (JSON merged into the Codex
- *           session config: {"model":...,"model_reasoning_effort":...});
- *           sandbox strictness via INITIAL_AGENT_MODE. Verified against the
- *           codex-acp 1.1.2 source (src/AgentMode.ts): three modes exist, not
- *           two — `read-only` (readOnly sandbox, no writes at all), `agent`
+ * - codex   `@agentclientprotocol/codex-acp` as a local dependency (`npm i
+ *           --save`), spawned directly as `node <its dist/index.js>` instead
+ *           of `npx -y @agentclientprotocol/codex-acp`. npx's cold-start
+ *           registry/package resolution measured ~35s per lane spawn
+ *           (reproduced 2026-07-17) — a local dependency is already on disk,
+ *           so codex-acp's ACP handshake comes back in ~1s instead. The
+ *           package is installed with `--ignore-scripts` to skip its own
+ *           `@openai/codex` dependency's postinstall (which downloads a
+ *           ~178MB bundled Codex binary we don't need); CODEX_PATH below
+ *           points codex-acp at the system's already-installed `codex`
+ *           instead of that bundled copy. Model + reasoning effort still go
+ *           via CODEX_CONFIG (JSON merged into the Codex session config:
+ *           {"model":...,"model_reasoning_effort":...}); sandbox strictness
+ *           via INITIAL_AGENT_MODE. Verified against the codex-acp 1.1.2
+ *           source (src/AgentMode.ts): three modes exist, not two —
+ *           `read-only` (readOnly sandbox, no writes at all), `agent`
  *           (workspaceWrite sandbox: writes boxed to the session cwd + tmp —
  *           this is the middle tier `opts.sandbox="workspace-write"` maps
  *           to), and `agent-full-access` (dangerFullAccess: writes anywhere,
@@ -78,27 +88,67 @@
  *           interactive sessions) and forecloses the whole reserved-schema
  *           failure class for Clanker regardless of upstream cause.
  *
- *           The npx spec is version-pinned, not `@latest`. 2026-07-13 incident
- *           precedent: an unpinned `@latest` silently picked up a codex-acp
- *           release whose app-server mode registered the same reserved
- *           `collaboration.spawn_agent` tool, breaking every codex dispatch
- *           with a turn-1 400 that nobody could pin to a code change because
- *           the dependency itself had moved under us. Upgrading codex-acp is
- *           now an explicit, reviewable act: bump `CODEX_ACP_VERSION` below
- *           and run `npm run smoke -- codex` (and a sol-model-override smoke)
- *           before trusting the new version.
+ *           codex-acp's version is pinned in package.json (exact, not `^`),
+ *           not via a runtime npx `@version` arg — see the 2026-07-13
+ *           version-drift incident note in the git history for why an
+ *           unpinned version is unacceptable (an unpinned release silently
+ *           picked up the reserved collaboration.spawn_agent schema above).
+ *           Bumping codex-acp is an explicit `npm i --save
+ *           @agentclientprotocol/codex-acp@<version>`, reviewed like any
+ *           other dependency bump, followed by `npm run smoke -- codex` (and
+ *           a sol-model-override smoke) before trusting the new version.
  */
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { resolveOcModel } from "./constants.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "./types.js";
 
+const nodeRequire = createRequire(import.meta.url);
+
 /**
- * Pinned `@agentclientprotocol/codex-acp` version. Verified-working as of
- * 2026-07-13 (see file header). Never widen this back to `@latest` — bump it
- * deliberately and re-smoke.
+ * Resolve @agentclientprotocol/codex-acp's own entry script through Node's
+ * module resolution rather than a path hardcoded relative to this source
+ * file. That walk works the same whether this file is running from the tsc
+ * `dist/` build or the esbuild-bundled `plugin/dist/clanker-mcp.mjs` (the
+ * package is never bundled into that file — codex-acp is spawned as a
+ * subprocess, never `import`ed — so it stays a real node_modules lookup at
+ * runtime in both cases).
  */
-const CODEX_ACP_VERSION = "1.1.2";
+function resolveCodexAcpEntry(): string {
+  const pkgJsonPath = nodeRequire.resolve("@agentclientprotocol/codex-acp/package.json");
+  return path.join(path.dirname(pkgJsonPath), "dist", "index.js");
+}
+
+/**
+ * Resolve the real `codex` CLI binary from PATH ourselves, rather than pass
+ * the bare string "codex" through and let codex-acp's own internal spawn
+ * resolve it. `codex` on this machine (and possibly others) is a zsh
+ * *alias* (`codex --dangerously-bypass-approvals-and-sandbox`) — irrelevant
+ * to `child_process.spawn` without `shell: true` (which neither Clanker's
+ * nor codex-acp's spawn calls use), but codex-acp's own PATH lookup depends
+ * on whatever PATH the Clanker MCP server process happened to inherit,
+ * which the acp-client.ts PATH-prepend comment already flags as sometimes
+ * minimal. Resolving the absolute path here, in the same process that
+ * builds the spawn spec, removes that indirection.
+ */
+function resolveSystemCodexPath(): string {
+  const searchPath = process.env.PATH ?? "";
+  for (const dir of searchPath.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, "codex");
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      /* not here, keep looking */
+    }
+  }
+  // Nothing executable found on PATH; fall back to the bare name so
+  // codex-acp's own resolution gets a chance (and the failure, if any, is
+  // codex-acp's ENOENT rather than us silently swallowing it here).
+  return "codex";
+}
 
 interface LaneCapabilities {
   model: boolean;
@@ -251,12 +301,12 @@ export function buildSpawnSpec(
           ? "read-only"
           : "agent-full-access";
       env.INITIAL_AGENT_MODE = agentMode;
-      return {
-        command: "npx",
-        args: ["-y", `@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}`],
-        env,
-        warnings,
-      };
+      // CODEX_PATH tells codex-acp which `codex` binary to spawn for its
+      // app-server. We install codex-acp with --ignore-scripts (see file
+      // header), so its own bundled @openai/codex copy was never
+      // downloaded — CODEX_PATH is load-bearing, not an optional override.
+      env.CODEX_PATH = resolveSystemCodexPath();
+      return { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings };
     }
   }
 }

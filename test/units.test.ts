@@ -112,21 +112,13 @@ test("grok/opencode warn and ignore a sandbox override (no native sandbox tier)"
   assert.ok(ocSpec.warnings.some((w) => /sandbox/.test(w)), `expected a sandbox warning, got ${JSON.stringify(ocSpec.warnings)}`);
 });
 
-// ---- codex-acp version pin (2026-07-13 version-drift incident) ----------
-//
-// An unpinned `@latest` npx spec let a codex-acp release change the wire
-// behavior out from under Clanker with no diff to review. The spawn spec
-// must carry an explicit `@<version>`, never bare `@latest`.
-
-test("codex lane spawns a version-pinned codex-acp, never @latest", () => {
-  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-codex-pin-"));
-  const spec = buildSpawnSpec("codex", {}, runDir);
-  assert.equal(spec.command, "npx");
-  const pkgArg = spec.args.find((a) => a.startsWith("@agentclientprotocol/codex-acp"));
-  assert.ok(pkgArg, `expected an @agentclientprotocol/codex-acp arg, got ${JSON.stringify(spec.args)}`);
-  assert.match(pkgArg!, /^@agentclientprotocol\/codex-acp@\d+\.\d+\.\d+$/, "must be pinned to a concrete semver, not @latest");
-  assert.doesNotMatch(pkgArg!, /@latest$/);
-});
+// NOTE (rebase merge resolution, 2026-07-18): the npx `@<version>`-pin test
+// that used to live here ("codex lane spawns a version-pinned codex-acp,
+// never @latest") is gone — this lane no longer spawns via npx at all (see
+// "codex lane spawns codex-acp's local dist/index.js directly, not npx"
+// below). Version pinning is now `package.json`'s exact dependency version,
+// asserted by nothing here (it's enforced by `npm ci`/lockfile, not the spawn
+// spec) — see the file header note in src/backends.ts.
 
 // ---- codex multi_agent_v2 reserved-tool guard (2026-07-13 incident) -----
 //
@@ -150,6 +142,36 @@ test("codex lane keeps multi_agent_v2 disabled alongside a model override (e.g. 
   const cfg = JSON.parse(spec.env.CODEX_CONFIG);
   assert.equal(cfg.model, "gpt-5.6-sol");
   assert.equal(cfg.features?.multi_agent_v2?.enabled, false);
+});
+
+// ---- codex lane: local dependency, not npx (2026-07-17 cold-start fix) --
+//
+// npx -y @agentclientprotocol/codex-acp cold-starts in ~35s per lane spawn
+// (registry/package resolution round trip). codex-acp is now a local
+// dependency (`npm i --save`, installed --ignore-scripts) spawned directly
+// as `node <its dist/index.js>`; CODEX_PATH tells it which system `codex`
+// binary to run its app-server against, since --ignore-scripts skipped its
+// own @openai/codex dependency's bundled-binary download.
+
+test("codex lane spawns codex-acp's local dist/index.js directly, not npx", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-codex-npx-"));
+  const spec = buildSpawnSpec("codex", {}, runDir);
+  assert.equal(spec.command, process.execPath, "spawns via the running node binary, not `npx`");
+  assert.equal(spec.args.length, 1, "single arg: the resolved entry script path");
+  assert.ok(
+    spec.args[0].endsWith(path.join("@agentclientprotocol", "codex-acp", "dist", "index.js")),
+    `expected codex-acp's local dist/index.js, got: ${spec.args[0]}`,
+  );
+  assert.ok(fs.existsSync(spec.args[0]), "resolved entry script actually exists on disk");
+});
+
+test("codex lane sets CODEX_PATH to a real, executable file — not the bare 'codex' alias name", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-codex-path-"));
+  const spec = buildSpawnSpec("codex", {}, runDir);
+  assert.ok(spec.env.CODEX_PATH, "CODEX_PATH env is set");
+  assert.notEqual(spec.env.CODEX_PATH, "codex", "must resolve past the bare name to an absolute path");
+  assert.ok(path.isAbsolute(spec.env.CODEX_PATH), "CODEX_PATH is an absolute path");
+  assert.ok(fs.existsSync(spec.env.CODEX_PATH), "CODEX_PATH points at a file that actually exists");
 });
 
 // ---- CP5: read-only never auto-approves ---------------------------------
