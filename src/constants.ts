@@ -75,7 +75,7 @@ export const SERVER_VERSION = "0.1.0";
 export const OC_MODEL_ALIASES: Readonly<Record<string, string>> = {
   glm: "zhipuai-coding-plan/glm-5.2",
   ds: "deepseek/deepseek-v4-pro",
-  kimi: "kimi-for-coding/k2p6",
+  kimi: "kimi-for-coding/k2p7",
   free: "opencode/deepseek-v4-flash-free",
 };
 

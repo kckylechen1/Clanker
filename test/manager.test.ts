@@ -94,6 +94,76 @@ test("clanker_wait returns early on event arrival (long-poll wakes on events)", 
   }
 });
 
+test("quiet mode (default): a lone tool_call (grep/read-shaped) does not cut a wait short", async () => {
+  // Stall threshold parked far above the wait budget so this isolates the
+  // "trivial tool_call event alone" case from suspected-stall wake-ups.
+  const m = makeManager({ stallThresholdMs: 60_000 });
+  try {
+    const { id } = await m.dispatchStart({ lane: "codex", prompt: "STALL now", cwd: os.tmpdir(), readOnly: true });
+    // "STALL now" emits exactly one tool_call, then the fake agent hangs
+    // forever — the shape of "codex fires a tool_call for every grep/read".
+    await until(() => m.status(id).tool_calls >= 1, 4000);
+    // Prime-drain: turn_start is itself a significant digest entry, so the
+    // very first wait on a fresh run always wakes fast regardless of quiet
+    // mode. Drain it here so the *timed* wait below measures only what
+    // happens during it (the lone trivial tool_call — nothing else).
+    const primed = await m.wait(id, 50);
+    assert.ok(primed.digest.includes("stalling tool"), "priming drain picks up the trivial tool_call digest");
+
+    const t0 = Date.now();
+    const r = await m.wait(id, 400); // quiet defaults to true; nothing new arrives during this window
+    const elapsed = Date.now() - t0;
+    assert.equal(r.status, "running");
+    assert.ok(
+      elapsed >= 350,
+      `quiet-mode wait should block to (near) the 400ms budget since only a trivial event happened, took ${elapsed}ms`,
+    );
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("quiet:false restores the legacy any-event wake-up on the same trivial tool_call", async () => {
+  const m = makeManager({ stallThresholdMs: 60_000 });
+  try {
+    const { id } = await m.dispatchStart({ lane: "codex", prompt: "STALL now", cwd: os.tmpdir(), readOnly: true });
+    await until(() => m.status(id).tool_calls >= 1, 4000);
+    const t0 = Date.now();
+    const r = await m.wait(id, 2000, false);
+    const elapsed = Date.now() - t0;
+    assert.equal(r.status, "running");
+    assert.ok(elapsed < 1000, `quiet:false should wake immediately on the trivial event, took ${elapsed}ms`);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("quiet mode: a trivial tool_call doesn't wake a wait, but a later plan event does", async () => {
+  // TRICKLE emits one trivial tool_call, then ~150ms later a significant
+  // plan update, then ends the turn — proving both halves of the debounce
+  // contract inside a single live wait: the trivial event doesn't cut it
+  // short, the significant one does (well before the much larger budget).
+  const m = makeManager({ stallThresholdMs: 60_000 });
+  try {
+    const { id } = await m.dispatchStart({ lane: "opencode", prompt: "TRICKLE please", cwd: os.tmpdir(), readOnly: true });
+    await until(() => m.status(id).tool_calls >= 1, 4000);
+    const primed = await m.wait(id, 50); // drain turn_start + the trivial tool_call
+    assert.equal(primed.status, "running");
+
+    const t0 = Date.now();
+    const r = await m.wait(id, 2000); // budget far larger than the ~150ms plan delay
+    const elapsed = Date.now() - t0;
+    assert.equal(r.status, "running");
+    assert.ok(
+      elapsed < 1000,
+      `the plan event should wake the quiet-mode wait well before the 2000ms budget, took ${elapsed}ms`,
+    );
+    assert.notEqual(r.plan_summary, "no plan yet", "plan should be projected by the time this wait returns");
+  } finally {
+    await m.shutdown();
+  }
+});
+
 test("silence flags suspected_stall (warning) then the turn timeout forces a terminal state", async () => {
   // CP1: suspected_stall stays a warning, but a silent turn must still reach a
   // terminal state — here via the hard per-turn timeout.

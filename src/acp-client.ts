@@ -9,6 +9,7 @@
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import type {
@@ -166,9 +167,28 @@ export class LaneConnection {
     const { spec, cwd, readOnly, onFileWritten, resumeSessionId } = options;
     const handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
 
+    // The MCP server is often launched with an absolute node path but a minimal
+    // PATH that omits node's own bin dir, so `npx`-based lanes (e.g. codex-acp)
+    // fail with spawn ENOENT. Prepend the running node's bin dir (where npx lives)
+    // — derived, not hard-coded — so those lanes resolve.
+    // A nonexistent cwd makes node's spawn fail with a misleading
+    // "spawn <command> ENOENT" (reads as a PATH problem; cost a real PATH
+    // chase on 2026-07-10 when a reaped worktree was passed as cwd).
+    // Fail loud and name the actual problem instead.
+    if (cwd && !fs.existsSync(cwd)) {
+      throw new Error(
+        `lane cwd does not exist: ${cwd} (worktree reaped or path typo?) — refusing to spawn`,
+      );
+    }
+
+    const nodeBinDir = path.dirname(process.execPath);
     const child = spawn(spec.command, spec.args, {
       cwd,
-      env: { ...process.env, ...spec.env },
+      env: {
+        ...process.env,
+        ...spec.env,
+        PATH: `${nodeBinDir}${path.delimiter}${spec.env?.PATH ?? process.env.PATH ?? ""}`,
+      },
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams;
 

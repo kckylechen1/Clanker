@@ -8,23 +8,48 @@
  *
  * - grok    `grok agent [--model M] [--reasoning-effort E] stdio`
  *           model + effort are flags on the `grok agent` parent command.
- * - opencode `opencode acp` — no model flag on the acp subcommand. Model is
- *           supplied via OPENCODE_CONFIG pointing at a per-run JSON config
- *           ({"model":"provider/model"}). opencode has no ACP-mode reasoning
- *           effort knob (that is the `--variant` run flag), so effort warns.
- *           Agent-profile selection (LaneRequestOptions.agent) rides the same
- *           OPENCODE_CONFIG file's `default_agent` field — verified against
- *           opencode 1.17.18's published config JSON-schema (2026-07-13):
- *           `default_agent` is "Default agent to use when none is specified.
- *           Must be a primary agent." There is no ACP session-level agent
- *           field (schema.NewSessionRequest carries only cwd/mcpServers/
- *           additionalDirectories/_meta), so config is the only surface.
- * - codex   `npx -y @agentclientprotocol/codex-acp@<CODEX_ACP_VERSION>` — model +
- *           reasoning effort via CODEX_CONFIG (JSON merged into the Codex
- *           session config: {"model":...,"model_reasoning_effort":...});
- *           sandbox strictness via INITIAL_AGENT_MODE. Verified against the
- *           codex-acp 1.1.2 source (src/AgentMode.ts): three modes exist, not
- *           two — `read-only` (readOnly sandbox, no writes at all), `agent`
+ * - opencode `opencode acp` — no model or agent flag on the acp subcommand.
+ *           A per-run config selects the model (when requested) and an inline
+ *           `clanker-worker` primary agent, keeping Clanker's ACP worker
+ *           contract out of the user's normal opencode configuration. The
+ *           same JSON is supplied through OPENCODE_CONFIG_CONTENT because
+ *           project config loads after OPENCODE_CONFIG and could otherwise
+ *           replace the selected agent or weaken its permissions.
+ *           opencode has no ACP-mode reasoning-effort knob (that is the
+ *           `--variant` run flag), so effort warns.
+ *
+ *           MERGE NOTE (rebase of fix/codex-acp-local-dep-bypass-npx onto
+ *           main, 2026-07-18): main separately grew a caller-supplied
+ *           `LaneRequestOptions.agent` (a named opencode agent-profile
+ *           override via `default_agent`, e.g. a markdown profile under
+ *           `~/.config/opencode/agents/<name>.md`) before this isolation
+ *           commit existed. This isolation commit's own fixed `clanker-worker`
+ *           contract is a security fix for an observed incident (a read-only
+ *           lane reaching `tachi_task`/`tachi_skill`), so a caller-chosen
+ *           `default_agent` overriding it here would silently reopen exactly
+ *           that hole. This rebase resolution keeps the isolation
+ *           non-bypassable and treats opencode's `agent` capability as
+ *           retired (CAPS.opencode.agent = false; a request that sets
+ *           `opts.agent` for opencode now just warns and is ignored, same as
+ *           any other unsupported-capability request). That is a judgment
+ *           call made during conflict resolution, not a verified product
+ *           decision — flag for explicit sign-off before this lands.
+ * - codex   `@agentclientprotocol/codex-acp` as a local dependency (`npm i
+ *           --save`), spawned directly as `node <its dist/index.js>` instead
+ *           of `npx -y @agentclientprotocol/codex-acp`. npx's cold-start
+ *           registry/package resolution measured ~35s per lane spawn
+ *           (reproduced 2026-07-17) — a local dependency is already on disk,
+ *           so codex-acp's ACP handshake comes back in ~1s instead. The
+ *           package is installed with `--ignore-scripts` to skip its own
+ *           `@openai/codex` dependency's postinstall (which downloads a
+ *           ~178MB bundled Codex binary we don't need); CODEX_PATH below
+ *           points codex-acp at the system's already-installed `codex`
+ *           instead of that bundled copy. Model + reasoning effort still go
+ *           via CODEX_CONFIG (JSON merged into the Codex session config:
+ *           {"model":...,"model_reasoning_effort":...}); sandbox strictness
+ *           via INITIAL_AGENT_MODE. Verified against the codex-acp 1.1.2
+ *           source (src/AgentMode.ts): three modes exist, not two —
+ *           `read-only` (readOnly sandbox, no writes at all), `agent`
  *           (workspaceWrite sandbox: writes boxed to the session cwd + tmp —
  *           this is the middle tier `opts.sandbox="workspace-write"` maps
  *           to), and `agent-full-access` (dangerFullAccess: writes anywhere,
@@ -46,27 +71,84 @@
  *           acp-client.ts CP5) — a second belt, not a substitute for the
  *           worktree boundary.
  *
- *           The npx spec is version-pinned, not `@latest`. 2026-07-13 incident
- *           precedent: an unpinned `@latest` silently picked up a codex-acp
- *           release whose app-server mode registered a reserved
- *           `collaboration.spawn_agent` tool (multi_agent_v2), breaking every
- *           codex dispatch with a turn-1 400 that nobody could pin to a code
- *           change because the dependency itself had moved under us. Upgrading
- *           codex-acp is now an explicit, reviewable act: bump
- *           `CODEX_ACP_VERSION` below and run `npm run smoke -- codex` (and a
- *           sol-model-override smoke) before trusting the new version.
+ *           codex-acp only starts Codex in `app-server` mode (never `exec`),
+ *           and app-server registers a `collaboration.spawn_agent` tool
+ *           whenever the (currently "under development") multi_agent_v2
+ *           feature is on — reproduced 2026-07-13 as a turn-1, zero-tool-call
+ *           HTTP 400 ("Function 'collaboration.spawn_agent' is reserved for
+ *           use by this model and must match the configured schema") on both
+ *           the default and sol-override codex lanes; `codex exec` with the
+ *           same model + same global config was unaffected, confirming the
+ *           break is app-server-specific, not a Clanker- or model-side bug.
+ *           Every Clanker codex dispatch is solo by contract (no delegation,
+ *           no sub-agent fan-out), so this tool is dead weight for us even
+ *           when it's healthy. Disable multi_agent_v2 for Clanker's own
+ *           session config only — this does not touch the shared
+ *           ~/.codex/config.toml default (owner may still want it on for
+ *           interactive sessions) and forecloses the whole reserved-schema
+ *           failure class for Clanker regardless of upstream cause.
+ *
+ *           codex-acp's version is pinned in package.json (exact, not `^`),
+ *           not via a runtime npx `@version` arg — see the 2026-07-13
+ *           version-drift incident note in the git history for why an
+ *           unpinned version is unacceptable (an unpinned release silently
+ *           picked up the reserved collaboration.spawn_agent schema above).
+ *           Bumping codex-acp is an explicit `npm i --save
+ *           @agentclientprotocol/codex-acp@<version>`, reviewed like any
+ *           other dependency bump, followed by `npm run smoke -- codex` (and
+ *           a sol-model-override smoke) before trusting the new version.
  */
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { resolveOcModel } from "./constants.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "./types.js";
 
+const nodeRequire = createRequire(import.meta.url);
+
 /**
- * Pinned `@agentclientprotocol/codex-acp` version. Verified-working as of
- * 2026-07-13 (see file header). Never widen this back to `@latest` — bump it
- * deliberately and re-smoke.
+ * Resolve @agentclientprotocol/codex-acp's own entry script through Node's
+ * module resolution rather than a path hardcoded relative to this source
+ * file. That walk works the same whether this file is running from the tsc
+ * `dist/` build or the esbuild-bundled `plugin/dist/clanker-mcp.mjs` (the
+ * package is never bundled into that file — codex-acp is spawned as a
+ * subprocess, never `import`ed — so it stays a real node_modules lookup at
+ * runtime in both cases).
  */
-const CODEX_ACP_VERSION = "1.1.2";
+function resolveCodexAcpEntry(): string {
+  const pkgJsonPath = nodeRequire.resolve("@agentclientprotocol/codex-acp/package.json");
+  return path.join(path.dirname(pkgJsonPath), "dist", "index.js");
+}
+
+/**
+ * Resolve the real `codex` CLI binary from PATH ourselves, rather than pass
+ * the bare string "codex" through and let codex-acp's own internal spawn
+ * resolve it. `codex` on this machine (and possibly others) is a zsh
+ * *alias* (`codex --dangerously-bypass-approvals-and-sandbox`) — irrelevant
+ * to `child_process.spawn` without `shell: true` (which neither Clanker's
+ * nor codex-acp's spawn calls use), but codex-acp's own PATH lookup depends
+ * on whatever PATH the Clanker MCP server process happened to inherit,
+ * which the acp-client.ts PATH-prepend comment already flags as sometimes
+ * minimal. Resolving the absolute path here, in the same process that
+ * builds the spawn spec, removes that indirection.
+ */
+function resolveSystemCodexPath(): string {
+  const searchPath = process.env.PATH ?? "";
+  for (const dir of searchPath.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, "codex");
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      /* not here, keep looking */
+    }
+  }
+  // Nothing executable found on PATH; fall back to the bare name so
+  // codex-acp's own resolution gets a chance (and the failure, if any, is
+  // codex-acp's ENOENT rather than us silently swallowing it here).
+  return "codex";
+}
 
 interface LaneCapabilities {
   model: boolean;
@@ -81,7 +163,11 @@ interface LaneCapabilities {
 
 const CAPS: Record<LaneName, LaneCapabilities> = {
   codex: { model: true, effort: true, nativeReadOnly: true, sandbox: true, agent: false },
-  opencode: { model: true, effort: false, nativeReadOnly: false, sandbox: false, agent: true },
+  // opencode's `agent` capability is retired as of the clanker-worker isolation
+  // fix below: the worker's identity and permission set are fixed by Clanker,
+  // not caller-selectable, so a caller-supplied `opts.agent` now just warns
+  // (see the file header MERGE NOTE for why this couldn't be a silent merge).
+  opencode: { model: true, effort: false, nativeReadOnly: false, sandbox: false, agent: false },
   grok: { model: true, effort: true, nativeReadOnly: false, sandbox: false, agent: false },
 };
 
@@ -95,6 +181,40 @@ const SANDBOX_TO_AGENT_MODE: Record<string, string> = {
   "workspace-write": "agent",
   "danger-full-access": "agent-full-access",
 };
+
+function opencodeClankerAgent(readOnly: boolean) {
+  return {
+    description: "Dedicated OpenCode ACP worker controlled by Clanker.",
+    mode: "primary",
+    permission: {
+      // OpenCode flattens every injected MCP tool to `${server}_${tool}` and
+      // matches the permission globs against those concrete names before the
+      // LLM request (session/tools.ts -> permission/index.ts). Denying that
+      // namespace is what actually closes the door: a read-only lane was
+      // observed calling `tachi_task` (it really spawned a claude dispatch)
+      // and `tachi_skill`, because `task`/`skill` below only ever matched the
+      // NATIVE tools of those exact names. Native tools are all compact
+      // lowercase — bash/read/glob/grep/edit/write/webfetch/todowrite — so
+      // this costs the worker nothing (`apply_patch` and the MCP resource
+      // helpers are normalized to `edit`/`read` before the glob runs).
+      // Do NOT "simplify" this to `mcp: {}` in the config: configs deep-merge,
+      // so an empty mcp object removes no ambient server. This is the fix.
+      "*_*": "deny",
+      task: "deny",
+      skill: "deny",
+      external_directory: "deny",
+      edit: readOnly ? "deny" : "allow",
+      bash: readOnly ? "deny" : "allow",
+    },
+    prompt: [
+      "You are a Clanker-controlled OpenCode ACP worker.",
+      "Execute only the exact task supplied by the parent in the provided working directory.",
+      "Clanker owns the session lifecycle, workspace or worktree selection, cancellation, and progress reporting.",
+      "Never spawn or delegate to subagents, load skills, access paths outside the current worktree, create or switch worktrees, or attempt to manage Clanker itself.",
+      "Return concrete results, changed files, verification evidence, and any remaining risk to the parent.",
+    ].join("\n"),
+  } as const;
+}
 
 /**
  * Build the concrete spawn recipe for a lane.
@@ -138,29 +258,41 @@ export function buildSpawnSpec(
       // Shortnames (glm/ds/kimi/free) resolve to full provider/model ids from the
       // single source in constants.ts; full ids pass through unchanged.
       const model = resolveOcModel(opts.model);
-      const cfg: Record<string, unknown> = { $schema: "https://opencode.ai/config.json" };
-      if (model) cfg.model = model;
-      // opencode's ACP session (session/new) has no per-session agent field —
-      // the only selection surface is config, via `default_agent` (verified
-      // against opencode 1.17.18's published config schema: a top-level
-      // string, "Must be a primary agent"). Names a markdown agent profile
-      // under ~/.config/opencode/agents/<name>.md.
-      if (opts.agent) cfg.default_agent = opts.agent;
-      if (Object.keys(cfg).length > 1) {
-        const cfgPath = path.join(runDir, "opencode-config.json");
-        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
-        env.OPENCODE_CONFIG = cfgPath;
-      }
+      // NOTE (rebase merge resolution): main's `opts.agent` (caller-selected
+      // default_agent) is intentionally NOT honored here — see the file
+      // header MERGE NOTE. The clanker-worker identity below is fixed.
+      const config: Record<string, unknown> = {
+        $schema: "https://opencode.ai/config.json",
+        default_agent: "clanker-worker",
+        agent: { "clanker-worker": opencodeClankerAgent(opts.readOnly === true) },
+      };
+      if (model) config.model = model;
+
+      const cfgPath = path.join(runDir, "opencode-config.json");
+      fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2));
+      env.OPENCODE_CONFIG = cfgPath;
+      env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config);
+      // Clanker's worker has its own fixed contract and must not ingest the
+      // interactive Claude/Codex skill layer from ~/.claude or ~/.agents.
+      // The public compatibility flag suppresses .claude; 1.17.x's narrower
+      // external-skills flag also suppresses .agents. `permission.skill=deny`
+      // above remains the enforcement fallback if discovery behavior changes.
+      env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
+      env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
       return { command: "opencode", args, env, warnings };
     }
 
     case "codex": {
-      const codexConfig: Record<string, unknown> = {};
+      // Clanker dispatches are always solo (no delegation, no sub-agent
+      // fan-out) — never advertise Codex's own multi-agent collaboration
+      // tool into these sessions. See the file header for why this is also
+      // a live-incident guard, not just an unused-capability trim.
+      const codexConfig: Record<string, unknown> = {
+        features: { multi_agent_v2: { enabled: false } },
+      };
       if (opts.model) codexConfig.model = opts.model;
       if (opts.effort) codexConfig.model_reasoning_effort = opts.effort;
-      if (Object.keys(codexConfig).length > 0) {
-        env.CODEX_CONFIG = JSON.stringify(codexConfig);
-      }
+      env.CODEX_CONFIG = JSON.stringify(codexConfig);
       // opts.sandbox (workspace-write middle tier) takes precedence when set;
       // otherwise unchanged legacy behavior derived from readOnly.
       const agentMode = opts.sandbox
@@ -169,12 +301,12 @@ export function buildSpawnSpec(
           ? "read-only"
           : "agent-full-access";
       env.INITIAL_AGENT_MODE = agentMode;
-      return {
-        command: "npx",
-        args: ["-y", `@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}`],
-        env,
-        warnings,
-      };
+      // CODEX_PATH tells codex-acp which `codex` binary to spawn for its
+      // app-server. We install codex-acp with --ignore-scripts (see file
+      // header), so its own bundled @openai/codex copy was never
+      // downloaded — CODEX_PATH is load-bearing, not an optional override.
+      env.CODEX_PATH = resolveSystemCodexPath();
+      return { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings };
     }
   }
 }
