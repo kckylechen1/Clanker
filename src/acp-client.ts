@@ -72,8 +72,10 @@ export function choosePermissionOption(
 }
 
 /**
- * Resolve `requestedPath` against `root` and verify the result stays within
- * `root` (inclusive), returning the resolved absolute path if so.
+ * Resolve `requestedPath` against `root`, verify the result stays within
+ * `root` (inclusive), and return the fully realpath'd absolute path — the
+ * SAME string the caller must then hand to `fs.readFileSync`/
+ * `fs.writeFileSync`.
  *
  * This fences the ACP `fs/read_text_file` / `fs/write_text_file` handlers to
  * the session's own worktree/cwd. Those two RPCs are served by direct
@@ -87,12 +89,36 @@ export function choosePermissionOption(
  * absolute, but nothing stops a misbehaving agent from sending one) resolve
  * against `root`, not `process.cwd()` of the MCP server.
  *
- * Symlink-safe: walks up from the resolved path to the nearest ancestor that
- * actually exists, realpath's *that*, and rejects if the realpath'd result
- * falls outside `root`'s own realpath. This catches both a symlinked
- * component of `root` itself (e.g. macOS's `/tmp` -> `/private/tmp`, which
- * would otherwise cause a false-positive escape) and a symlink planted
- * inside the worktree that points outside it (e.g. `<root>/link -> /etc`).
+ * TOCTOU-safe by construction: an earlier version of this function checked
+ * the realpath'd form but RETURNED the un-resolved `path.resolve(...)` form,
+ * leaving the actual `fs.readFileSync`/`fs.writeFileSync` call (which the
+ * caller invoked on that returned string) to resolve symlinks a *second*
+ * time — a real gap between "verified" and "used" that a symlink planted in
+ * that window (swapping an in-root intermediate component for one pointing
+ * outside root) could walk through. There is now only one resolution: the
+ * value returned here already has every already-existing path component
+ * canonicalized, so the caller's later `fs.*Sync(resolved, ...)` call has no
+ * remaining symlink for the OS to re-resolve differently than what was just
+ * checked — check and use are the same string, not two independent
+ * resolutions of the same request.
+ *
+ * For a target that doesn't exist yet (a write to a new file): realpaths the
+ * nearest existing ancestor and appends the non-existing suffix literally
+ * (there is nothing to resolve for a path component that doesn't exist).
+ * This still closes the window for every ancestor directory component,
+ * which is where a symlink swap would have to land to matter — a symlink
+ * literally named as the not-yet-existing leaf itself is a narrower,
+ * separate race (classic TOCTOU-on-create) that only `O_EXCL`/`O_NOFOLLOW`
+ * at the syscall level fully closes; that's unchanged by this fix and out of
+ * scope for it (see `realpathOfNearestExisting`).
+ *
+ * Symlink-safe on the check side too: walks up from the resolved path to the
+ * nearest ancestor that actually exists, realpath's *that*, and rejects if
+ * the realpath'd result falls outside `root`'s own realpath. This catches
+ * both a symlinked component of `root` itself (e.g. macOS's `/tmp` ->
+ * `/private/tmp`, which would otherwise cause a false-positive escape) and a
+ * symlink planted inside the worktree that points outside it (e.g.
+ * `<root>/link -> /etc`).
  */
 export function resolveWithinRoot(root: string, requestedPath: string): string {
   const resolvedRoot = fs.realpathSync(root);
@@ -104,7 +130,7 @@ export function resolveWithinRoot(root: string, requestedPath: string): string {
       `refusing to escape session root '${resolvedRoot}': '${requestedPath}' resolved to '${real}'`,
     );
   }
-  return absPath;
+  return real;
 }
 
 /**
@@ -323,7 +349,16 @@ export class LaneConnection {
         );
       }
       fs.writeFileSync(resolved, params.content);
-      onFileWritten?.(resolved);
+      // onFileWritten's argument is a cosmetic/display value only (feeds the
+      // touched-files digest and run.ts's relative-to-cwd rendering) — it is
+      // never used to open a file, so it deliberately does NOT use
+      // `resolved` (now fully realpath'd for the security-critical fs call
+      // above). Using `resolved` here would make a run whose cwd sits behind
+      // a symlinked ancestor (e.g. macOS's /tmp -> /private/tmp) show
+      // touched-file paths rewritten to /private/tmp/..., which is correct
+      // but not what the caller passed in and not what run.cwd is compared
+      // against for the relative-path display.
+      onFileWritten?.(path.resolve(cwd, params.path));
       return {};
     };
 

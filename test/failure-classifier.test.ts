@@ -100,6 +100,13 @@ test("isCapacityTransient does not match an auth rejection (401/403 must not be 
   assert.equal(isCapacityTransient("403 Forbidden: authentication_error"), false);
 });
 
+// ---- #5b: over-match regression guards (context-anchored, not bare digits/substrings) ----
+
+test("#5b: isCapacityTransient does NOT fire on a bare numeric field that happens to equal a status code", () => {
+  assert.equal(isCapacityTransient('{"line":429}'), false, "a line number, not an HTTP status");
+  assert.equal(isCapacityTransient('{"port":503}'), false, "a port number, not an HTTP status");
+});
+
 // ---- CLANKER-AUTH-FAILURE classification ---------------------------------
 
 test("tags a 401 status as CLANKER-AUTH-FAILURE, any turn/tool-call count", () => {
@@ -138,6 +145,15 @@ test("tags an 'unauthorized' backend message as CLANKER-AUTH-FAILURE even mid-co
   assert.equal(cls, AUTH_FAILURE_TAG);
 });
 
+test("#5b: a bare 401/403 digit with NO auth context is not tagged CLANKER-AUTH-FAILURE", () => {
+  const cls = classifyTurnFailure({
+    message: "parse error at line 401: unexpected token",
+    turnsCount: 1,
+    toolCalls: 0,
+  });
+  assert.equal(cls, undefined, "a line number, not an auth rejection — no auth-shaped context present");
+});
+
 // ---- CLANKER-GIT-LOCK classification --------------------------------------
 
 test("tags an index.lock message as CLANKER-GIT-LOCK", () => {
@@ -165,4 +181,22 @@ test("does not tag an ordinary content/runtime failure as auth or git-lock", () 
     toolCalls: 0,
   });
   assert.equal(cls, undefined);
+});
+
+test("#5b: an unrelated 'myindex.lock' filename (no git context) is not tagged CLANKER-GIT-LOCK", () => {
+  const cls = classifyTurnFailure({
+    message: "renamed the working copy to myindex.lock as a backup",
+    turnsCount: 1,
+    toolCalls: 2,
+  });
+  assert.equal(cls, undefined, "'myindex.lock' contains the substring 'index.lock' but isn't git-related");
+});
+
+test("#5b: an unrelated '.lock' file outside a git context is not tagged CLANKER-GIT-LOCK", () => {
+  const cls = classifyTurnFailure({
+    message: "wrote the daily report snapshot to /tmp/report.lock",
+    turnsCount: 1,
+    toolCalls: 1,
+  });
+  assert.equal(cls, undefined, "an arbitrary .lock file with no git mention anywhere in the message");
 });

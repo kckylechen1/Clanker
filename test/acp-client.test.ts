@@ -110,17 +110,17 @@ test("two sequential prompts reuse the same session", async () => {
 // prompt-injected absolute path (or a symlink planted inside the worktree)
 // from escaping the session's cwd/worktree root.
 
-test("resolveWithinRoot: an in-root relative path resolves against root, not process.cwd()", () => {
+test("resolveWithinRoot: an in-root relative path resolves against root (realpath'd), not process.cwd()", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-guard-"));
   const resolved = resolveWithinRoot(root, "sub/file.txt");
-  assert.equal(resolved, path.join(root, "sub/file.txt"));
+  assert.equal(resolved, path.join(fs.realpathSync(root), "sub/file.txt"));
 });
 
-test("resolveWithinRoot: an in-root absolute path resolves as-is", () => {
+test("resolveWithinRoot: an in-root absolute path resolves to its realpath — the exact string a later fs call must use", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-guard-"));
   const target = path.join(root, "notes.txt");
   fs.writeFileSync(target, "hi");
-  assert.equal(resolveWithinRoot(root, target), target);
+  assert.equal(resolveWithinRoot(root, target), fs.realpathSync(target));
 });
 
 test("resolveWithinRoot: an absolute path outside root throws and never touches disk", () => {
@@ -171,15 +171,83 @@ test("resolveWithinRoot: root itself reached only via a symlinked ancestor still
   fs.symlinkSync(realRoot, symlinkedRoot, "dir");
   // Root passed to resolveWithinRoot is the symlinked path (as os.tmpdir()
   // itself is on macOS, /tmp -> /private/tmp) — a legitimate in-root write
-  // target must not be rejected as a false-positive escape.
+  // target must not be rejected as a false-positive escape. The returned
+  // value is the fully realpath'd form (through the symlinked root), same
+  // as every other case — the one string a caller's fs call must use.
   const resolved = resolveWithinRoot(symlinkedRoot, "ok.txt");
-  assert.equal(resolved, path.join(symlinkedRoot, "ok.txt"));
+  assert.equal(resolved, path.join(fs.realpathSync(symlinkedRoot), "ok.txt"));
 });
 
-test("resolveWithinRoot: a not-yet-existing nested write target under root is admitted", () => {
+test("resolveWithinRoot: a not-yet-existing nested write target under root is admitted (realpath'd)", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-guard-"));
   const resolved = resolveWithinRoot(root, path.join(root, "newdir", "newfile.txt"));
-  assert.equal(resolved, path.join(root, "newdir", "newfile.txt"));
+  assert.equal(resolved, path.join(fs.realpathSync(root), "newdir", "newfile.txt"));
+});
+
+// ---- #2b: no second resolution — check path === fs-use path (TOCTOU) -----
+//
+// An earlier version of resolveWithinRoot verified the realpath'd form but
+// RETURNED the un-resolved path.resolve(...) form. A caller that then called
+// fs.writeFileSync/readFileSync on that returned string forced the OS to
+// resolve symlinks a SECOND time — leaving a real gap: if an in-root symlink
+// component gets swapped (by another local process/attacker) to point
+// outside root between the check and that second resolution, the
+// write/read follows the NEW target, escaping the fence that just approved
+// it. Returning the already-realpath'd string closes this: the string
+// handed to fs.*Sync no longer contains the swappable symlink's name at
+// all, so re-swapping it after the check can't redirect a write/read that
+// never references it by name.
+
+test("resolveWithinRoot: returns the realpath'd form, not the literal requested path, when an in-root symlink is involved", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-toctou-"));
+  const actualDir = path.join(root, "actual");
+  fs.mkdirSync(actualDir);
+  const linkPath = path.join(root, "link");
+  fs.symlinkSync(actualDir, linkPath, "dir");
+
+  const requested = path.join(root, "link", "file.txt");
+  const resolved = resolveWithinRoot(root, requested);
+
+  assert.notEqual(resolved, requested, "must not be the literal, symlink-containing requested path");
+  assert.equal(resolved, path.join(fs.realpathSync(actualDir), "file.txt"));
+});
+
+test("#2b: swapping an in-root symlink to point outside root AFTER the check does not redirect a write using the returned (realpath'd) string", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-toctou-"));
+  const actualDir = path.join(root, "actual");
+  fs.mkdirSync(actualDir);
+  const linkPath = path.join(root, "link");
+  fs.symlinkSync(actualDir, linkPath, "dir"); // in-root symlink at check time
+
+  const requested = path.join(root, "link", "file.txt");
+  const resolved = resolveWithinRoot(root, requested); // check passes: link -> actual, in-root
+
+  // Attacker action in the window between "checked" and "used": swap the
+  // symlink to point somewhere outside root entirely.
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-toctou-outside-"));
+  fs.unlinkSync(linkPath);
+  fs.symlinkSync(outsideDir, linkPath, "dir");
+
+  // The fixed handler uses `resolved` (already realpath'd through the
+  // ORIGINAL target, "actual") for the actual fs call — not `requested`
+  // (which still names the now-hijacked "link").
+  fs.writeFileSync(resolved, "safe-content");
+  assert.equal(fs.readFileSync(path.join(actualDir, "file.txt"), "utf8"), "safe-content");
+  assert.equal(
+    fs.existsSync(path.join(outsideDir, "file.txt")),
+    false,
+    "the swapped symlink must not have been followed when using the returned, already-realpath'd string",
+  );
+
+  // Contrast (proves the bug this fix closes): writing to the literal
+  // `requested` string — the OLD, buggy return value — WOULD now follow the
+  // hijacked symlink and escape root, since it still names "link" by string.
+  fs.writeFileSync(requested, "escaped-content");
+  assert.equal(
+    fs.readFileSync(path.join(outsideDir, "file.txt"), "utf8"),
+    "escaped-content",
+    "sanity check: a literal requested-path write DOES escape post-swap — proving the fix's returned string is what actually matters",
+  );
 });
 
 // ---- end-to-end: the ACP fs handlers actually enforce the guard ----------

@@ -61,30 +61,51 @@ const API_SCHEMA_ERROR_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
- * Authentication/credential-rejection signatures (401/403, an explicit
- * invalid-API-key message, or the backend's own "authentication error"/
- * "unauthorized" text). Unlike the schema-rejection check above, these are
- * classified regardless of turn count or tool-call count: a bad credential
- * fails identically on every turn, not just the first, so there's no reason
- * to gate detection to "turn 1, zero tool calls".
+ * Authentication/credential-rejection signatures: an explicit
+ * invalid-API-key message, or the backend's own "authentication error" /
+ * "unauthorized" / "forbidden" text. These are self-contained phrases — the
+ * word itself already IS the auth context, so no extra anchor is needed.
+ * Unlike the schema-rejection check above, these are classified regardless
+ * of turn count or tool-call count: a bad credential fails identically on
+ * every turn, not just the first, so there's no reason to gate detection to
+ * "turn 1, zero tool calls".
  */
-const AUTH_ERROR_PATTERNS: readonly RegExp[] = [
-  /\b401\b/,
-  /\b403\b/,
+const AUTH_PHRASE_PATTERNS: readonly RegExp[] = [
   /invalid[_ -]?api[_ -]?key/i,
   /authentication[_ -]?error/i,
   /\bunauthorized\b/i,
+  /\bforbidden\b/i,
 ];
+
+/**
+ * A bare 401/403 status code, by itself, is NOT enough — e.g. a line number,
+ * a port, or an unrelated numeric field can read as "401"/"403" with zero
+ * auth relevance. Only classify a bare status code as CLANKER-AUTH-FAILURE
+ * when it co-occurs (anywhere in the same message) with auth-shaped context:
+ * "auth"/"unauthorized"/"forbidden"/"api key"/"credential".
+ */
+const AUTH_STATUS_CODE_PATTERN = /\b(401|403)\b/;
+const AUTH_CONTEXT_PATTERN = /\b(auth\w*|unauthorized|forbidden|api[ _-]?key|credential\w*)\b/i;
 
 /**
  * Local git index-lock contention signatures — another git process (a
  * concurrent lane, a stray `git` invocation) is holding `index.lock` in the
  * same worktree. Advisory only: this is transient contention, not a
- * permanent rejection, but it's not this classifier's job to decide a retry
+ * permanent rejection like auth or schema; the other process is expected to
+ * release the lock, but it's not this classifier's job to decide a retry
  * policy for it (unlike capacity, there's no fixed backoff that reliably
  * outlives another process's lock hold).
+ *
+ * `GIT_LOCK_PATH_PATTERN` matches the real artifact's path shape directly
+ * (`.git/index.lock` / `.git\index.lock`) — self-contained, no extra anchor
+ * needed. The looser `index.lock` substring match and the generic "Unable
+ * to create ... .lock" phrasing are both over-broad on their own (they'd
+ * match `myindex.lock` or an unrelated `/tmp/report.lock`), so those only
+ * count when the message also mentions `git` somewhere.
  */
-const GIT_LOCK_PATTERNS: readonly RegExp[] = [/index\.lock/, /[Uu]nable to create.*\.lock/];
+const GIT_LOCK_PATH_PATTERN = /\.git[\\/]index\.lock/i;
+const GIT_CONTEXT_PATTERN = /\bgit\b/i;
+const GIT_LOCK_GENERIC_PATTERN = /index\.lock|unable to create.*\.lock/i;
 
 /**
  * Classify a failed turn's terminal error message, returning a
@@ -114,10 +135,16 @@ export function classifyTurnFailure(params: {
       return INFRA_FAILURE_TAG;
     }
   }
-  if (AUTH_ERROR_PATTERNS.some((re) => re.test(params.message))) {
+  if (AUTH_PHRASE_PATTERNS.some((re) => re.test(params.message))) {
     return AUTH_FAILURE_TAG;
   }
-  if (GIT_LOCK_PATTERNS.some((re) => re.test(params.message))) {
+  if (AUTH_STATUS_CODE_PATTERN.test(params.message) && AUTH_CONTEXT_PATTERN.test(params.message)) {
+    return AUTH_FAILURE_TAG;
+  }
+  if (GIT_LOCK_PATH_PATTERN.test(params.message)) {
+    return GIT_LOCK_TAG;
+  }
+  if (GIT_CONTEXT_PATTERN.test(params.message) && GIT_LOCK_GENERIC_PATTERN.test(params.message)) {
     return GIT_LOCK_TAG;
   }
   return undefined;
@@ -136,15 +163,26 @@ export function classifyTurnFailure(params: {
  * CLANKER-AUTH-FAILURE by classifyTurnFailure must never be retried even if
  * it also happens to match one of these patterns — callers must check
  * classifyTurnFailure first.
+ *
+ * The phrase patterns below are self-contained (the phrase itself already IS
+ * the capacity/overload context). A bare status code alone is NOT — e.g.
+ * `{"line":429}` or a port/config value can read as one of these codes with
+ * zero HTTP/rate-limit relevance — so a bare 429/500/502/503/504 only counts
+ * when it co-occurs with HTTP/rate-limit context (http/status/rate limit/too
+ * many requests/retry). That co-occurrence check naturally covers phrasings
+ * like "429 Too Many Requests" / "HTTP 429" / "status: 429" without needing
+ * a separate pattern per phrasing.
  */
-const CAPACITY_TRANSIENT_PATTERNS: readonly RegExp[] = [
+const CAPACITY_TRANSIENT_PHRASE_PATTERNS: readonly RegExp[] = [
   /model[ _-]?at[ _-]?capacity/i,
   /\boverloaded\b/i,
   /\bservice unavailable\b/i,
-  /\b(429|500|502|503|504)\b/,
 ];
+const CAPACITY_STATUS_CODE_PATTERN = /\b(429|500|502|503|504)\b/;
+const HTTP_STATUS_CONTEXT_PATTERN = /\b(http|status|rate limit|too many requests|retry)\b/i;
 
 /** True when the error text looks like a transient backend-capacity condition worth one retry. */
 export function isCapacityTransient(message: string): boolean {
-  return CAPACITY_TRANSIENT_PATTERNS.some((re) => re.test(message));
+  if (CAPACITY_TRANSIENT_PHRASE_PATTERNS.some((re) => re.test(message))) return true;
+  return CAPACITY_STATUS_CODE_PATTERN.test(message) && HTTP_STATUS_CONTEXT_PATTERN.test(message);
 }
