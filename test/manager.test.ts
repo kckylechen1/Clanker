@@ -421,3 +421,96 @@ test("reaped session rejects clanker_prompt", async () => {
     await m.shutdown();
   }
 });
+
+// ---- #6: LaneManager runs/warningsById GC (memory-leak fix) --------------
+//
+// Prior to this fix, close() only ever flipped `sessionClosed`, never
+// deleted the run's `runs`/`warningsById` map entries — every dispatched run
+// stayed resident in this stdio server's memory for the process lifetime.
+// A private-field cast is used here (not new public API) purely to make the
+// map-entry deletion itself directly observable, on top of the black-box
+// proof (status()/wait() now genuinely throw "not found" post-GC, a real
+// behavior change from before this fix, where they'd return the closed run's
+// last state forever).
+
+function mapsOf(m: LaneManager): { runs: Map<string, unknown>; warningsById: Map<string, unknown> } {
+  return m as unknown as { runs: Map<string, unknown>; warningsById: Map<string, unknown> };
+}
+
+test("#6: a closed non-seat run's map entries survive the tick it closed in, then are freed on the NEXT reap tick", async () => {
+  const m = makeManager({ sessionTtlMs: 60 });
+  try {
+    const { id } = await m.dispatchStart({ lane: "opencode", prompt: "gc-me", cwd: os.tmpdir(), readOnly: true });
+    await waitTerminal(m, id);
+    assert.ok(mapsOf(m).runs.has(id), "run present immediately after dispatch completes");
+
+    await new Promise((r) => setTimeout(r, 120));
+    const firstReap = await m.reap();
+    assert.ok(firstReap.includes(id), "idle-TTL close happens on this tick");
+
+    // Not deleted yet — a caller mid-poll (clanker_wait/clanker_status) right
+    // after the auto/idle-close must still be able to read the terminal
+    // result; that's the whole reason deletion is deferred to the *next*
+    // tick instead of living inside close() itself.
+    assert.ok(mapsOf(m).runs.has(id), "run entry NOT deleted on the same tick it closed in");
+    assert.ok(mapsOf(m).warningsById.has(id), "warningsById entry NOT deleted on the same tick it closed in");
+    const statusAfterFirstReap = m.status(id);
+    assert.equal(statusAfterFirstReap.status, "done", "status() still readable right after the closing tick");
+
+    const secondReap = await m.reap();
+    assert.ok(!secondReap.includes(id), "nothing live left to close/kill on the second tick");
+    assert.equal(mapsOf(m).runs.has(id), false, "run entry freed on the reap tick AFTER it closed");
+    assert.equal(mapsOf(m).warningsById.has(id), false, "warningsById entry freed alongside it");
+    assert.throws(() => m.status(id), /not found/, "status() now genuinely reports the run gone, not stale-forever");
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("#6: an explicitly-closed non-seat run is also freed on the next reap tick (not just idle-TTL closes)", async () => {
+  const m = makeManager();
+  try {
+    const { id } = await m.dispatchStart({ lane: "opencode", prompt: "gc-me-explicit", cwd: os.tmpdir(), readOnly: true });
+    await waitTerminal(m, id);
+    await m.close(id); // explicit clanker_close, not idle-TTL
+    assert.ok(mapsOf(m).runs.has(id), "still present immediately after the explicit close call");
+
+    await m.reap();
+    assert.equal(mapsOf(m).runs.has(id), false, "freed on the next reap tick even for an explicit close");
+    assert.equal(mapsOf(m).warningsById.has(id), false);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("#6: a seat run's map entries are exempted from GC even after an explicit clanker_close", async () => {
+  const m = makeManager({ sessionTtlMs: 60 });
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "opencode",
+      prompt: "seat-gc-check",
+      cwd: os.tmpdir(),
+      readOnly: true,
+      seat: true,
+    });
+    await waitTerminal(m, id);
+
+    // Idle-TTL path: seats only ever get soft-reaped (subprocess killed,
+    // sessionClosed stays false) — never eligible for GC via that path.
+    await new Promise((r) => setTimeout(r, 120));
+    await m.reap();
+    assert.ok(mapsOf(m).runs.has(id), "soft-reaped seat is never GC-eligible (sessionClosed stays false)");
+
+    // Explicit clanker_close DOES set sessionClosed — this fix deliberately
+    // scopes GC to non-seat runs only, so the entry must still survive a
+    // subsequent reap tick (respawn plumbing/seat.json semantics for a
+    // closed seat are out of scope for this change).
+    await m.close(id);
+    await m.reap();
+    assert.ok(mapsOf(m).runs.has(id), "explicitly-closed seat is exempted from this fix's GC");
+    const status = m.status(id);
+    assert.equal(status.status, "done", "closed seat's status is still readable (unchanged behavior)");
+  } finally {
+    await m.shutdown();
+  }
+});

@@ -71,6 +71,63 @@ export function choosePermissionOption(
   return { outcome: { outcome: "selected", optionId: allow.optionId } };
 }
 
+/**
+ * Resolve `requestedPath` against `root` and verify the result stays within
+ * `root` (inclusive), returning the resolved absolute path if so.
+ *
+ * This fences the ACP `fs/read_text_file` / `fs/write_text_file` handlers to
+ * the session's own worktree/cwd. Those two RPCs are served by direct
+ * `fs.readFileSync`/`fs.writeFileSync` calls in *this* Node process (the MCP
+ * server), not inside the sandboxed lane subprocess — so they bypass whatever
+ * subprocess/worktree isolation the lane itself has. A prompt-injected
+ * absolute path (e.g. `~/.ssh/authorized_keys`, `~/.zshrc`) would otherwise
+ * read or overwrite arbitrary files outside the worktree.
+ *
+ * Relative `requestedPath` values (the ACP spec documents `path` as always
+ * absolute, but nothing stops a misbehaving agent from sending one) resolve
+ * against `root`, not `process.cwd()` of the MCP server.
+ *
+ * Symlink-safe: walks up from the resolved path to the nearest ancestor that
+ * actually exists, realpath's *that*, and rejects if the realpath'd result
+ * falls outside `root`'s own realpath. This catches both a symlinked
+ * component of `root` itself (e.g. macOS's `/tmp` -> `/private/tmp`, which
+ * would otherwise cause a false-positive escape) and a symlink planted
+ * inside the worktree that points outside it (e.g. `<root>/link -> /etc`).
+ */
+export function resolveWithinRoot(root: string, requestedPath: string): string {
+  const resolvedRoot = fs.realpathSync(root);
+  const absPath = path.resolve(root, requestedPath);
+  const real = realpathOfNearestExisting(absPath);
+  const withinRoot = real === resolvedRoot || real.startsWith(resolvedRoot + path.sep);
+  if (!withinRoot) {
+    throw new Error(
+      `refusing to escape session root '${resolvedRoot}': '${requestedPath}' resolved to '${real}'`,
+    );
+  }
+  return absPath;
+}
+
+/**
+ * Realpath the nearest existing ancestor of `p` (which may not itself
+ * exist — a write target), and re-append the non-existing suffix literally.
+ * Used to resolve symlinks in already-existing path components while still
+ * supporting a write to a not-yet-created file/directory.
+ */
+function realpathOfNearestExisting(p: string): string {
+  const suffix: string[] = [];
+  let cur = p;
+  for (;;) {
+    if (fs.existsSync(cur)) {
+      const real = fs.realpathSync(cur);
+      return suffix.length ? path.join(real, ...suffix) : real;
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur) return p; // hit filesystem root with no existing ancestor
+    suffix.unshift(path.basename(cur));
+    cur = parent;
+  }
+}
+
 export interface LaneConnectionOptions {
   spec: SpawnSpec;
   cwd: string;
@@ -243,7 +300,8 @@ export class LaneConnection {
 
     const handleReadTextFile = (params: ReadTextFileRequest): ReadTextFileResponse => {
       try {
-        const content = fs.readFileSync(params.path, "utf8");
+        const resolved = resolveWithinRoot(cwd, params.path);
+        const content = fs.readFileSync(resolved, "utf8");
         return { content };
       } catch (e) {
         throw new Error(`read_text_file failed for ${params.path}: ${e instanceof Error ? e.message : String(e)}`);
@@ -256,8 +314,16 @@ export class LaneConnection {
       if (readOnly) {
         throw new Error(`write rejected: Clanker is read-only (path=${params.path})`);
       }
-      fs.writeFileSync(params.path, params.content);
-      onFileWritten?.(params.path);
+      let resolved: string;
+      try {
+        resolved = resolveWithinRoot(cwd, params.path);
+      } catch (e) {
+        throw new Error(
+          `write rejected: path escapes session root (path=${params.path}, root=${cwd}): ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      fs.writeFileSync(resolved, params.content);
+      onFileWritten?.(resolved);
       return {};
     };
 

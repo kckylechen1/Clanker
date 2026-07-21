@@ -599,11 +599,45 @@ export class LaneManager {
    * never the session/worktree (session death) — `sessionClosed` stays false
    * so clanker_prompt can respawn + session/resume later (promptExisting).
    * Non-seat runs are unaffected: full close() as before.
+   *
+   * Memory GC (#6): once a non-seat run is already `sessionClosed` (from a
+   * prior reap tick's idle-close, an auto-close on turn failure, or an
+   * explicit clanker_close), its `runs`/`warningsById` entries are freed on
+   * the NEXT reap tick — never in the same tick it just closed in, and never
+   * inside close() itself. That matters: close() runs both on the terminal
+   * path a caller is actively mid-poll on (e.g. clanker_wait/clanker_status
+   * immediately after an auto-close on turn failure — see the
+   * CLANKER-INFRA-FAILURE test in manager.test.ts, which reads status()
+   * right after such a close()) AND as the deliberate clanker_close
+   * teardown; those two calls are literally the same function with no
+   * distinguishing signal, so deleting inside close() would risk yanking
+   * the record out from under a caller still reading the terminal result.
+   * Deferring the delete to the *next* tick (this reaper runs on the same
+   * cadence as the idle-TTL sweep, `disableReaper` in tests keeps it off
+   * entirely unless a test calls reap() itself) gives every terminal-read
+   * path (wait/status/cancel/promptExisting — all of which already throw
+   * "not found" once the map entry is gone) a full interval to have already
+   * observed the terminal state before the entry disappears. list() already
+   * treats a closed run as invisible (`if (run.sessionClosed) continue`
+   * below), so this only stops the record from being retained forever after
+   * it's already unreachable through every normal read path.
+   *
+   * Seat runs are exempted here on purpose (scope of this fix): a seat only
+   * reaches `sessionClosed=true` via an explicit clanker_close — this
+   * reaper's soft-reap path for seats never sets it — so there's no
+   * unbounded-growth vector for them from idle/failure alone; a seat's own
+   * post-clanker_close cleanup is left for a separate change if needed.
    */
   async reap(): Promise<string[]> {
     const reaped: string[] = [];
     for (const run of [...this.runs.values()]) {
-      if (run.sessionClosed) continue;
+      if (run.sessionClosed) {
+        if (!run.seat) {
+          this.runs.delete(run.id);
+          this.warningsById.delete(run.id);
+        }
+        continue;
+      }
       if (run.turnStatus !== "running" && run.idleMs() > this.sessionTtlMs) {
         if (run.seat) {
           // Only soft-reap once: after the first pass connections.has(id) is

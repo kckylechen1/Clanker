@@ -25,6 +25,16 @@
  *   TRICKLE  -> emit a trivial tool_call, delay, then a significant plan update,
  *               delay, then end_turn — for clanker_wait quiet-mode debounce tests
  *               (the tool_call must not cut a wait short; the plan update must).
+ *   FSWRITE <path> -> issue a real `fs/write_text_file` request to the client for
+ *               <path> (content "fswrite-test-content"), then emit
+ *               "FSWRITE_OK" or "FSWRITE_ERROR:<message>" as the final agent
+ *               message depending on whether the client accepted or rejected it.
+ *               Exercises acp-client.ts's handleWriteTextFile (and its
+ *               resolveWithinRoot path-escape guard) end-to-end, the same RPC
+ *               path a real prompt-injected lane would use.
+ *   FSREAD <path> -> issue a real `fs/read_text_file` request to the client for
+ *               <path>, then emit "FSREAD_OK:<content>" or
+ *               "FSREAD_ERROR:<message>" as the final agent message.
  *   <other>  -> emit one agent_message_chunk equal to the prompt, then end_turn.
  *
  * Env vars (seat/resume tests, see test/seat.test.ts and test/acp-client.test.ts):
@@ -179,6 +189,32 @@ async function runPrompt(id, sessionId, promptText) {
         respond(id, { stopReason: "end_turn" });
       },
     );
+    return;
+  }
+
+  if (p.includes("FSWRITE")) {
+    const m = promptText.match(/FSWRITE\s+(\S+)/);
+    const targetPath = m ? m[1] : null;
+    sendRequest(
+      "fs/write_text_file",
+      { sessionId, path: targetPath, content: "fswrite-test-content" },
+      (result, error) => {
+        const text = error ? `FSWRITE_ERROR:${error.message}` : "FSWRITE_OK";
+        update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock(text) });
+        respond(id, { stopReason: "end_turn" });
+      },
+    );
+    return;
+  }
+
+  if (p.includes("FSREAD")) {
+    const m = promptText.match(/FSREAD\s+(\S+)/);
+    const targetPath = m ? m[1] : null;
+    sendRequest("fs/read_text_file", { sessionId, path: targetPath }, (result, error) => {
+      const text = error ? `FSREAD_ERROR:${error.message}` : `FSREAD_OK:${result.content}`;
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock(text) });
+      respond(id, { stopReason: "end_turn" });
+    });
     return;
   }
 
