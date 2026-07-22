@@ -14,17 +14,24 @@ Bundles the Clanker dispatch surface over ACP:
   always forces `readOnly:true`. They loop `clanker_wait` until the turn completes and return
   only `final_message` + result fields. Their UI rows read `clanker:codex` / `clanker:grok` /
   `clanker:oc`.
-- **Clanker supervisor** `clanker:supervisor` — packaged sonnet lifecycle controller for
-  isolated write runs. It can start, wait, correct, or cancel a worker, but has no file,
-  shell, test, or git tools.
+- **Clanker writer** `clanker:writer` — packaged haiku zero-discretion relay for non-GLM
+  isolated writes. Its only start tool forces write mode, requires a managed worktree, and
+  rejects the GLM model even when addressed by its full provider id.
+- **GLM supervisor** `clanker:supervisor` — packaged sonnet lifecycle controller only for
+  GLM writes. Its dedicated start tool fixes the lane and model server-side. It can start,
+  wait, correct, or cancel GLM, but has no file, shell, test, or git tools.
 - **Commands** `/clanker:codex`, `/clanker:grok`, `/clanker:glm`, `/clanker:deepseek`,
   `/clanker:kimi`, `/clanker:free`, `/clanker:oc` ([`commands/`](commands)) —
   argument mapping preserved from the current habits. Read-only calls use the lane relay;
-  write calls use the packaged `clanker:supervisor` with `read_only:false` and a mandatory
-  managed worktree. `--background` / default mode maps to the outer Agent's
+  non-GLM writes use `clanker:writer`, while GLM writes alone use the Sonnet
+  `clanker:supervisor`; both write paths require a managed worktree. `--background` /
+  default mode maps to the outer Agent's
   `run_in_background`; oc model shortnames resolve server-side. The Claude `Agent` call is
   the visible lifecycle owner: it holds the Clanker task row while the MCP server only owns
   the ACP backend.
+
+All generic MCP start/dispatch paths reject Opencode GLM writes too; the dedicated
+`clanker_dispatch_glm_write_start` path is the only server-supported GLM write entrypoint.
 
 ## Install (adjudicator runs these; the implementer does not touch user config)
 
@@ -60,7 +67,7 @@ To uninstall later: `claude plugin uninstall clanker@clanker` and
 | `/oc-dispatch ds <task>` | `/clanker:deepseek <task>` | fixed DeepSeek Clanker |
 | `/oc-dispatch kimi <task>` | `/clanker:kimi <task>` | fixed Kimi Clanker |
 | `/oc-dispatch <provider/model> <task>` | `/clanker:oc <provider/model> <task>` | advanced generic Clanker: Opencode |
-| `~/bin/lane-run codex\|grok\|oc <prompt-file>` | `/clanker:*` or `clanker:supervisor` | retired; do not fall back to direct CLI dispatch |
+| `~/bin/lane-run codex\|grok\|oc <prompt-file>` | `/clanker:*` | retired; do not fall back to direct CLI dispatch |
 | codex-companion (background poll) | Claude background Clanker wrapping `clanker_dispatch_start` + `clanker_wait` | task is visible under Claude Code, no shell notification dependency |
 
 ## Read-only and write isolation (the real safety boundary)
@@ -106,7 +113,8 @@ client's own file-write RPC handler and permission auto-decline, a second belt.
 
 The read-only relay agents restrict `tools:` to
 `mcp__plugin_clanker_clanker__clanker_dispatch_readonly_start` and
-`mcp__plugin_clanker_clanker__clanker_wait`; the supervisor gets only the four lifecycle tools
+`mcp__plugin_clanker_clanker__clanker_wait`; the writer gets the forced-write start + wait,
+while the GLM supervisor gets its dedicated GLM forced-write start + wait/prompt/cancel lifecycle tools
 (the `mcp__plugin_<plugin>_<server>__<tool>` convention).
 If your Claude Code version namespaces plugin MCP tools differently, the agents would
 have no tools; verify the exact names after install (`/plugin` inventory or the tool

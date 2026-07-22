@@ -14,7 +14,7 @@ Clanker exposes these slash commands:
 | `/clanker:free <task>` | Opencode free model |
 | `/clanker:oc <provider/model> <task>` | Advanced Opencode model override (`composer` and `grok45` remain distinct aliases) |
 
-Default mode is background: the Claude `Agent` task owns the visible bottom task row, while the MCP server owns the ACP backend process. Use `--wait` to run foreground. Read-only commands use mechanically read-only lane relays; `--write` uses the packaged `clanker:supervisor` and a mandatory managed worktree.
+Default mode is background: the Claude `Agent` task owns the visible bottom task row, while the MCP server owns the ACP backend process. Use `--wait` to run foreground. Read-only commands use mechanically read-only lane relays. Non-GLM writes use `clanker:writer`; GLM writes alone use Sonnet `clanker:supervisor`. Every write runs in a mandatory managed worktree.
 
 ## Layout
 

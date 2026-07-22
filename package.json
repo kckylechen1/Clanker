@@ -1,6 +1,6 @@
 {
   "name": "clanker-mcp-server",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Unified MCP plugin driving Codex, Opencode, and Grok Clankers over ACP (Agent Client Protocol)",
   "type": "module",
   "main": "dist/index.js",

@@ -4,14 +4,14 @@ argument-hint: "[--background|--wait] [--write] [--model <model>] [--effort <eff
 allowed-tools: Agent
 ---
 
-Dispatch the task below to the **Clanker: Codex** via the `Agent` tool. Choose the Agent only after parsing the request: read-only calls use the mechanically read-only relay (`subagent_type: "clanker:codex"`); write calls use the packaged supervisor (`subagent_type: "clanker:supervisor"`). Both own the start-and-wait lifecycle and return the backend's final message + result fields.
+Dispatch the task below to the **Clanker: Codex** via the `Agent` tool. Choose the Agent only after parsing the request: read-only calls use `subagent_type: "clanker:codex"`; write calls use the zero-discretion isolated writer, `subagent_type: "clanker:writer"`. Sonnet supervision is reserved for GLM writes.
 
 Raw request:
 $ARGUMENTS
 
 Argument mapping (resolve these, then pass explicit parameters to the subagent):
 
-- `--write` present → `read_only: false`, a mandatory `worktree`, and `subagent_type: "clanker:supervisor"` so the supervised write path owns correction/cancellation. If the user did not name a branch, generate a default `worktree` like `clanker/codex-<short-timestamp>`. Absent `--write` (or `--read-only` present) → `read_only: true` and `subagent_type: "clanker:codex"` (safe relay default; no worktree needed).
+- `--write` present → `read_only: false`, a mandatory `worktree`, and `subagent_type: "clanker:writer"`. If the user did not name a branch, generate a default `worktree` like `clanker/codex-<short-timestamp>`. Absent `--write` (or `--read-only` present) → `read_only: true` and `subagent_type: "clanker:codex"` (safe relay default; no worktree needed).
 - `--model <model>` → `model` (passed through verbatim; codex maps it via CODEX_CONFIG). For `--write` with no model, use `gpt-5.6-terra`; with no effort, use `medium`. Read-only calls may omit both and retain the Codex default.
 - `--effort <effort>` → `effort` (codex reasoning effort).
 - Everything that is not a recognized flag is the natural-language `prompt`. Do not forward the flags themselves as prompt text.
@@ -25,8 +25,8 @@ Execution mode:
 
 Background flow:
 
-- Launch exactly one `Agent` tool call with the selected subagent type (`"clanker:codex"` for read-only, `"clanker:supervisor"` for write) and `run_in_background: true`.
-- The task text must be: "Dispatch as this Clanker. lane=codex. prompt=<task>. read_only=<bool>. worktree=<branch or omit>. model=<explicit model, gpt-5.6-terra for write, or omit for read-only>. effort=<explicit effort, medium for write, or omit for read-only>. Follow your relay/supervisor protocol."
+- Launch exactly one `Agent` tool call with the selected subagent type (`"clanker:codex"` for read-only, `"clanker:writer"` for write) and `run_in_background: true`.
+- The task text must be: "Dispatch as this Clanker. lane=codex. prompt=<task>. read_only=<bool>. worktree=<branch or omit>. model=<explicit model, gpt-5.6-terra for write, or omit for read-only>. effort=<explicit effort, medium for write, or omit for read-only>. Follow your relay protocol."
 - Do not call MCP dispatch tools in the main conversation.
 - Do not wait for the subagent or relay a final result in this turn.
 - After launching, tell the user: "Clanker: Codex started in the Claude Code background task list."

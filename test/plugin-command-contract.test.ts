@@ -3,16 +3,21 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const commands = [
-  { file: "codex.md", subagent: "clanker:codex", started: "Clanker: Codex started" },
-  { file: "grok.md", subagent: "clanker:grok", started: "Clanker: Grok started" },
-  { file: "oc.md", subagent: "clanker:oc", started: "Clanker: Opencode started" },
+  { file: "codex.md", subagent: "clanker:codex", writeAgents: ["clanker:writer"], started: "Clanker: Codex started" },
+  { file: "grok.md", subagent: "clanker:grok", writeAgents: ["clanker:writer"], started: "Clanker: Grok started" },
+  {
+    file: "oc.md",
+    subagent: "clanker:oc",
+    writeAgents: ["clanker:supervisor", "clanker:writer"],
+    started: "Clanker: Opencode started",
+  },
 ] as const;
 
 const fixedModelCommands = [
-  { file: "glm.md", label: "GLM", model: "glm" },
-  { file: "deepseek.md", label: "DeepSeek", model: "ds" },
-  { file: "kimi.md", label: "Kimi", model: "kimi" },
-  { file: "free.md", label: "Free", model: "free" },
+  { file: "glm.md", label: "GLM", model: "glm", writeAgent: "clanker:supervisor" },
+  { file: "deepseek.md", label: "DeepSeek", model: "ds", writeAgent: "clanker:writer" },
+  { file: "kimi.md", label: "Kimi", model: "kimi", writeAgent: "clanker:writer" },
+  { file: "free.md", label: "Free", model: "free", writeAgent: "clanker:writer" },
 ] as const;
 
 for (const command of commands) {
@@ -23,10 +28,11 @@ for (const command of commands) {
 
     assert.match(body, /argument-hint: .*--background\|--wait/);
     assert.match(body, new RegExp(`subagent_type: "${command.subagent}"`));
-    assert.match(body, /subagent_type: "clanker:supervisor"/);
     assert.match(writeMapping, /read_only: false/);
     assert.match(writeMapping, /mandatory `worktree`/);
-    assert.match(writeMapping, /subagent_type: "clanker:supervisor"/);
+    for (const writeAgent of command.writeAgents) {
+      assert.match(writeMapping, new RegExp(`subagent_type: "${writeAgent}"`));
+    }
     assert.match(writeMapping, /read_only: true/);
     assert.match(writeMapping, new RegExp(`subagent_type: "${command.subagent}"`));
     assert.match(body, /If neither flag is present, default to background/);
@@ -47,10 +53,10 @@ for (const command of fixedModelCommands) {
 
     assert.match(body, new RegExp(`Clanker: ${command.label}`));
     assert.match(body, /subagent_type: "clanker:oc"/);
-    assert.match(body, /subagent_type: "clanker:supervisor"/);
+    assert.match(body, new RegExp(`subagent_type: "${command.writeAgent}"`));
     assert.match(writeMapping, /read_only: false/);
     assert.match(writeMapping, /mandatory `worktree`/);
-    assert.match(writeMapping, /subagent_type: "clanker:supervisor"/);
+    assert.match(writeMapping, new RegExp(`subagent_type: "${command.writeAgent}"`));
     assert.match(writeMapping, /read_only: true/);
     assert.match(writeMapping, /subagent_type: "clanker:oc"/);
     assert.match(body, new RegExp(`Fixed \`model: "${command.model}"\``));
@@ -70,29 +76,47 @@ for (const relay of ["codex", "grok", "oc"] as const) {
     assert.doesNotMatch(frontmatter, /__clanker_dispatch_start(?:,|\s|$)/);
     assert.match(body, /server always forces `readOnly: true`/);
     assert.match(body, /You cannot start a write worker/);
-    assert.match(body, /REJECTED-NEEDS-SUPERVISOR/);
-    assert.match(body, /Agent\(subagent_type="clanker:supervisor"\)/);
+    assert.match(body, /REJECTED-NEEDS-WRITER/);
+    assert.match(body, /Agent\(subagent_type="clanker:writer"\)/);
+    assert.match(body, /timeout_ms=55000/);
+    assert.match(body, /quiet=true/);
   });
 }
 
-test("packaged supervisor owns write lifecycle tools without file or shell tools", async () => {
+test("packaged supervisor is restricted to GLM write supervision", async () => {
   const body = await readFile(new URL("../plugin/agents/supervisor.md", import.meta.url), "utf8");
   const frontmatter = body.split("---")[1] ?? "";
 
   assert.match(frontmatter, /name: supervisor/);
-  assert.match(frontmatter, /clanker_dispatch_start/);
+  assert.match(frontmatter, /clanker_dispatch_glm_write_start/);
+  assert.doesNotMatch(frontmatter, /__clanker_dispatch_write_start/);
   assert.match(frontmatter, /clanker_wait/);
   assert.match(frontmatter, /clanker_prompt/);
   assert.match(frontmatter, /clanker_cancel/);
   assert.doesNotMatch(frontmatter, /Bash|Edit|Write|Read/);
-  assert.match(body, /write run requires `read_only: false` and a non-empty `worktree`/);
+  assert.match(body, /Accept only `lane=opencode`, `model=glm`, `read_only=false`/);
+  assert.match(body, /Do not supervise Terra, Grok, Composer, DeepSeek, Kimi, free, or review runs/);
+});
+
+test("packaged writer handles non-GLM writes without correction authority", async () => {
+  const body = await readFile(new URL("../plugin/agents/writer.md", import.meta.url), "utf8");
+  const frontmatter = body.split("---")[1] ?? "";
+
+  assert.match(frontmatter, /name: writer/);
+  assert.match(frontmatter, /clanker_dispatch_write_start/);
+  assert.doesNotMatch(frontmatter, /clanker_dispatch_glm_write_start/);
+  assert.match(frontmatter, /clanker_wait/);
+  assert.doesNotMatch(frontmatter, /clanker_prompt|clanker_cancel|Bash|Edit/);
+  assert.match(body, /Reject the Opencode GLM alias `model=glm` and its full id/);
+  assert.match(body, /timeout_ms=55000/);
 });
 
 test("README documents the Claude-owned lifecycle instead of shell-style completion", async () => {
   const body = await readFile(new URL("../plugin/README.md", import.meta.url), "utf8");
 
   assert.match(body, /The Claude `Agent` call is\s+the visible lifecycle owner/);
-  assert.match(body, /write calls use the packaged `clanker:supervisor`/);
+  assert.match(body, /non-GLM writes use `clanker:writer`/);
+  assert.match(body, /GLM writes alone use the Sonnet\s+`clanker:supervisor`/);
   assert.match(body, /Claude-owned background Clanker task by default/);
   assert.match(body, /task is visible under Claude Code, no shell notification dependency/);
   assert.match(body, /\/clanker:glm/);

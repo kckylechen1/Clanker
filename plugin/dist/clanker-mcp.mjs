@@ -27758,7 +27758,7 @@ var RUNS_ROOT = process.env.CLANKER_RUNS_ROOT ?? path.join(os.homedir(), ".cache
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.1.4";
+var SERVER_VERSION = "0.1.5";
 var OC_MODEL_ALIASES = {
   glm: "zhipuai-coding-plan/glm-5.2",
   ds: "deepseek/deepseek-v4-pro",
@@ -32437,7 +32437,7 @@ var dispatchShape = {
   lane: laneEnum.describe("Backend Clanker to drive: codex | opencode | grok"),
   prompt: external_exports.string().min(1).describe("The task/prompt to send to the Clanker"),
   cwd: external_exports.string().optional().describe("Absolute working directory (default: server base repo)"),
-  worktree: external_exports.string().optional().describe("Branch name; server creates a git worktree cut from origin/main and runs there"),
+  worktree: external_exports.string().trim().min(1).optional().describe("Branch name; server creates a git worktree cut from origin/main and runs there"),
   model: external_exports.string().optional().describe("Model override, e.g. 'zhipuai-coding-plan/glm-5.2' (opencode) \u2014 warned & echoed if the Clanker can't honor it"),
   effort: external_exports.string().optional().describe("Reasoning effort override (codex/grok only)"),
   read_only: external_exports.boolean().optional().describe("If true, the Clanker is gated read-only (default false)"),
@@ -32452,6 +32452,21 @@ var dispatchShape = {
   )
 };
 var readonlyDispatchShape = external_exports.object(dispatchShape).omit({ read_only: true }).shape;
+var writeDispatchShape = external_exports.object(dispatchShape).omit({ read_only: true }).extend({
+  model: external_exports.string().trim().min(1).describe("Required explicit model id or supported alias"),
+  worktree: external_exports.string().trim().min(1).describe("Required branch name for the server-created isolated worktree")
+}).shape;
+var glmWriteDispatchShape = external_exports.object(dispatchShape).omit({ lane: true, model: true, effort: true, read_only: true, sandbox: true, agent: true }).extend({
+  worktree: external_exports.string().trim().min(1).describe("Required branch name for the server-created isolated GLM worktree")
+}).shape;
+var GLM_MODEL_ID = resolveOcModel("glm")?.toLowerCase();
+function isGlmModel(model) {
+  if (!model || !GLM_MODEL_ID) return false;
+  return resolveOcModel(model.trim().toLowerCase())?.toLowerCase() === GLM_MODEL_ID;
+}
+function rejectsUnsupervisedGlmWrite(args) {
+  return args.lane === "opencode" && isGlmModel(args.model) && !(args.read_only ?? false);
+}
 function progressSender(extra) {
   if (!PROGRESS_EXPERIMENTAL) return void 0;
   const e = extra;
@@ -32487,6 +32502,9 @@ function registerTools(server, manager) {
     },
     async (args) => {
       try {
+        if (rejectsUnsupervisedGlmWrite(args)) {
+          return fail("GLM writes require clanker_dispatch_glm_write_start and Sonnet supervision");
+        }
         const { id, warnings } = await manager.dispatchStart(toDispatch(args));
         return ok({ id, warnings });
       } catch (e) {
@@ -32512,12 +32530,54 @@ function registerTools(server, manager) {
     }
   );
   server.registerTool(
+    "clanker_dispatch_write_start",
+    {
+      title: "Start an isolated write-capable Clanker turn (non-blocking)",
+      description: "Write-relay start path. The server always forces read_only=false and requires a managed worktree branch. Returns {id} immediately; poll with clanker_wait(id).",
+      inputSchema: writeDispatchShape,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+    },
+    async (args) => {
+      try {
+        if (isGlmModel(args.model)) {
+          return fail("GLM writes require clanker_dispatch_glm_write_start and Sonnet supervision");
+        }
+        const { id, warnings } = await manager.dispatchStart({ ...toDispatch(args), readOnly: false });
+        return ok({ id, warnings });
+      } catch (e) {
+        return fail(msg(e));
+      }
+    }
+  );
+  server.registerTool(
+    "clanker_dispatch_glm_write_start",
+    {
+      title: "Start a supervised isolated GLM write turn (non-blocking)",
+      description: "GLM-supervisor-only start path. The server fixes lane=opencode, model=glm, read_only=false, and requires a managed worktree branch. Returns {id} immediately; poll with clanker_wait(id).",
+      inputSchema: glmWriteDispatchShape,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+    },
+    async (args) => {
+      try {
+        const { id, warnings } = await manager.dispatchStart({
+          ...toDispatch({ ...args, lane: "opencode", model: "glm" }),
+          readOnly: false
+        });
+        return ok({ id, warnings });
+      } catch (e) {
+        return fail(msg(e));
+      }
+    }
+  );
+  server.registerTool(
     "clanker_wait",
     {
       title: "Long-poll a Clanker run",
       description: `Wait up to timeout_ms (default ${DEFAULT_WAIT_MS}, cap ${MAX_WAIT_MS}) for new events or completion. Returns {status, digest, plan_summary, last_event_age_ms, suspected_stall}; when status is terminal also {final_message, touched_files, plan_final}, and on error also {error, failure_class}. digest is a human-readable summary of events since the previous wait \u2014 tool titles, file writes, plan check changes, key message sentences. failure_class="CLANKER-INFRA-FAILURE" means the backend rejected the request shape on turn 1 with zero tool calls \u2014 retrying the identical dispatch is pointless; run a smoke check first. Quiet mode (default on): only wakes before the deadline on a plan/status change, a tool error, a suspected stall, or a terminal state \u2014 trivial chatter (a tool_call starting, a file-location echo, a message-chunk fragment) does not cut the wait short, so callers no longer need to repoll tightly just because the run is reading/grepping. Pass quiet:false for the old any-event wake-up.`,
       inputSchema: {
-        id: external_exports.string().describe("Run id from clanker_dispatch_start / clanker_dispatch_readonly_start / clanker_dispatch"),
+        id: external_exports.string().describe(
+          "Run id from a Clanker dispatch/start tool"
+        ),
         timeout_ms: external_exports.number().int().min(0).optional().describe(`Long-poll window in ms (default ${DEFAULT_WAIT_MS}, capped at ${MAX_WAIT_MS})`),
         quiet: external_exports.boolean().optional().describe(
           "Debounce mode (default true): wake early only on plan/status change, tool error, suspected stall, or terminal state. quiet:false restores waking on every trivial event (tool_call start, file echo, message chunk) \u2014 the pre-debounce behavior."
@@ -32545,6 +32605,9 @@ function registerTools(server, manager) {
     },
     async (args, extra) => {
       try {
+        if (rejectsUnsupervisedGlmWrite(args)) {
+          return fail("GLM writes require clanker_dispatch_glm_write_start and Sonnet supervision");
+        }
         const result = await manager.dispatchBlocking(toDispatch(args), progressSender(extra));
         return ok(result);
       } catch (e) {

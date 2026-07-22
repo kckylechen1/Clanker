@@ -9,7 +9,7 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { DEFAULT_WAIT_MS, MAX_WAIT_MS, PROGRESS_EXPERIMENTAL } from "./constants.js";
+import { DEFAULT_WAIT_MS, MAX_WAIT_MS, PROGRESS_EXPERIMENTAL, resolveOcModel } from "./constants.js";
 import type { LaneManager, WaitResult } from "./manager.js";
 import { LANE_NAMES, type CodexSandboxMode, type LaneName } from "./types.js";
 
@@ -25,6 +25,8 @@ const dispatchShape = {
   cwd: z.string().optional().describe("Absolute working directory (default: server base repo)"),
   worktree: z
     .string()
+    .trim()
+    .min(1)
     .optional()
     .describe("Branch name; server creates a git worktree cut from origin/main and runs there"),
   model: z
@@ -68,6 +70,35 @@ const dispatchShape = {
 // public arguments and forcing it in the handler makes their read-only
 // boundary mechanical rather than dependent on prompt compliance.
 const readonlyDispatchShape = z.object(dispatchShape).omit({ read_only: true }).shape;
+
+// Write relays get the symmetric hard boundary: callers cannot flip the mode,
+// and a non-empty managed-worktree branch is required by the schema before the
+// manager's own CP2 check runs.
+const writeDispatchShape = z
+  .object(dispatchShape)
+  .omit({ read_only: true })
+  .extend({
+    model: z.string().trim().min(1).describe("Required explicit model id or supported alias"),
+    worktree: z.string().trim().min(1).describe("Required branch name for the server-created isolated worktree"),
+  }).shape;
+
+const glmWriteDispatchShape = z
+  .object(dispatchShape)
+  .omit({ lane: true, model: true, effort: true, read_only: true, sandbox: true, agent: true })
+  .extend({
+    worktree: z.string().trim().min(1).describe("Required branch name for the server-created isolated GLM worktree"),
+  }).shape;
+
+const GLM_MODEL_ID = resolveOcModel("glm")?.toLowerCase();
+
+function isGlmModel(model: string | undefined): boolean {
+  if (!model || !GLM_MODEL_ID) return false;
+  return resolveOcModel(model.trim().toLowerCase())?.toLowerCase() === GLM_MODEL_ID;
+}
+
+function rejectsUnsupervisedGlmWrite(args: { lane: string; model?: string; read_only?: boolean }): boolean {
+  return args.lane === "opencode" && isGlmModel(args.model) && !(args.read_only ?? false);
+}
 
 function progressSender(extra: unknown): ((r: WaitResult) => void) | undefined {
   if (!PROGRESS_EXPERIMENTAL) return undefined;
@@ -114,6 +145,9 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
     },
     async (args) => {
       try {
+        if (rejectsUnsupervisedGlmWrite(args)) {
+          return fail("GLM writes require clanker_dispatch_glm_write_start and Sonnet supervision");
+        }
         const { id, warnings } = await manager.dispatchStart(toDispatch(args));
         return ok({ id, warnings });
       } catch (e) {
@@ -142,6 +176,50 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
   );
 
   server.registerTool(
+    "clanker_dispatch_write_start",
+    {
+      title: "Start an isolated write-capable Clanker turn (non-blocking)",
+      description:
+        "Write-relay start path. The server always forces read_only=false and requires a managed worktree branch. Returns {id} immediately; poll with clanker_wait(id).",
+      inputSchema: writeDispatchShape,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async (args) => {
+      try {
+        if (isGlmModel(args.model)) {
+          return fail("GLM writes require clanker_dispatch_glm_write_start and Sonnet supervision");
+        }
+        const { id, warnings } = await manager.dispatchStart({ ...toDispatch(args), readOnly: false });
+        return ok({ id, warnings });
+      } catch (e) {
+        return fail(msg(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "clanker_dispatch_glm_write_start",
+    {
+      title: "Start a supervised isolated GLM write turn (non-blocking)",
+      description:
+        "GLM-supervisor-only start path. The server fixes lane=opencode, model=glm, read_only=false, and requires a managed worktree branch. Returns {id} immediately; poll with clanker_wait(id).",
+      inputSchema: glmWriteDispatchShape,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async (args) => {
+      try {
+        const { id, warnings } = await manager.dispatchStart({
+          ...toDispatch({ ...args, lane: "opencode", model: "glm" }),
+          readOnly: false,
+        });
+        return ok({ id, warnings });
+      } catch (e) {
+        return fail(msg(e));
+      }
+    },
+  );
+
+  server.registerTool(
     "clanker_wait",
     {
       title: "Long-poll a Clanker run",
@@ -149,7 +227,9 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
       inputSchema: {
         id: z
           .string()
-          .describe("Run id from clanker_dispatch_start / clanker_dispatch_readonly_start / clanker_dispatch"),
+          .describe(
+            "Run id from a Clanker dispatch/start tool",
+          ),
         timeout_ms: z
           .number()
           .int()
@@ -187,6 +267,9 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
     },
     async (args, extra) => {
       try {
+        if (rejectsUnsupervisedGlmWrite(args)) {
+          return fail("GLM writes require clanker_dispatch_glm_write_start and Sonnet supervision");
+        }
         const result = await manager.dispatchBlocking(toDispatch(args), progressSender(extra));
         return ok(result);
       } catch (e) {
