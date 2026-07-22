@@ -1,6 +1,9 @@
 node_modules/
 dist/
 plugin/dist/
+!plugin/dist/
+plugin/dist/*
+!plugin/dist/clanker-mcp.mjs
 .test-tmp/
 .DS_Store
 *.log

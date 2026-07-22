@@ -16,6 +16,8 @@ test("CP3: resolveOcModel expands shortnames and passes full ids through", () =>
   assert.equal(resolveOcModel("ds"), "deepseek/deepseek-v4-pro");
   assert.equal(resolveOcModel("kimi"), "kimi-for-coding/k2p7");
   assert.equal(resolveOcModel("free"), "opencode/deepseek-v4-flash-free");
+  assert.equal(resolveOcModel("composer"), "xai/grok-composer-2.5-fast");
+  assert.equal(resolveOcModel("grok45"), "xai/grok-4.5");
   assert.equal(resolveOcModel("anthropic/claude"), "anthropic/claude");
   assert.equal(resolveOcModel("unknown"), "unknown");
   assert.equal(resolveOcModel(undefined), undefined);
@@ -32,6 +34,23 @@ test("CP3: opencode lane pins the resolved model and dedicated worker in inline 
   assert.equal(cfg.agent?.["clanker-worker"]?.mode, "primary");
   assert.equal(cfg.agent?.["clanker-worker"]?.permission?.task, "deny");
   assert.deepEqual(cfg, JSON.parse(fs.readFileSync(spec.env.OPENCODE_CONFIG, "utf8")));
+});
+
+test("caller-selected agent profiles are warned and ignored on every lane", () => {
+  for (const lane of ["codex", "opencode", "grok"] as const) {
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), `clanker-${lane}-agent-`));
+    const spec = buildSpawnSpec(lane, { agent: "unsafe-profile" }, runDir);
+    assert.ok(
+      spec.warnings.includes(
+        `lane '${lane}' does not support agent profile override; ignoring agent='unsafe-profile'`,
+      ),
+    );
+    if (lane === "opencode") {
+      const cfg = JSON.parse(spec.env.OPENCODE_CONFIG_CONTENT);
+      assert.equal(cfg.default_agent, "clanker-worker");
+      assert.equal(Object.hasOwn(cfg.agent, "unsafe-profile"), false);
+    }
+  }
 });
 
 test("opencode read-only lane denies delegation, skills, external paths, edits, and shell", () => {
@@ -65,6 +84,45 @@ test("opencode write lane keeps worktree-local edit and shell enabled", () => {
   assert.equal(cfg.agent?.["clanker-worker"]?.permission?.edit, "allow");
   assert.equal(cfg.agent?.["clanker-worker"]?.permission?.bash, "allow");
   assert.equal(cfg.agent?.["clanker-worker"]?.permission?.external_directory, "deny");
+});
+
+// ---- grok process-local containment -------------------------------------
+
+test("grok read-only lane overrides permissive user config with native containment", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-grok-read-"));
+  const spec = buildSpawnSpec("grok", { readOnly: true, effort: "high" }, runDir);
+  assert.equal(spec.command, "grok");
+  assert.deepEqual(spec.args, [
+    "--sandbox",
+    "read-only",
+    "--permission-mode",
+    "default",
+    "--no-subagents",
+    "agent",
+    "--no-leader",
+    "--model",
+    "grok-4.5",
+    "--reasoning-effort",
+    "high",
+    "stdio",
+  ]);
+});
+
+test("grok write lane requests native workspace sandbox and honors a model override", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-grok-write-"));
+  const spec = buildSpawnSpec("grok", { readOnly: false, model: "grok-preview" }, runDir);
+  assert.deepEqual(spec.args, [
+    "--sandbox",
+    "workspace",
+    "--permission-mode",
+    "default",
+    "--no-subagents",
+    "agent",
+    "--no-leader",
+    "--model",
+    "grok-preview",
+    "stdio",
+  ]);
 });
 
 // ---- codex sandbox override (review-seat workspace-write tier) ----------
@@ -104,7 +162,7 @@ test("codex sandbox override takes precedence over readOnly when both are set", 
   assert.equal(spec.env.INITIAL_AGENT_MODE, "agent");
 });
 
-test("grok/opencode warn and ignore a sandbox override (no native sandbox tier)", () => {
+test("grok/opencode warn and ignore the codex-only sandbox override", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-sandbox-"));
   const grokSpec = buildSpawnSpec("grok", { sandbox: "workspace-write" }, runDir);
   assert.ok(grokSpec.warnings.some((w) => /sandbox/.test(w)), `expected a sandbox warning, got ${JSON.stringify(grokSpec.warnings)}`);

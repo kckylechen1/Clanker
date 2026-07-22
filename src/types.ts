@@ -31,8 +31,10 @@ export interface SpawnSpec {
  *   - "danger-full-access" -> INITIAL_AGENT_MODE=agent-full-access (writes
  *                             anywhere, no sandbox — today's `readOnly:
  *                             false` default when `sandbox` is unset)
- * Only the codex lane honors this (grok/opencode have no native sandbox
- * mode); other lanes warn and ignore it, same pattern as `model`/`effort`.
+ * Only the codex lane honors this caller-selected override. Grok has its own
+ * fixed read-only/workspace sandbox mapping derived from `readOnly`, while
+ * opencode uses its fixed worker permission profile; both warn and ignore
+ * this codex-specific option.
  */
 export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 
@@ -44,10 +46,9 @@ export interface LaneRequestOptions {
   /** codex-only sandbox strictness override — see CodexSandboxMode. */
   sandbox?: CodexSandboxMode;
   /**
-   * opencode-only: selects a primary agent profile (e.g. a markdown agent
-   * under `~/.config/opencode/agents/<name>.md`) via OPENCODE_CONFIG's
-   * `default_agent`. Ignored (warned) on codex/grok, same pattern as
-   * `model`/`effort`/`sandbox`.
+   * Deprecated compatibility field. Every lane ignores it with a warning;
+   * opencode always uses Clanker's fixed `clanker-worker` profile so callers
+   * cannot replace its permission boundary.
    */
   agent?: string;
 }

@@ -7,14 +7,14 @@ Clanker exposes these slash commands:
 | Command | Backend |
 |---|---|
 | `/clanker:codex <task>` | Codex ACP |
-| `/clanker:grok <task>` | Grok ACP |
+| `/clanker:grok <task>` | Grok ACP (`grok-4.5` by default; Composer 2.5 is a separate model) |
 | `/clanker:glm <task>` | Opencode with GLM |
 | `/clanker:deepseek <task>` | Opencode with DeepSeek |
 | `/clanker:kimi <task>` | Opencode with Kimi |
 | `/clanker:free <task>` | Opencode free model |
-| `/clanker:oc <provider/model> <task>` | Advanced Opencode model override |
+| `/clanker:oc <provider/model> <task>` | Advanced Opencode model override (`composer` and `grok45` remain distinct aliases) |
 
-Default mode is background: the Claude `Agent` task owns the visible bottom task row, while the MCP server owns the ACP backend process. Use `--wait` to run foreground.
+Default mode is background: the Claude `Agent` task owns the visible bottom task row, while the MCP server owns the ACP backend process. Use `--wait` to run foreground. Read-only commands use mechanically read-only lane relays; `--write` uses the packaged `clanker:supervisor` and a mandatory managed worktree.
 
 ## Layout
 
@@ -67,7 +67,7 @@ npm test
 npm run typecheck
 ```
 
-`npm run bundle` writes `plugin/dist/clanker-mcp.mjs`, the self-contained server bundle Claude loads from its plugin cache.
+`npm run bundle` writes `plugin/dist/clanker-mcp.mjs`, the tracked self-contained server bundle Claude loads from its plugin cache.
 
 ### Smoke — canary a lane before a real batch
 

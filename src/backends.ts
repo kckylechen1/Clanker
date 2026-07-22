@@ -6,8 +6,13 @@
  * Mechanisms below were derived from the installed CLIs' `--help` output and
  * the codex-acp package README (2026-07-06):
  *
- * - grok    `grok agent [--model M] [--reasoning-effort E] stdio`
- *           model + effort are flags on the `grok agent` parent command.
+ * - grok    `grok --sandbox <read-only|workspace> --permission-mode default
+ *           --no-subagents agent --no-leader [--model M]
+ *           [--reasoning-effort E] stdio`. The top-level safety flags must
+ *           precede `agent`; model + effort belong after `agent`. Clanker
+ *           never inherits Grok's user-level `always-approve` or shared
+ *           leader settings. The native sandbox is the filesystem boundary;
+ *           ACP permission rejection remains a second layer.
  * - opencode `opencode acp` — no model or agent flag on the acp subcommand.
  *           A per-run config selects the model (when requested) and an inline
  *           `clanker-worker` primary agent, keeping Clanker's ACP worker
@@ -153,8 +158,6 @@ function resolveSystemCodexPath(): string {
 interface LaneCapabilities {
   model: boolean;
   effort: boolean;
-  /** Whether the CLI enforces read-only at its own layer (vs client gate). */
-  nativeReadOnly: boolean;
   /** Whether the CLI exposes a mid-strictness native sandbox tier (see CodexSandboxMode). */
   sandbox: boolean;
   /** Whether the CLI can select a named agent/profile (see LaneRequestOptions.agent). */
@@ -162,13 +165,13 @@ interface LaneCapabilities {
 }
 
 const CAPS: Record<LaneName, LaneCapabilities> = {
-  codex: { model: true, effort: true, nativeReadOnly: true, sandbox: true, agent: false },
+  codex: { model: true, effort: true, sandbox: true, agent: false },
   // opencode's `agent` capability is retired as of the clanker-worker isolation
   // fix below: the worker's identity and permission set are fixed by Clanker,
   // not caller-selectable, so a caller-supplied `opts.agent` now just warns
   // (see the file header MERGE NOTE for why this couldn't be a silent merge).
-  opencode: { model: true, effort: false, nativeReadOnly: false, sandbox: false, agent: false },
-  grok: { model: true, effort: true, nativeReadOnly: false, sandbox: false, agent: false },
+  opencode: { model: true, effort: false, sandbox: false, agent: false },
+  grok: { model: true, effort: true, sandbox: false, agent: false },
 };
 
 /**
@@ -246,8 +249,22 @@ export function buildSpawnSpec(
 
   switch (lane) {
     case "grok": {
-      const args = ["agent"];
-      if (opts.model) args.push("--model", opts.model);
+      // Grok can authorize tools locally without asking the ACP client. Its
+      // user config on this machine is intentionally permissive for
+      // interactive work, so Clanker must override that state explicitly.
+      // Keep top-level flags before `agent`; the Grok CLI parser does not
+      // accept them on the agent subcommand.
+      const args = [
+        "--sandbox",
+        opts.readOnly === true ? "read-only" : "workspace",
+        "--permission-mode",
+        "default",
+        "--no-subagents",
+        "agent",
+        "--no-leader",
+        "--model",
+        opts.model ?? "grok-4.5",
+      ];
       if (opts.effort) args.push("--reasoning-effort", opts.effort);
       args.push("stdio");
       return { command: "grok", args, env, warnings };

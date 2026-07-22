@@ -9,15 +9,22 @@ Bundles the Clanker dispatch surface over ACP:
   reference files outside itself (so the server cannot live one level up). Regenerate
   it with `npm run bundle` from `/Users/kckylechen/Projects/Clanker` after changing `src/`.
 - **Clankers** `codex` / `grok` / `oc` ([`agents/`](agents)) — haiku,
-  zero-discretion long-poll relays. Each starts one `clanker_dispatch_start` and loops
-  `clanker_wait` until the turn completes, returning only `final_message` + result fields.
-  Their UI rows read `clanker:codex` / `clanker:grok` / `clanker:oc`.
+  zero-discretion read-only long-poll relays. Their only start tool is
+  `clanker_dispatch_readonly_start`, whose schema has no write override and whose handler
+  always forces `readOnly:true`. They loop `clanker_wait` until the turn completes and return
+  only `final_message` + result fields. Their UI rows read `clanker:codex` / `clanker:grok` /
+  `clanker:oc`.
+- **Clanker supervisor** `clanker:supervisor` — packaged sonnet lifecycle controller for
+  isolated write runs. It can start, wait, correct, or cancel a worker, but has no file,
+  shell, test, or git tools.
 - **Commands** `/clanker:codex`, `/clanker:grok`, `/clanker:glm`, `/clanker:deepseek`,
-  `/clanker:kimi`, `/clanker:oc` ([`commands/`](commands)) —
-  argument mapping preserved from the current habits (`--write` → `read_only:false`,
-  `--background` / default mode → outer Agent `run_in_background`, oc model shortnames
-  → full ids). The Claude `Agent` call is the visible lifecycle owner: it holds the
-  Clanker task row while the MCP server only owns the ACP backend.
+  `/clanker:kimi`, `/clanker:free`, `/clanker:oc` ([`commands/`](commands)) —
+  argument mapping preserved from the current habits. Read-only calls use the lane relay;
+  write calls use the packaged `clanker:supervisor` with `read_only:false` and a mandatory
+  managed worktree. `--background` / default mode maps to the outer Agent's
+  `run_in_background`; oc model shortnames resolve server-side. The Claude `Agent` call is
+  the visible lifecycle owner: it holds the Clanker task row while the MCP server only owns
+  the ACP backend.
 
 ## Install (adjudicator runs these; the implementer does not touch user config)
 
@@ -53,21 +60,26 @@ To uninstall later: `claude plugin uninstall clanker@clanker` and
 | `/oc-dispatch ds <task>` | `/clanker:deepseek <task>` | fixed DeepSeek Clanker |
 | `/oc-dispatch kimi <task>` | `/clanker:kimi <task>` | fixed Kimi Clanker |
 | `/oc-dispatch <provider/model> <task>` | `/clanker:oc <provider/model> <task>` | advanced generic Clanker: Opencode |
-| `~/bin/lane-run codex\|grok\|oc <prompt-file>` | `clanker_dispatch` / `clanker_dispatch_start` MCP tools (via the ignition agents) | typed call, no shell quoting |
+| `~/bin/lane-run codex\|grok\|oc <prompt-file>` | `/clanker:*` or `clanker:supervisor` | retired; do not fall back to direct CLI dispatch |
 | codex-companion (background poll) | Claude background Clanker wrapping `clanker_dispatch_start` + `clanker_wait` | task is visible under Claude Code, no shell notification dependency |
-
-**The old plugins and `~/bin/lane-run` are left untouched during the observation
-window.** They are retired only at Step 4 (spec §9), after this plugin has been
-dogfooded for a week. Both sets of entrypoints can coexist meanwhile.
 
 ## Read-only and write isolation (the real safety boundary)
 
-`read_only: true` (the default for `/clanker:*` without `--write`) is enforced at the
-client layer: the server's `session/request_permission` handler declines any permissioned
+`read_only: true` (the default for `/clanker:*` without `--write`) is forced by the
+relay-only start tool and enforced again at the client layer: the server's
+`session/request_permission` handler declines any permissioned
 operation (it never auto-selects an `allow*` option under read-only), and the client
 `fs/write_text_file` handler refuses writes unconditionally. **codex** additionally runs
-with its native `INITIAL_AGENT_MODE=read-only`; **grok** and **opencode** have **no native
-read-only ACP mode**, so for them read-only is only the client-side gate.
+with its native `INITIAL_AGENT_MODE=read-only`. **grok** is launched with its native
+`--sandbox read-only`, `--permission-mode default`, `--no-subagents`, and `--no-leader`
+controls so it cannot inherit an interactive `always-approve` or shared-leader setting;
+write runs use Grok's `workspace` sandbox inside the managed worktree. **opencode** uses
+Clanker's fixed worker permission profile, which denies edits and shell in read-only mode.
+
+`/clanker:grok` pins `grok-4.5` when no model is supplied. Composer 2.5 is a distinct
+model, not another name for Grok 4.5: route it through the Opencode lane as
+`/clanker:oc composer ...` (`xai/grok-composer-2.5-fast`). The separate `grok45`
+Opencode alias resolves to `xai/grok-4.5`.
 
 Because native read-only is not uniform, **the real isolation boundary for writes is the
 worktree**: a `--write` dispatch (`read_only: false`) is *required* to run in a
@@ -92,8 +104,10 @@ client's own file-write RPC handler and permission auto-decline, a second belt.
 
 ## Caveat: MCP tool names in agent frontmatter
 
-The Clanker agents restrict `tools:` to `mcp__plugin_clanker_clanker__clanker_dispatch_start` and
-`mcp__plugin_clanker_clanker__clanker_wait` (the `mcp__plugin_<plugin>_<server>__<tool>` convention).
+The read-only relay agents restrict `tools:` to
+`mcp__plugin_clanker_clanker__clanker_dispatch_readonly_start` and
+`mcp__plugin_clanker_clanker__clanker_wait`; the supervisor gets only the four lifecycle tools
+(the `mcp__plugin_<plugin>_<server>__<tool>` convention).
 If your Claude Code version namespaces plugin MCP tools differently, the agents would
 have no tools; verify the exact names after install (`/plugin` inventory or the tool
 picker) and adjust `agents/*.md` if needed. The zero-discretion body contract (no Bash,

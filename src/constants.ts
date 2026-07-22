@@ -65,7 +65,7 @@ export const WORKTREES_ROOT =
 export const BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 
 export const SERVER_NAME = "clanker-mcp-server";
-export const SERVER_VERSION = "0.1.0";
+export const SERVER_VERSION = "0.1.4";
 
 /**
  * Single source of truth for opencode model shortnames (mirrors the /oc-dispatch
@@ -77,6 +77,8 @@ export const OC_MODEL_ALIASES: Readonly<Record<string, string>> = {
   ds: "deepseek/deepseek-v4-pro",
   kimi: "kimi-for-coding/k2p7",
   free: "opencode/deepseek-v4-flash-free",
+  composer: "xai/grok-composer-2.5-fast",
+  grok45: "xai/grok-4.5",
 };
 
 /** Expand an opencode model shortname to its full id; pass through unknown/full ids. */

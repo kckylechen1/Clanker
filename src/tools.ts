@@ -41,15 +41,15 @@ const dispatchShape = {
         "\"workspace-write\" boxes writes to the session cwd + tmp — the review-seat recipe " +
         "is worktree + sandbox=\"workspace-write\", so cargo/go test can actually run instead " +
         "of being Not-checked. Unset preserves legacy behavior (read_only ? read-only : danger-full-access). " +
-        "Ignored (warned) on grok/opencode — they have no native sandbox tier.",
+        "Ignored (warned) on grok/opencode. Grok still derives its native read-only/workspace sandbox " +
+        "from read_only; opencode has no native sandbox tier.",
     ),
   agent: z
     .string()
     .optional()
     .describe(
-      "opencode-only: name of a primary agent profile (e.g. a markdown agent under " +
-        "~/.config/opencode/agents/<name>.md) to load via OPENCODE_CONFIG's default_agent. " +
-        "Unset preserves opencode's own default. Ignored (warned) on codex/grok.",
+      "Deprecated compatibility field; ignored with a warning on every lane. " +
+        "Opencode always runs Clanker's fixed clanker-worker profile so callers cannot replace its permission boundary.",
     ),
   seat: z
     .boolean()
@@ -63,6 +63,11 @@ const dispatchShape = {
         "clanker_close to explicitly end a seat.",
     ),
 } as const;
+
+// Relay agents receive only this schema/tool. Omitting read_only from the
+// public arguments and forcing it in the handler makes their read-only
+// boundary mechanical rather than dependent on prompt compliance.
+const readonlyDispatchShape = z.object(dispatchShape).omit({ read_only: true }).shape;
 
 function progressSender(extra: unknown): ((r: WaitResult) => void) | undefined {
   if (!PROGRESS_EXPERIMENTAL) return undefined;
@@ -118,12 +123,33 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
   );
 
   server.registerTool(
+    "clanker_dispatch_readonly_start",
+    {
+      title: "Start a read-only Clanker turn (non-blocking)",
+      description:
+        "Relay-only start path. The server always forces read_only=true and exposes no caller override. Returns {id} immediately; poll with clanker_wait(id).",
+      inputSchema: readonlyDispatchShape,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async (args) => {
+      try {
+        const { id, warnings } = await manager.dispatchStart({ ...toDispatch(args), readOnly: true });
+        return ok({ id, warnings });
+      } catch (e) {
+        return fail(msg(e));
+      }
+    },
+  );
+
+  server.registerTool(
     "clanker_wait",
     {
       title: "Long-poll a Clanker run",
       description: `Wait up to timeout_ms (default ${DEFAULT_WAIT_MS}, cap ${MAX_WAIT_MS}) for new events or completion. Returns {status, digest, plan_summary, last_event_age_ms, suspected_stall}; when status is terminal also {final_message, touched_files, plan_final}, and on error also {error, failure_class}. digest is a human-readable summary of events since the previous wait — tool titles, file writes, plan check changes, key message sentences. failure_class="CLANKER-INFRA-FAILURE" means the backend rejected the request shape on turn 1 with zero tool calls — retrying the identical dispatch is pointless; run a smoke check first. Quiet mode (default on): only wakes before the deadline on a plan/status change, a tool error, a suspected stall, or a terminal state — trivial chatter (a tool_call starting, a file-location echo, a message-chunk fragment) does not cut the wait short, so callers no longer need to repoll tightly just because the run is reading/grepping. Pass quiet:false for the old any-event wake-up.`,
       inputSchema: {
-        id: z.string().describe("Run id from clanker_dispatch_start / clanker_dispatch"),
+        id: z
+          .string()
+          .describe("Run id from clanker_dispatch_start / clanker_dispatch_readonly_start / clanker_dispatch"),
         timeout_ms: z
           .number()
           .int()
