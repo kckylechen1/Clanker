@@ -39,12 +39,15 @@
  *           any other unsupported-capability request). That is a judgment
  *           call made during conflict resolution, not a verified product
  *           decision — flag for explicit sign-off before this lands.
- * - codex   `@agentclientprotocol/codex-acp` as a local dependency (`npm i
- *           --save`), spawned directly as `node <its dist/index.js>` instead
- *           of `npx -y @agentclientprotocol/codex-acp`. npx's cold-start
+ * - codex   `@agentclientprotocol/codex-acp` as a pinned build dependency,
+ *           packaged into each plugin as a self-contained `dist/codex-acp.mjs`
+ *           sidecar and spawned directly with Node instead of
+ *           `npx -y @agentclientprotocol/codex-acp`. npx's cold-start
  *           registry/package resolution measured ~35s per lane spawn
- *           (reproduced 2026-07-17) — a local dependency is already on disk,
- *           so codex-acp's ACP handshake comes back in ~1s instead. The
+ *           (reproduced 2026-07-17); the packaged bridge handshake comes back
+ *           in ~1s and remains resolvable after plugin managers copy only the
+ *           plugin directory into their caches. Source/tsc development falls
+ *           back to the pinned package in the repository's node_modules. The
  *           package is installed with `--ignore-scripts` to skip its own
  *           `@openai/codex` dependency's postinstall (which downloads a
  *           ~178MB bundled Codex binary we don't need); CODEX_PATH below
@@ -59,9 +62,8 @@
  *           this is the middle tier `opts.sandbox="workspace-write"` maps
  *           to), and `agent-full-access` (dangerFullAccess: writes anywhere,
  *           no sandbox). Without an explicit `opts.sandbox`, behavior is
- *           unchanged from before this option existed: `readOnly ?
- *           "read-only" : "agent-full-access"` — the workspace-write middle
- *           tier is opt-in only.
+ *           safe by default: `readOnly ? "read-only" : "agent"`. Full access
+ *           is available only through an explicit danger-full-access override.
  *
  *           Recommended usage for a review seat that needs to actually run
  *           `cargo test`/`go test` (not just read code): dispatch into a
@@ -106,21 +108,20 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolveOcModel } from "./constants.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "./types.js";
 
 const nodeRequire = createRequire(import.meta.url);
 
 /**
- * Resolve @agentclientprotocol/codex-acp's own entry script through Node's
- * module resolution rather than a path hardcoded relative to this source
- * file. That walk works the same whether this file is running from the tsc
- * `dist/` build or the esbuild-bundled `plugin/dist/clanker-mcp.mjs` (the
- * package is never bundled into that file — codex-acp is spawned as a
- * subprocess, never `import`ed — so it stays a real node_modules lookup at
- * runtime in both cases).
+ * Installed plugins carry a self-contained codex-acp sidecar next to the MCP
+ * bundle because plugin managers copy the plugin directory without the repo's
+ * node_modules. Source and tsc development keep a local-package fallback.
  */
 function resolveCodexAcpEntry(): string {
+  const packagedEntry = fileURLToPath(new URL("./codex-acp.mjs", import.meta.url));
+  if (fs.existsSync(packagedEntry)) return packagedEntry;
   const pkgJsonPath = nodeRequire.resolve("@agentclientprotocol/codex-acp/package.json");
   return path.join(path.dirname(pkgJsonPath), "dist", "index.js");
 }
@@ -311,12 +312,12 @@ export function buildSpawnSpec(
       if (opts.effort) codexConfig.model_reasoning_effort = opts.effort;
       env.CODEX_CONFIG = JSON.stringify(codexConfig);
       // opts.sandbox (workspace-write middle tier) takes precedence when set;
-      // otherwise unchanged legacy behavior derived from readOnly.
+      // otherwise writes default to the cwd-boxed workspace tier.
       const agentMode = opts.sandbox
-        ? (SANDBOX_TO_AGENT_MODE[opts.sandbox] ?? (opts.readOnly ? "read-only" : "agent-full-access"))
+        ? (SANDBOX_TO_AGENT_MODE[opts.sandbox] ?? (opts.readOnly ? "read-only" : "agent"))
         : opts.readOnly
           ? "read-only"
-          : "agent-full-access";
+          : "agent";
       env.INITIAL_AGENT_MODE = agentMode;
       // CODEX_PATH tells codex-acp which `codex` binary to spawn for its
       // app-server. We install codex-acp with --ignore-scripts (see file

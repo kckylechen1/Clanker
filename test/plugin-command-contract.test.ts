@@ -108,7 +108,16 @@ test("packaged writer handles non-GLM writes without correction authority", asyn
   assert.match(frontmatter, /clanker_wait/);
   assert.doesNotMatch(frontmatter, /clanker_prompt|clanker_cancel|Bash|Edit/);
   assert.match(body, /Reject the Opencode GLM alias `model=glm` and its full id/);
+  assert.match(body, /model is optional only for `lane=codex`/i);
+  assert.match(body, /for Codex with no model, omit the field entirely/);
   assert.match(body, /timeout_ms=55000/);
+});
+
+test("codex command omits unspecified model and effort instead of inventing aliases or overrides", async () => {
+  const body = await readFile(new URL("../plugin/commands/codex.md", import.meta.url), "utf8");
+  assert.match(body, /omit those fields for both read-only and write calls/);
+  assert.match(body, /Never use the lane name `codex` as a model alias/);
+  assert.doesNotMatch(body, /gpt-5\.6-terra for write|medium for write/);
 });
 
 test("README documents the Claude-owned lifecycle instead of shell-style completion", async () => {

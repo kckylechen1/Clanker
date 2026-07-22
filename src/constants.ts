@@ -13,6 +13,12 @@ export const DEFAULT_STALL_THRESHOLD_MS = envInt("CLANKER_STALL_THRESHOLD_MS", 3
 /** Handshake (initialize + session/new) timeout before a Clanker spawn is failed. */
 export const HANDSHAKE_TIMEOUT_MS = envInt("CLANKER_HANDSHAKE_TIMEOUT_MS", 30_000);
 
+/** Grace after SIGTERM before LaneConnection escalates to SIGKILL. */
+export const PROCESS_TERM_GRACE_MS = envInt("CLANKER_PROCESS_TERM_GRACE_MS", 2_000);
+
+/** Grace for cooperative ACP cancellation before the backend is killed. */
+export const CANCEL_GRACE_MS = envInt("CLANKER_CANCEL_GRACE_MS", 5_000);
+
 /**
  * Hard per-turn ceiling. suspected_stall is only a warning; this timeout is the
  * guaranteed path to a terminal state — on hit the turn is forced to `error` and
@@ -65,7 +71,7 @@ export const WORKTREES_ROOT =
 export const BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 
 export const SERVER_NAME = "clanker-mcp-server";
-export const SERVER_VERSION = "0.1.5";
+export const SERVER_VERSION = "0.2.5";
 
 /**
  * Single source of truth for opencode model shortnames (mirrors the /oc-dispatch
@@ -85,6 +91,15 @@ export const OC_MODEL_ALIASES: Readonly<Record<string, string>> = {
 export function resolveOcModel(model: string | undefined): string | undefined {
   if (!model) return model;
   return OC_MODEL_ALIASES[model] ?? model;
+}
+
+const GLM_PROVIDER_PREFIX = `${OC_MODEL_ALIASES.glm.split("/", 1)[0]}/`;
+
+/** True when a shortname or full model id resolves to the supervised GLM provider. */
+export function isGlmModel(model: string | undefined): boolean {
+  const normalized = model?.trim().toLowerCase();
+  if (!normalized) return false;
+  return resolveOcModel(normalized)?.toLowerCase().startsWith(GLM_PROVIDER_PREFIX) ?? false;
 }
 
 function envInt(name: string, fallback: number): number {

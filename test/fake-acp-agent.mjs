@@ -9,6 +9,7 @@
  *               location is <cwd>/planned.txt, an agent message, then end_turn.
  *   SLOW     -> stream two message chunks with delays, then end_turn.
  *   STALL    -> emit one tool_call then never respond (simulated hang).
+ *   STALL_ACTIVITY -> ignore cancel while emitting ordinary message chunks.
  *   CANCELME -> emit a tool_call then wait; respond `cancelled` on session/cancel.
  *   SCHEMA400 -> exit(1) immediately with zero tool_calls and stderr shaped like a
  *               turn-1 API-schema-rejection 400 (invalid_request_error, param:"tools")
@@ -45,6 +46,20 @@
  */
 import fs from "node:fs";
 import readline from "node:readline";
+
+if (process.env.CLANKER_TEST_IGNORE_SIGTERM === "1") process.on("SIGTERM", () => {});
+if (process.env.CLANKER_TEST_PID_FILE) fs.writeFileSync(process.env.CLANKER_TEST_PID_FILE, String(process.pid));
+if (process.env.CLANKER_TEST_ATTEMPT_COUNTER) {
+  const counter = process.env.CLANKER_TEST_ATTEMPT_COUNTER;
+  const attempts = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;
+  fs.writeFileSync(counter, String(attempts + 1));
+}
+if (process.env.CLANKER_TEST_EXIT_MARKER) {
+  process.on("SIGTERM", () => setTimeout(() => {
+    fs.writeFileSync(process.env.CLANKER_TEST_EXIT_MARKER, String(process.pid));
+    process.exit(0);
+  }, 20));
+}
 
 const out = process.stdout;
 function send(msg) {
@@ -83,6 +98,31 @@ function textBlock(text) {
 
 async function runPrompt(id, sessionId, promptText) {
   const p = promptText.toUpperCase();
+
+  if (p.includes("TELEMETRY")) {
+    update(sessionId, { sessionUpdate: "config_option_update", configOptions: [
+      { id: "model", name: "Model", type: "select", category: "model", currentValue: "observed/model", options: [] },
+      { id: "effort", name: "Effort", type: "select", category: "thought_level", currentValue: "high", options: [] },
+    ] });
+    update(sessionId, { sessionUpdate: "usage_update", used: 123, size: 4096, cost: { amount: 0.25, currency: "USD" } });
+    respond(id, { stopReason: "end_turn", usage: {
+      inputTokens: 10, outputTokens: 5, totalTokens: 15, thoughtTokens: 2,
+      cachedReadTokens: 3, cachedWriteTokens: null, _meta: { secret: "must-not-persist" }, extra: "drop-me",
+    } });
+    return;
+  }
+
+  if (p.includes("STALL_ACTIVITY")) {
+    update(sessionId, {
+      sessionUpdate: "tool_call", toolCallId: "tc-stall-activity",
+      title: "stalling with activity", status: "in_progress",
+    });
+    const timer = setInterval(() => {
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock("still-working ") });
+    }, 15);
+    timer.unref();
+    return;
+  }
 
   if (p.includes("STALL")) {
     update(sessionId, {
@@ -291,7 +331,9 @@ rl.on("line", (line) => {
       }
       cwd = msg.params?.cwd ?? cwd;
       const sessionId = `sess-${++sessionCounter}`;
-      respond(msg.id, { sessionId });
+      const handshakeDelay = Number(process.env.CLANKER_TEST_HANDSHAKE_DELAY_MS ?? 0);
+      if (handshakeDelay > 0) setTimeout(() => respond(msg.id, { sessionId }), handshakeDelay);
+      else respond(msg.id, { sessionId });
       break;
     }
     case "session/resume": {

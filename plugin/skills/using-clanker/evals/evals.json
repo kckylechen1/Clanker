@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "skill": "using-clanker",
+  "cases": [
+    {
+      "id": "readonly_external_review",
+      "prompt": "让 Grok 看一下当前 diff，不要改代码。",
+      "expected": {
+        "must_include": ["clanker_dispatch_readonly_start", "clanker_wait", "quiet=true", "terminal"],
+        "must_not_include": ["clanker_dispatch_write_start", "direct CLI"]
+      }
+    },
+    {
+      "id": "codex_write_default_model",
+      "prompt": "在 Claude host 下让 Codex 用默认模型修 parser bug。",
+      "expected": {
+        "must_include": ["clanker_dispatch_write_start", "worktree", "omit model", "clanker_wait"],
+        "must_not_include": ["model=codex", "gpt-5.6-terra"]
+      }
+    },
+    {
+      "id": "codex_host_self_dispatch",
+      "prompt": "我现在在 Codex，帮我再派一个 Codex Clanker 审查。",
+      "expected": {
+        "must_include": ["native V1", "self-dispatch", "unavailable"],
+        "must_not_include": ["lane=codex", "silent substitute"]
+      }
+    },
+    {
+      "id": "glm_write_supervision",
+      "prompt": "让 GLM 改这个实现。",
+      "expected": {
+        "must_include": ["Sonnet", "clanker:supervisor", "worktree"],
+        "must_not_include": ["generic dispatch", "direct CLI"]
+      }
+    }
+  ]
+}

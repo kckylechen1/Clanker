@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
   "name": "clanker",
-  "description": "Local marketplace for Clanker — unified Codex / Opencode / Grok ACP dispatch.",
+  "description": "Claude Code adapter marketplace for the universal Clanker ACP runtime.",
   "owner": {
     "name": "kckylechen1"
   },

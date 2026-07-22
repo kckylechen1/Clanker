@@ -14,10 +14,12 @@ import path from "node:path";
 import { LaneConnection } from "./acp-client.js";
 import {
   BASE_REPO,
+  CANCEL_GRACE_MS,
   CAPACITY_RETRY_BACKOFF_MS,
   DEFAULT_STALL_THRESHOLD_MS,
   DEFAULT_WAIT_MS,
   HANDSHAKE_TIMEOUT_MS,
+  isGlmModel,
   MAX_WAIT_MS,
   RUNS_ROOT,
   TURN_TIMEOUT_MS,
@@ -39,6 +41,7 @@ import type {
   SpawnSpec,
 } from "./types.js";
 import { LANE_NAMES } from "./types.js";
+import { hostLaneBlockedReason, type ClankerHost } from "./host.js";
 import { changedFiles, createWorktree, isGitWorkTree, removeIfClean } from "./worktree.js";
 
 export interface DispatchParams extends LaneRequestOptions {
@@ -71,6 +74,7 @@ export interface WaitResult {
   error?: string;
   /** Present alongside `error` when classifyTurnFailure tagged it (e.g. CLANKER-INFRA-FAILURE). */
   failure_class?: string;
+  telemetry?: import("./types.js").RunTelemetry;
 }
 
 export interface LaneListEntry {
@@ -89,6 +93,7 @@ export type SpecResolver = (lane: LaneName, opts: LaneRequestOptions, runDir: st
 type TurnOutcome = { ok: true } | { ok: false; message: string };
 
 export interface LaneManagerOptions {
+  host?: ClankerHost;
   resolveSpec?: SpecResolver;
   stallThresholdMs?: number;
   sessionTtlMs?: number;
@@ -101,11 +106,15 @@ export interface LaneManagerOptions {
   disableReaper?: boolean;
   /** Backoff before the single automatic retry of a capacity-transient first-turn failure. */
   capacityRetryBackoffMs?: number;
+  cancelGraceMs?: number;
+  /** SIGTERM grace before SIGKILL escalation (primarily a test override). */
+  processTerminateGraceMs?: number;
 }
 
 const DEFAULT_SESSION_TTL_MS = envInt("CLANKER_SESSION_TTL_MS", 600_000);
 
 export class LaneManager {
+  readonly host: ClankerHost;
   private readonly runs = new Map<string, LaneRun>();
   private readonly connections = new Map<string, LaneConnection>();
   private readonly resolveSpec: SpecResolver;
@@ -115,13 +124,19 @@ export class LaneManager {
   private readonly handshakeTimeoutMs: number;
   private readonly baseRepo: string;
   private readonly capacityRetryBackoffMs: number;
+  private readonly cancelGraceMs: number;
+  private readonly processTerminateGraceMs?: number;
   private readonly warningsById = new Map<string, string[]>();
+  private readonly pendingConnects = new Map<string, AbortController>();
+  private readonly turnDrives = new Map<string, Promise<void>>();
+  private shuttingDown = false;
   /** CP6: at most one active clanker_wait per id (single-consumer contract). */
   private readonly activeWaits = new Set<string>();
   private reaperTimer: NodeJS.Timeout | null = null;
   private counter = 0;
 
   constructor(opts: LaneManagerOptions = {}) {
+    this.host = opts.host ?? "standalone";
     this.resolveSpec = opts.resolveSpec ?? buildSpawnSpec;
     this.stallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
     this.sessionTtlMs = opts.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
@@ -129,6 +144,8 @@ export class LaneManager {
     this.handshakeTimeoutMs = opts.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
     this.baseRepo = opts.baseRepo ?? BASE_REPO;
     this.capacityRetryBackoffMs = opts.capacityRetryBackoffMs ?? CAPACITY_RETRY_BACKOFF_MS;
+    this.cancelGraceMs = opts.cancelGraceMs ?? CANCEL_GRACE_MS;
+    this.processTerminateGraceMs = opts.processTerminateGraceMs;
     if (!opts.disableReaper) {
       const period = Math.max(5_000, Math.floor(this.sessionTtlMs / 10));
       this.reaperTimer = setInterval(() => void this.reap(), period);
@@ -143,19 +160,53 @@ export class LaneManager {
    * creation) throw here; runtime errors surface through clanker_wait.
    */
   async dispatchStart(params: DispatchParams): Promise<{ id: string; warnings: string[] }> {
+    return this.dispatchStartInternal(params, false);
+  }
+
+  /** Dedicated entrypoint that fixes the only supervised GLM write shape. */
+  async dispatchSupervisedGlmWrite(
+    params: Pick<DispatchParams, "prompt" | "cwd" | "worktree" | "seat">,
+  ): Promise<{ id: string; warnings: string[] }> {
+    return this.dispatchStartInternal(
+      { ...params, lane: "opencode", model: "glm", readOnly: false },
+      true,
+    );
+  }
+
+  private async dispatchStartInternal(
+    params: DispatchParams,
+    supervisedGlm: boolean,
+  ): Promise<{ id: string; warnings: string[] }> {
+    if (this.shuttingDown) throw new Error("Clanker manager is shutting down; refusing a new dispatch");
     if (!LANE_NAMES.includes(params.lane)) {
       throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
     }
+    const blockedReason = hostLaneBlockedReason(this.host, params.lane);
+    if (blockedReason) throw new Error(blockedReason);
+    if (params.lane === "codex" && params.model?.trim().toLowerCase() === "codex") {
+      throw new Error("model='codex' is a lane name, not a Codex model id; omit model to use the configured default");
+    }
     const readOnly = params.readOnly ?? false;
+    if (!readOnly && params.lane !== "codex" && !params.model?.trim()) {
+      throw new Error(`an explicit model is required for write lane '${params.lane}'`);
+    }
+    if (!readOnly && isGlmModel(params.model) && !supervisedGlm) {
+      throw new Error("GLM writes require clanker_dispatch_glm_write_start and Sonnet supervision");
+    }
+    const writeCapableSandbox =
+      params.lane === "codex" &&
+      params.sandbox !== undefined &&
+      params.sandbox !== "read-only";
+    const requiresIsolation = !readOnly || writeCapableSandbox;
 
-    // CP2: write dispatches are forced into an isolated worktree, never the
-    // primary checkout. No env escape hatch.
-    if (!readOnly && !params.worktree) {
+    // CP2: every write-capable dispatch is forced into an isolated worktree,
+    // including Codex review seats whose native sandbox permits workspace writes.
+    if (requiresIsolation && !params.worktree) {
       throw new Error(
-        "write dispatch (read_only=false) must run in an isolated worktree: pass `worktree` (a branch name). Reads may run in-place.",
+        "write-capable dispatch must run in an isolated worktree: pass `worktree` (a branch name). Strict reads may run in-place.",
       );
     }
-    if (!readOnly && params.cwd) {
+    if (requiresIsolation && params.cwd) {
       const resolved = path.resolve(params.cwd);
       const base = path.resolve(this.baseRepo);
       if (resolved === base || resolved.startsWith(base + path.sep)) {
@@ -189,6 +240,7 @@ export class LaneManager {
     const run = new LaneRun({
       id,
       lane: params.lane,
+      host: this.host,
       cwd,
       runDir,
       readOnly,
@@ -199,7 +251,8 @@ export class LaneManager {
     });
     this.runs.set(id, run);
 
-    void this.driveNewSession(run, spec, params.prompt);
+    const drive = this.driveNewSession(run, spec, params.prompt);
+    this.trackDrive(id, drive);
     return { id, warnings: spec.warnings };
   }
 
@@ -213,7 +266,8 @@ export class LaneManager {
    * only ever missing after a full close() (which also flips sessionClosed),
    * so they still hit the "not found or already reaped" branch above.
    */
-  async promptExisting(id: string, prompt: string): Promise<{ id: string }> {
+  async promptExisting(id: string, prompt: string, correction = false): Promise<{ id: string }> {
+    if (this.shuttingDown) throw new Error("Clanker manager is shutting down; refusing a new prompt");
     const run = this.runs.get(id);
     if (!run || run.sessionClosed) {
       throw new Error(`session '${id}' not found or already reaped; start a new dispatch`);
@@ -228,8 +282,17 @@ export class LaneManager {
       }
       conn = await this.resumeConnection(run);
     }
-    void this.runTurn(run, conn, prompt).then((outcome) => this.settleTurn(run, outcome));
+    const drive = this.runTurn(run, conn, prompt, correction).then((outcome) => this.settleTurn(run, outcome));
+    this.trackDrive(id, drive);
     return { id };
+  }
+
+  private trackDrive(id: string, drive: Promise<void>): void {
+    this.turnDrives.set(id, drive);
+    void drive.then(
+      () => { if (this.turnDrives.get(id) === drive) this.turnDrives.delete(id); },
+      () => { if (this.turnDrives.get(id) === drive) this.turnDrives.delete(id); },
+    );
   }
 
   /**
@@ -247,6 +310,7 @@ export class LaneManager {
       readOnly: run.readOnly,
       onFileWritten: (p) => run.recordFileWritten(p),
       handshakeTimeoutMs: this.handshakeTimeoutMs,
+      terminateGraceMs: this.processTerminateGraceMs,
       resumeSessionId: run.sessionId,
     });
     this.connections.set(run.id, conn);
@@ -282,6 +346,7 @@ export class LaneManager {
 
   /** Resolve a runTurn() outcome into terminal failTurn+close, when it failed. Never retries (only the fresh-dispatch path in attemptInitialTurn does). */
   private async settleTurn(run: LaneRun, outcome: TurnOutcome): Promise<void> {
+    if (run.cancellationRequested) { run.cancelTurn(); return; }
     if (outcome.ok) return;
     const failureClass = classifyTurnFailure({
       message: outcome.message,
@@ -307,7 +372,14 @@ export class LaneManager {
    * first turn — clanker_prompt (session continuation) never retries.
    */
   private async attemptInitialTurn(run: LaneRun, spec: SpawnSpec, prompt: string, attempt: number): Promise<void> {
+    if (run.cancellationRequested || this.shuttingDown) {
+      if (!run.cancellationRequested) run.requestCancellation();
+      run.cancelTurn();
+      return;
+    }
     let conn: LaneConnection;
+    const controller = new AbortController();
+    this.pendingConnects.set(run.id, controller);
     try {
       conn = await LaneConnection.connect({
         spec,
@@ -315,8 +387,16 @@ export class LaneManager {
         readOnly: run.readOnly,
         onFileWritten: (p) => run.recordFileWritten(p),
         handshakeTimeoutMs: this.handshakeTimeoutMs,
+        terminateGraceMs: this.processTerminateGraceMs,
+        signal: controller.signal,
       });
     } catch (e) {
+      if (run.cancellationRequested || this.shuttingDown) {
+        if (!run.cancellationRequested) run.requestCancellation();
+        run.cancelTurn();
+        await this.close(run.id);
+        return;
+      }
       const message = errMessage(e);
       if (attempt === 1 && isCapacityTransient(message)) {
         await this.retryAfterBackoff(run, message, attempt + 1);
@@ -324,12 +404,27 @@ export class LaneManager {
       }
       run.failTurn(message);
       return;
+    } finally {
+      if (this.pendingConnects.get(run.id) === controller) this.pendingConnects.delete(run.id);
+    }
+    if (run.cancellationRequested || this.shuttingDown) {
+      if (!run.cancellationRequested) run.requestCancellation();
+      run.cancelTurn();
+      try {
+        await conn.closeAndWait();
+      } finally {
+        await this.close(run.id);
+      }
+      return;
     }
     this.connections.set(run.id, conn);
     run.sessionId = conn.sessionId;
+    run.observeConfigOptions(conn.session.newSessionResponse.configOptions);
     this.writeSeatFile(run);
 
     const outcome = await this.runTurn(run, conn, prompt);
+    if (run.cancellationRequested) { run.cancelTurn(); return; }
+    if (run.isTerminalTurn()) return;
     if (outcome.ok) return;
 
     const failureClass = classifyTurnFailure({
@@ -351,7 +446,12 @@ export class LaneManager {
 
   private async retryAfterBackoff(run: LaneRun, message: string, nextAttempt: number): Promise<void> {
     run.recordTransientRetry(message, this.capacityRetryBackoffMs, nextAttempt);
-    await delay(this.capacityRetryBackoffMs);
+    const deadline = Date.now() + this.capacityRetryBackoffMs;
+    while (!run.cancellationRequested && !this.shuttingDown) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      await run.waitForSignal(remaining);
+    }
   }
 
   /**
@@ -363,8 +463,8 @@ export class LaneManager {
    * and a hard per-turn timeout — so a turn always reaches a terminal state.
    * suspected_stall stays a warning; this loop is the guaranteed terminal path.
    */
-  private async runTurn(run: LaneRun, conn: LaneConnection, prompt: string): Promise<TurnOutcome> {
-    run.beginTurn(prompt);
+  private async runTurn(run: LaneRun, conn: LaneConnection, prompt: string, correction = false): Promise<TurnOutcome> {
+    run.beginTurn(prompt, correction);
     const promptPromise = conn.session.prompt(prompt);
     promptPromise.catch(() => {
       /* rejection surfaced via the race / awaited below */
@@ -406,7 +506,9 @@ export class LaneManager {
           );
         }
         if (outcome.m.kind === "stop") {
-          await this.finalizeTurn(run, outcome.m.stopReason);
+          const response = await promptPromise;
+          run.recordStop(response);
+          await this.finalizeTurn(run, response.stopReason);
           return { ok: true };
         }
         run.onUpdate(outcome.m.update);
@@ -428,6 +530,7 @@ export class LaneManager {
   }
 
   private async finalizeTurn(run: LaneRun, stopReason: string): Promise<void> {
+    if (run.isTerminalTurn()) return;
     // Compute git-detected changes for this turn's cwd (union with ACP signals).
     let gitTouched: string[] = [];
     try {
@@ -513,6 +616,7 @@ export class LaneManager {
       if (run.error) result.error = annotatedError(run.error, run.failureClass);
       if (run.failureClass) result.failure_class = run.failureClass;
       if (run.worktreeRetained) result.worktree_retained = run.worktreeRetained;
+      result.telemetry = run.telemetry();
     }
     return result;
   }
@@ -533,6 +637,7 @@ export class LaneManager {
       suspected_stall: run.suspectedStall(this.stallThresholdMs),
       cwd: run.cwd,
       ...(run.worktreePath ? { worktree: run.worktreePath } : {}),
+      telemetry: run.telemetry(),
     };
     if (run.turnStatus === "error" && run.error) {
       view.error = annotatedError(run.error, run.failureClass);
@@ -563,9 +668,45 @@ export class LaneManager {
   async cancel(id: string): Promise<{ id: string; status: RunStatus }> {
     const run = this.runs.get(id);
     if (!run) throw new Error(`run '${id}' not found`);
+    if (run.turnStatus !== "running") return { id, status: run.turnStatus };
+    run.requestCancellation();
+    const pending = this.pendingConnects.get(id);
+    if (pending) {
+      pending.abort();
+      await this.turnDrives.get(id);
+      return { id, status: run.turnStatus };
+    }
     const conn = this.connections.get(id);
-    if (conn) await conn.cancel();
+    if (conn) {
+      try { await conn.cancel(); } catch { /* escalation below */ }
+      const deadline = Date.now() + this.cancelGraceMs;
+      while (!run.isTerminalTurn() && Date.now() < deadline) {
+        await run.waitForSignal(Math.max(0, deadline - Date.now()));
+      }
+      if (run.turnStatus === "running") {
+        run.markForcedKill();
+        await this.computeTouched(run);
+        run.cancelTurn();
+        try {
+          await conn.closeAndWait();
+        } finally {
+          this.connections.delete(id);
+          await this.close(id);
+        }
+      }
+    }
+    if (run.turnStatus === "running") {
+      await this.computeTouched(run);
+      run.cancelTurn();
+      await this.close(id);
+    }
     return { id, status: run.turnStatus };
+  }
+
+  private async computeTouched(run: LaneRun): Promise<void> {
+    let gitTouched: string[] = [];
+    try { if (await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd); } catch {}
+    run.setFinalTouched(dedupe([...gitTouched, ...run.toolTouchedFiles()]));
   }
 
   /** Close a session: dispose ACP session, kill subprocess, clean worktree. */
@@ -624,9 +765,22 @@ export class LaneManager {
 
   /** Tear down everything (server shutdown). */
   async shutdown(): Promise<void> {
+    this.shuttingDown = true;
     if (this.reaperTimer) clearInterval(this.reaperTimer);
     this.reaperTimer = null;
+    for (const run of this.runs.values()) {
+      if (run.turnStatus === "running") run.requestCancellation();
+    }
+    for (const controller of this.pendingConnects.values()) controller.abort();
     for (const id of [...this.connections.keys()]) {
+      this.killConnection(id);
+    }
+    await Promise.allSettled([...this.turnDrives.values()]);
+    // A pending handshake may have crossed into an established connection
+    // during the first snapshot; the shutdown flag makes that drive close it
+    // before settling. This final pass closes every run's durable session and
+    // worktree only after all tracked turn state has reached a terminal value.
+    for (const id of [...this.runs.keys()]) {
       await this.close(id);
     }
   }
@@ -652,14 +806,6 @@ function createTimeout(ms: number): { promise: Promise<void>; cancel: () => void
     handle.unref?.();
   });
   return { promise, cancel: () => clearTimeout(handle) };
-}
-
-/** Un-cancelable backoff delay, used by the capacity-transient retry path. */
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const handle = setTimeout(resolve, ms);
-    handle.unref?.();
-  });
 }
 
 function dedupe(items: string[]): string[] {

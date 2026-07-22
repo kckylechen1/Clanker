@@ -1,6 +1,6 @@
 # Clanker
 
-Claude Code plugin + stdio MCP server for running external coding agents as Claude-owned background tasks.
+Universal stdio MCP runtime with separate thin Claude Code and Codex adapters for running external coding agents over ACP. Host identity is injected explicitly with `--host claude|codex`; standalone startup defaults to `standalone` and preserves all lanes.
 
 Clanker exposes these slash commands:
 
@@ -21,11 +21,18 @@ Default mode is background: the Claude `Agent` task owns the visible bottom task
 ```text
 .
 ├── .claude-plugin/marketplace.json
+├── .agents/plugins/marketplace.json
 ├── plugin/
 │   ├── .claude-plugin/plugin.json
 │   ├── .mcp.json
 │   ├── agents/
 │   ├── commands/
+│   ├── skills/using-clanker/SKILL.md
+│   └── dist/clanker-mcp.mjs
+├── codex-plugin/
+│   ├── .codex-plugin/plugin.json
+│   ├── .mcp.json
+│   ├── skills/using-clanker/SKILL.md
 │   └── dist/clanker-mcp.mjs
 ├── src/
 ├── test/
@@ -33,7 +40,7 @@ Default mode is background: the Claude `Agent` task owns the visible bottom task
 └── package.json
 ```
 
-## Install
+## Install adapters
 
 ```bash
 claude plugin marketplace add /Users/kckylechen/Projects/Clanker
@@ -41,6 +48,15 @@ claude plugin install clanker@clanker
 ```
 
 Then restart Claude Code or run `/reload-plugins`.
+
+Install the separate Codex adapter from the same repository marketplace:
+
+```bash
+codex plugin marketplace add /Users/kckylechen/Projects/Clanker
+codex plugin add clanker@clanker
+```
+
+Start a new Codex session after installation. The Codex MCP starts with `cwd: "."` and `--host codex` (Codex does not interpolate `${PLUGIN_ROOT}`). Under Codex, Clanker exposes only `opencode` and `grok`: the `codex` lane is absent from schemas and is hard-blocked before run creation. The dedicated GLM-write tool is also absent because GLM writes require the Claude/Sonnet supervisor; generic GLM writes remain loud errors. Native Sol/Luna/Terra/5.5 orchestration stays native V1.
 
 The active Claude config should point here:
 
@@ -67,7 +83,10 @@ npm test
 npm run typecheck
 ```
 
-`npm run bundle` writes `plugin/dist/clanker-mcp.mjs`, the tracked self-contained server bundle Claude loads from its plugin cache.
+`npm run bundle` writes byte-identical MCP bundles to `plugin/dist/clanker-mcp.mjs` and
+`codex-plugin/dist/clanker-mcp.mjs`, plus byte-identical self-contained
+`dist/codex-acp.mjs` sidecars. The sidecar keeps the Codex lane runnable after either plugin
+manager copies only its adapter directory into the install cache without repository `node_modules`.
 
 ### Smoke — canary a lane before a real batch
 
@@ -88,9 +107,18 @@ it after burning a real dispatch.
 | `CLANKER_STALL_THRESHOLD_MS` | `300000` | Silence before a running turn is flagged as suspected stalled. |
 | `CLANKER_TURN_TIMEOUT_MS` | `2700000` | Hard per-turn ceiling before the subprocess is killed and the turn becomes `error`. |
 | `CLANKER_HANDSHAKE_TIMEOUT_MS` | `30000` | ACP initialize + session/new timeout. |
+| `CLANKER_CANCEL_GRACE_MS` | `5000` | Cooperative ACP cancellation grace before forced process termination. |
+| `CLANKER_PROCESS_TERM_GRACE_MS` | `2000` | SIGTERM grace before SIGKILL escalation. |
 | `CLANKER_CAPACITY_RETRY_BACKOFF_MS` | `30000` | Backoff before the single automatic retry of a capacity-transient first-turn failure ("model at capacity" / overloaded / 5xx). Never applies to a CLANKER-INFRA-FAILURE-tagged failure. |
 | `CLANKER_SESSION_TTL_MS` | `600000` | Idle session TTL before reaping. |
 | `CLANKER_WAIT_DEFAULT_MS` / `CLANKER_WAIT_MAX_MS` | `30000` / `55000` | `clanker_wait` long-poll default and cap. |
 | `CLANKER_PROGRESS_EXPERIMENTAL` | unset | `=1` enables MCP progress notifications. |
 | `CLANKER_MCP_BASE_REPO` | server cwd | Base repo for managed worktrees. |
 | `CLANKER_RUNS_ROOT` / `CLANKER_WORKTREES_ROOT` | `~/.cache/clanker/{runs,worktrees}` | Artifact and managed worktree roots. |
+
+Each run atomically persists protocol/config-only `telemetry.json` in its run directory. Terminal
+`clanker_wait` and `clanker_status` expose the same compact telemetry; prompts, messages, thoughts,
+secrets, and arbitrary ACP `_meta` are never recorded as telemetry. `prompt_usage` is turn-local and
+resets when a new turn begins. `session_usage` is the latest ACP session context (`used` tokens out of
+`size`) and cumulative session cost; it persists across turns together with observed model/effort.
+Telemetry also records `host`, `requested_lane`, and `actual_lane`. Successful runs never substitute lanes, so requested and actual are equal. A normal MCP request for a host-blocked lane fails against the filtered lane schema before dispatch. The handler still returns `actual_lane: null` plus a loud `blocked_reason` if a stale or in-process caller bypasses schema validation, and the manager independently rejects the lane before run creation. Neither refusal path records the prompt.

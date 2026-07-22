@@ -4,10 +4,12 @@ Bundles the Clanker dispatch surface over ACP:
 
 - **MCP server `clanker`** — declared in [`.mcp.json`](.mcp.json), launched as
   `node ${CLAUDE_PLUGIN_ROOT}/dist/clanker-mcp.mjs`. `dist/clanker-mcp.mjs` is a
-  **self-contained esbuild bundle** of the server + its SDK deps. It is committed
+  **self-contained esbuild bundle** of the server + its SDK deps, and the sibling
+  `dist/codex-acp.mjs` is the self-contained Codex ACP subprocess. Both are committed
   because plugin install copies the plugin directory to a cache and a plugin cannot
   reference files outside itself (so the server cannot live one level up). Regenerate
   it with `npm run bundle` from `/Users/kckylechen/Projects/Clanker` after changing `src/`.
+  The manifest passes `--host claude` explicitly, preserving all Claude lane and GLM-supervisor behavior.
 - **Clankers** `codex` / `grok` / `oc` ([`agents/`](agents)) — haiku,
   zero-discretion read-only long-poll relays. Their only start tool is
   `clanker_dispatch_readonly_start`, whose schema has no write override and whose handler
@@ -16,10 +18,14 @@ Bundles the Clanker dispatch surface over ACP:
   `clanker:oc`.
 - **Clanker writer** `clanker:writer` — packaged haiku zero-discretion relay for non-GLM
   isolated writes. Its only start tool forces write mode, requires a managed worktree, and
-  rejects the GLM model even when addressed by its full provider id.
+  rejects the GLM model even when addressed by its full provider id. Codex writes may omit
+  `model` to inherit the configured Codex default; Opencode/Grok writes still require one.
 - **GLM supervisor** `clanker:supervisor` — packaged sonnet lifecycle controller only for
   GLM writes. Its dedicated start tool fixes the lane and model server-side. It can start,
   wait, correct, or cancel GLM, but has no file, shell, test, or git tools.
+- **Skill** `using-clanker` — one host-aware dispatch and lifecycle protocol, synchronized
+  into both adapters at bundle time. It keeps Codex self-dispatch and GLM supervision
+  boundaries explicit while teaching agents when a model must be supplied or omitted.
 - **Commands** `/clanker:codex`, `/clanker:grok`, `/clanker:glm`, `/clanker:deepseek`,
   `/clanker:kimi`, `/clanker:free`, `/clanker:oc` ([`commands/`](commands)) —
   argument mapping preserved from the current habits. Read-only calls use the lane relay;
@@ -53,6 +59,12 @@ approval as a project `.mcp.json`).
 
 To uninstall later: `claude plugin uninstall clanker@clanker` and
 `claude plugin marketplace remove clanker`.
+
+The separate Codex adapter lives at `../codex-plugin` and is advertised by
+`../.agents/plugins/marketplace.json`. Register this repository with
+`codex plugin marketplace add /Users/kckylechen/Projects/Clanker`, then install it with
+`codex plugin add clanker@clanker`; do not reuse this Claude manifest. Codex starts the same runtime
+with `--host codex`, which excludes self-dispatch and the Claude/Sonnet-only GLM write supervisor tool.
 
 **If you changed `src/`** first run `npm install && npm run bundle` in
 `/Users/kckylechen/Projects/Clanker`, then `claude plugin marketplace update clanker` (or reinstall).
@@ -98,8 +110,8 @@ server-created git worktree cut from `origin/main`, and the server rejects a wri
 `INITIAL_AGENT_MODE=read-only` (codex's native mode under `read_only: true`) blocks *all*
 writes at the OS-sandbox level — including build/test-cache writes a review seat needs for
 `cargo test` / `go test` to run at all, which is why such runs have historically ended up
-Not-checked. `agent-full-access` (the `read_only: false` default) fixes that but drops the
-sandbox entirely.
+Not-checked. Write-capable Codex now defaults to `workspace-write`; `danger-full-access`
+drops the sandbox and requires an explicit `sandbox: "danger-full-access"` override.
 
 `clanker_dispatch`'s `sandbox` param (codex-only) exposes the middle tier codex-acp itself
 supports: `sandbox: "workspace-write"` boxes writes to the session cwd + tmp, independent of
@@ -108,6 +120,12 @@ supports: `sandbox: "workspace-write"` boxes writes to the session cwd + tmp, in
 can now write its caches, and the worktree — not this repo's main checkout — contains the
 blast radius. `read_only: true` can still be set alongside it; it independently gates this
 client's own file-write RPC handler and permission auto-decline, a second belt.
+
+`clanker_cancel` waits for cooperative ACP termination and escalates to process termination
+after `CLANKER_CANCEL_GRACE_MS`, returning only after terminal cancellation (or a loud error).
+Each run atomically stores protocol/config-only telemetry in its run directory as `telemetry.json`.
+`prompt_usage` is turn-local and resets at each turn; `session_usage` is the latest session context
+and cumulative session cost and persists across turns with observed model/effort.
 
 ## Caveat: MCP tool names in agent frontmatter
 

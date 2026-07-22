@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "clanker": {
+      "command": "node",
+      "args": ["dist/clanker-mcp.mjs", "--host", "codex"],
+      "cwd": "."
+    }
+  }
+}

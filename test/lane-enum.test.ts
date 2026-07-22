@@ -8,11 +8,9 @@ import { laneEnum, registerTools } from "../src/tools.js";
 
 // ---- lane list single-source-of-truth ------------------------------------
 //
-// tools.ts builds its dispatch-shape lane enum directly from LANE_NAMES
-// (src/types.ts). This test imports the *actual* laneEnum tools.ts hands to
-// zod, so a future hand-edit that re-forks the lane set back into a separate
-// literal list in tools.ts (recreating the drift this pass removed) fails
-// here instead of silently drifting.
+// laneEnum is the full registry enum built directly from LANE_NAMES. Runtime
+// tools derive a narrower enum from the trusted host; test/host.test.ts checks
+// those registered schemas separately.
 
 test("tools.ts laneEnum accepts exactly LANE_NAMES and rejects anything else", () => {
   for (const lane of LANE_NAMES) {
@@ -39,10 +37,15 @@ test("read-only start tool has no override and forces readOnly even for an extra
     },
   } as unknown as McpServer;
   let received: Record<string, unknown> | undefined;
+  let supervisedGlmReceived: Record<string, unknown> | undefined;
   const manager = {
     async dispatchStart(params: Record<string, unknown>) {
       received = params;
       return { id: "readonly-test", warnings: [] };
+    },
+    async dispatchSupervisedGlmWrite(params: Record<string, unknown>) {
+      supervisedGlmReceived = params;
+      return { id: "glm-write-test", warnings: [] };
     },
     async dispatchBlocking(params: Record<string, unknown>) {
       received = params;
@@ -54,15 +57,27 @@ test("read-only start tool has no override and forces readOnly even for an extra
   const tool = tools.get("clanker_dispatch_readonly_start");
   assert.ok(tool, "read-only start tool is registered");
   assert.equal(Object.hasOwn(tool.config.inputSchema, "read_only"), false);
+  assert.equal(Object.hasOwn(tool.config.inputSchema, "sandbox"), false);
 
-  await tool.handler({ lane: "grok", prompt: "inspect only", read_only: false });
+  await tool.handler({
+    lane: "codex",
+    prompt: "inspect only",
+    read_only: false,
+    sandbox: "danger-full-access",
+  });
   assert.equal(received?.readOnly, true, "handler override wins even if a raw caller injects read_only=false");
+  assert.equal(received?.sandbox, undefined, "handler drops a raw write-capable sandbox injection");
 
   const writeTool = tools.get("clanker_dispatch_write_start");
   assert.ok(writeTool, "isolated write start tool is registered");
   assert.equal(Object.hasOwn(writeTool.config.inputSchema, "read_only"), false);
   const writeSchema = z.object(writeTool.config.inputSchema as z.ZodRawShape);
   assert.equal(writeSchema.safeParse({ lane: "codex", prompt: "implement" }).success, false);
+  assert.equal(
+    writeSchema.safeParse({ lane: "codex", prompt: "implement", worktree: "clanker/test-write-default-model" }).success,
+    true,
+    "codex writes may inherit the configured default model",
+  );
   assert.equal(
     writeSchema.safeParse({ lane: "codex", model: "terra", prompt: "implement", worktree: "   " }).success,
     false,
@@ -77,16 +92,32 @@ test("read-only start tool has no override and forces readOnly even for an extra
     true,
   );
 
+  const beforeMissingExternalModel: Record<string, unknown> | undefined = received;
+  const missingExternalModel = await writeTool.handler({
+    lane: "opencode",
+    prompt: "implement",
+    worktree: "clanker/test-missing-model",
+  });
+  assert.equal(received, beforeMissingExternalModel, "external write lanes still require an explicit model");
+  assert.match(JSON.stringify(missingExternalModel), /explicit model is required for write lane 'opencode'/);
+
   await writeTool.handler({
     lane: "codex",
-    model: "terra",
     prompt: "implement",
     worktree: "clanker/test-write",
     read_only: true,
   });
+  assert.equal(received?.model, undefined, "omitted codex model stays omitted for backend default resolution");
   assert.equal(received?.readOnly, false, "handler override wins even if a raw caller injects read_only=true");
 
-  for (const model of ["glm", "GLM", " glm ", "zhipuai-coding-plan/glm-5.2", "zhipuai-coding-plan/GLM-5.2"]) {
+  for (const model of [
+    "glm",
+    "GLM",
+    " glm ",
+    "zhipuai-coding-plan/glm-5.2",
+    "zhipuai-coding-plan/GLM-5.2",
+    "zhipuai-coding-plan/glm-5.3-future",
+  ]) {
     const beforeRejectedGlm: Record<string, unknown> | undefined = received;
     const rejectedGlm = await writeTool.handler({
       lane: "opencode",
@@ -101,16 +132,18 @@ test("read-only start tool has no override and forces readOnly even for an extra
   for (const toolName of ["clanker_dispatch_start", "clanker_dispatch"] as const) {
     const genericTool = tools.get(toolName);
     assert.ok(genericTool, `${toolName} is registered`);
-    const beforeRejectedGlm: Record<string, unknown> | undefined = received;
-    const rejectedGlm = await genericTool.handler({
-      lane: "opencode",
-      model: "glm",
-      prompt: "implement",
-      worktree: "clanker/test-generic-glm-bypass",
-      read_only: false,
-    });
-    assert.equal(received, beforeRejectedGlm, `${toolName} must not bypass supervised GLM writes`);
-    assert.match(JSON.stringify(rejectedGlm), /GLM writes require clanker_dispatch_glm_write_start/);
+    for (const lane of LANE_NAMES) {
+      const beforeRejectedGlm: Record<string, unknown> | undefined = received;
+      const rejectedGlm = await genericTool.handler({
+        lane,
+        model: "glm",
+        prompt: "implement",
+        worktree: "clanker/test-generic-glm-bypass",
+        read_only: false,
+      });
+      assert.equal(received, beforeRejectedGlm, `${toolName} must reject GLM on lane '${lane}'`);
+      assert.match(JSON.stringify(rejectedGlm), /GLM writes require clanker_dispatch_glm_write_start/);
+    }
   }
 
   const glmTool = tools.get("clanker_dispatch_glm_write_start");
@@ -133,7 +166,10 @@ test("read-only start tool has no override and forces readOnly even for an extra
     worktree: "clanker/test-glm-write",
     read_only: true,
   });
-  assert.equal(received?.lane, "opencode", "handler ignores an injected lane override");
-  assert.equal(received?.model, "glm", "handler ignores an injected model override");
-  assert.equal(received?.readOnly, false, "handler ignores an injected read_only override");
+  assert.deepEqual(supervisedGlmReceived, {
+    prompt: "implement",
+    cwd: undefined,
+    worktree: "clanker/test-glm-write",
+    seat: undefined,
+  }, "handler passes only the fixed supervised method's allowed fields");
 });
