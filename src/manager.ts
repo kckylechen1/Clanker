@@ -199,6 +199,15 @@ export class LaneManager {
       throw new Error("model='codex' is a lane name, not a Codex model id; omit model to use the configured default");
     }
     const readOnly = params.readOnly ?? false;
+    if (params.lane === "gemini" && !readOnly) {
+      throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
+    }
+    if (params.lane === "gemini" && params.worktree) {
+      throw new Error("Clanker: Gemini reconnaissance does not create or use managed worktrees");
+    }
+    if (params.lane === "gemini" && params.seat) {
+      throw new Error("Clanker: Gemini print-mode sessions do not support persistent seats");
+    }
     if (!readOnly && params.lane !== "codex" && !params.model?.trim()) {
       throw new Error(`an explicit model is required for write lane '${params.lane}'`);
     }
@@ -545,9 +554,14 @@ export class LaneManager {
   private async finalizeTurn(run: LaneRun, stopReason: string): Promise<void> {
     if (run.isTerminalTurn()) return;
     // Compute git-detected changes for this turn's cwd (union with ACP signals).
+    // Gemini has no ACP write surface and its workspace is mechanically
+    // read-only; a post-turn `git status` there would only report changes that
+    // already existed before reconnaissance and falsely attribute them to the
+    // scout. Its truthful touched set therefore comes solely from ACP write
+    // signals (none are exposed by the Gemini sidecar).
     let gitTouched: string[] = [];
     try {
-      if (await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
+      if (run.lane !== "gemini" && await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
     } catch {
       /* non-fatal: fall back to ACP-derived signals only */
     }
@@ -718,7 +732,7 @@ export class LaneManager {
 
   private async computeTouched(run: LaneRun): Promise<void> {
     let gitTouched: string[] = [];
-    try { if (await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd); } catch {}
+    try { if (run.lane !== "gemini" && await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd); } catch {}
     run.setFinalTouched(dedupe([...gitTouched, ...run.toolTouchedFiles()]));
   }
 

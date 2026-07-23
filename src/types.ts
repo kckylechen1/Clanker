@@ -1,6 +1,6 @@
 /** Shared TypeScript types for the Clanker MCP server. */
 
-export const LANE_NAMES = ["codex", "opencode", "grok"] as const;
+export const LANE_NAMES = ["codex", "opencode", "grok", "gemini"] as const;
 
 export type LaneName = (typeof LANE_NAMES)[number];
 

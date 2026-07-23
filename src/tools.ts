@@ -35,7 +35,7 @@ const dispatchOptionsShape = {
         "Required for lane=opencode on every start path, including read-only: omitting it lets opencode's own config " +
         "default (possibly GLM) run outside the vault-exec credential wrap.",
     ),
-  effort: z.string().optional().describe("Reasoning effort override (codex/grok only)"),
+  effort: z.string().optional().describe("Reasoning effort override (codex/grok; Gemini uses its dedicated research tool)"),
   read_only: z.boolean().optional().describe("If true, the Clanker is gated read-only (default false)"),
   sandbox: z
     .enum(["read-only", "workspace-write", "danger-full-access"])
@@ -78,6 +78,13 @@ const glmWriteDispatchShape = z
 const kimiCrewDispatchShape = {
   prompt: z.string().trim().min(1).describe("Task for the fixed Kimi-led OpenCode crew"),
   worktree: z.string().trim().min(1).describe("Required managed-worktree branch"),
+} as const;
+
+const geminiResearchDispatchShape = {
+  prompt: z.string().trim().min(1).describe("Bounded reconnaissance or grounded-research question for Clanker: Gemini"),
+  cwd: z.string().optional().describe("Absolute repository or working directory to inspect"),
+  model: z.string().trim().regex(/^gemini-/i).optional().describe("Gemini model override (default gemini-3.6-flash-medium)"),
+  effort: z.enum(["medium", "high"]).optional().describe("agy reasoning-effort override"),
 } as const;
 
 function rejectsUnsupervisedGlmWrite(args: { lane: string; model?: string; read_only?: boolean }): boolean {
@@ -126,9 +133,10 @@ function fail(message: string, telemetry?: unknown) {
 export function registerTools(server: McpServer, manager: LaneManager): void {
   const host: ClankerHost = manager.host ?? "standalone";
   const hostLanes = laneNamesForHost(host) as [LaneName, ...LaneName[]];
-  const hostLaneEnum = z.enum(hostLanes);
+  const genericLanes = hostLanes.filter((lane) => lane !== "gemini") as [Exclude<LaneName, "gemini">, ...Exclude<LaneName, "gemini">[]];
+  const hostLaneEnum = z.enum(genericLanes);
   const hostDispatchShape = {
-    lane: hostLaneEnum.describe(`Backend Clanker to drive: ${hostLanes.join(" | ")}`),
+    lane: hostLaneEnum.describe(`Backend Clanker to drive: ${genericLanes.join(" | ")}; use the dedicated Gemini research tool for reconnaissance`),
     ...dispatchOptionsShape,
   };
   const hostReadonlyDispatchShape = z.object(hostDispatchShape).omit({ read_only: true, sandbox: true }).shape;
@@ -161,6 +169,7 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
       try {
         const blocked = policyFailure(args.lane);
         if (blocked) return blocked;
+        if ((args.lane as LaneName) === "gemini") return fail("Use clanker_dispatch_gemini_research_start for Clanker: Gemini reconnaissance");
         if (rejectsUnsupervisedGlmWrite(args)) {
           return fail(glmWriteBlockedMessage(host));
         }
@@ -185,6 +194,7 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
       try {
         const blocked = policyFailure(args.lane);
         if (blocked) return blocked;
+        if ((args.lane as LaneName) === "gemini") return fail("Use clanker_dispatch_gemini_research_start for Clanker: Gemini reconnaissance");
         // opencode's own config default (possibly GLM) decides the model
         // whenever we omit one, which bypasses wrapWithVaultExec — buildSpawnSpec
         // throws on this too, but reject it here with a clear message before
@@ -208,6 +218,31 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
   );
 
   server.registerTool(
+    "clanker_dispatch_gemini_research_start",
+    {
+      title: "Start Clanker: Gemini reconnaissance",
+      description: "Starts the fixed read-only Gemini research lane. The implementation uses authenticated local CLI state; no API key is accepted.",
+      inputSchema: geminiResearchDispatchShape,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async (args) => {
+      try {
+        const { id, warnings } = await manager.dispatchStart({
+          lane: "gemini",
+          prompt: args.prompt,
+          cwd: args.cwd,
+          model: args.model,
+          effort: args.effort,
+          readOnly: true,
+        });
+        return ok({ id, warnings });
+      } catch (e) {
+        return fail(msg(e));
+      }
+    },
+  );
+
+  server.registerTool(
     "clanker_dispatch_write_start",
     {
       title: "Start an isolated write-capable Clanker turn (non-blocking)",
@@ -220,6 +255,7 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
       try {
         const blocked = policyFailure(args.lane);
         if (blocked) return blocked;
+        if ((args.lane as LaneName) === "gemini") return fail("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
         if (args.lane !== "codex" && !args.model) {
           return fail(`an explicit model is required for write lane '${args.lane}'`);
         }
@@ -330,6 +366,7 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
       try {
         const blocked = policyFailure(args.lane);
         if (blocked) return blocked;
+        if ((args.lane as LaneName) === "gemini") return fail("Use clanker_dispatch_gemini_research_start for Clanker: Gemini reconnaissance");
         if (rejectsUnsupervisedGlmWrite(args)) {
           return fail(glmWriteBlockedMessage(host));
         }

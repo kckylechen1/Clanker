@@ -5,7 +5,7 @@ Bundles the Clanker dispatch surface over ACP:
 - **MCP server `clanker`** — declared in [`.mcp.json`](.mcp.json), launched as
   `node ${CLAUDE_PLUGIN_ROOT}/dist/clanker-mcp.mjs`. `dist/clanker-mcp.mjs` is a
   **self-contained esbuild bundle** of the server + its SDK deps, and the sibling
-  `dist/codex-acp.mjs` is the self-contained Codex ACP subprocess. Both are committed
+  `dist/codex-acp.mjs` and `dist/gemini-acp.mjs` are self-contained ACP subprocesses. They are committed
   because plugin install copies the plugin directory to a cache and a plugin cannot
   reference files outside itself (so the server cannot live one level up). Regenerate
   it with `npm run bundle` from `/Users/kckylechen/Projects/Clanker` after changing `src/`.
@@ -26,7 +26,7 @@ Bundles the Clanker dispatch surface over ACP:
 - **Skill** `using-clanker` — one host-aware dispatch and lifecycle protocol, synchronized
   into both adapters at bundle time. It keeps Codex self-dispatch and GLM supervision
   boundaries explicit while teaching agents when a model must be supplied or omitted.
-- **Commands** `/clanker:codex`, `/clanker:grok`, `/clanker:glm`, `/clanker:deepseek`,
+- **Commands** `/clanker:codex`, `/clanker:gemini`, `/clanker:grok`, `/clanker:glm`, `/clanker:deepseek`,
   `/clanker:kimi`, `/clanker:free`, `/clanker:oc`, `/clanker:kimi-crew` ([`commands/`](commands)) —
   argument mapping preserved from the current habits. Read-only calls use the lane relay;
   non-GLM writes use `clanker:writer`, while GLM writes alone use the Sonnet
@@ -35,6 +35,8 @@ Bundles the Clanker dispatch surface over ACP:
   `run_in_background`; oc model shortnames resolve server-side. The Claude `Agent` call is
   the visible lifecycle owner: it holds the Clanker task row while the MCP server only owns
   the ACP backend.
+
+`/clanker:gemini` is a dedicated workspace-read-only reconnaissance relay with no write flag. It uses local authenticated CLI state through an internal `agy` print-mode sidecar, always forcing plan mode, sandboxing, noninteractive output, and a bounded timeout. It currently requires macOS `/usr/bin/sandbox-exec` and fails closed elsewhere; the sidecar denies writes beneath the inspected workspace while allowing Antigravity's own conversation and plan scratch. Its public name is always Clanker: Gemini.
 
 `/clanker:kimi-crew` launches one Kimi-led OpenCode session and monitors it to completion. OpenCode
 uses the already-installed `worker-glm` for implementation, `reviewer-deepseek` for cold review,

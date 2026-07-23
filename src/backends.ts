@@ -107,6 +107,7 @@
  */
 import fs from "node:fs";
 import { createRequire } from "node:module";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isGlmModel, resolveOcModel } from "./constants.js";
@@ -124,6 +125,32 @@ function resolveCodexAcpEntry(): string {
   if (fs.existsSync(packagedEntry)) return packagedEntry;
   const pkgJsonPath = nodeRequire.resolve("@agentclientprotocol/codex-acp/package.json");
   return path.join(path.dirname(pkgJsonPath), "dist", "index.js");
+}
+
+function resolveGeminiAcpEntry(): string {
+  const candidates = [
+    fileURLToPath(new URL("./gemini-acp.mjs", import.meta.url)),
+    fileURLToPath(new URL("./gemini-acp.js", import.meta.url)),
+    fileURLToPath(new URL("../plugin/dist/gemini-acp.mjs", import.meta.url)),
+  ];
+  const entry = candidates.find((candidate) => fs.existsSync(candidate));
+  if (entry) return entry;
+  throw new Error("Gemini ACP sidecar is missing; run `npm run bundle` before dispatching Clanker: Gemini");
+}
+
+function isGeminiModel(model: string): boolean {
+  return model.trim().toLowerCase().startsWith("gemini-");
+}
+
+function requireGeminiWorkspaceSandbox(): void {
+  if (process.platform !== "darwin") {
+    throw new Error("Clanker: Gemini currently requires macOS sandbox-exec for a fail-closed workspace read-only boundary");
+  }
+  try {
+    fs.accessSync("/usr/bin/sandbox-exec", fs.constants.X_OK);
+  } catch {
+    throw new Error("Clanker: Gemini requires executable /usr/bin/sandbox-exec for a fail-closed workspace read-only boundary");
+  }
 }
 
 /**
@@ -156,6 +183,22 @@ function resolveSystemCodexPath(): string {
   return "codex";
 }
 
+function resolveSystemAgyPath(): string {
+  const candidates = [
+    ...(process.env.PATH ?? "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, "agy")),
+    path.join(os.homedir(), ".local", "bin", "agy"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      /* not here, keep looking */
+    }
+  }
+  return "agy";
+}
+
 interface LaneCapabilities {
   model: boolean;
   effort: boolean;
@@ -173,6 +216,7 @@ const CAPS: Record<LaneName, LaneCapabilities> = {
   // (see the file header MERGE NOTE for why this couldn't be a silent merge).
   opencode: { model: true, effort: false, sandbox: false, agent: false },
   grok: { model: true, effort: true, sandbox: false, agent: false },
+  gemini: { model: true, effort: true, sandbox: false, agent: false },
 };
 
 /**
@@ -189,6 +233,7 @@ const CAPS: Record<LaneName, LaneCapabilities> = {
 const REQUIRED_ENV: Record<Exclude<LaneName, "opencode">, string[]> = {
   codex: [],
   grok: [],
+  gemini: [],
 };
 
 /** GLM is the only normal opencode lane that needs a vault-sourced secret. */
@@ -310,6 +355,29 @@ export function buildSpawnSpec(
   }
 
   switch (lane) {
+    case "gemini": {
+      if (opts.readOnly !== true) {
+        throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
+      }
+      requireGeminiWorkspaceSandbox();
+      const model = opts.model?.trim() || "gemini-3.6-flash-medium";
+      if (!isGeminiModel(model)) {
+        throw new Error(`Clanker: Gemini requires a Gemini model id; received '${model}'`);
+      }
+      const effort = opts.effort?.trim();
+      if (effort && effort !== "medium" && effort !== "high") {
+        throw new Error(`Clanker: Gemini effort must be 'medium' or 'high'; received '${effort}'`);
+      }
+      env.CLANKER_AGY_PATH = process.env.CLANKER_AGY_PATH ?? resolveSystemAgyPath();
+      env.CLANKER_GEMINI_MODEL = model;
+      env.CLANKER_GEMINI_PRINT_TIMEOUT = process.env.CLANKER_GEMINI_PRINT_TIMEOUT ?? "3m";
+      if (effort) env.CLANKER_GEMINI_EFFORT = effort;
+      return wrapWithVaultExec(
+        { command: process.execPath, args: [resolveGeminiAcpEntry()], env, warnings },
+        REQUIRED_ENV.gemini,
+      );
+    }
+
     case "grok": {
       // Grok can authorize tools locally without asking the ACP client. Its
       // user config on this machine is intentionally permissive for

@@ -2,8 +2,8 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "clanker",
   "displayName": "Clanker",
-  "version": "0.2.5",
-  "description": "Claude Code adapter for running Clanker tasks through the universal ACP runtime.",
+  "version": "0.3.0",
+  "description": "Claude Code adapter for Clanker tasks, including read-only Clanker: Gemini reconnaissance through ACP.",
   "author": {
     "name": "kckylechen1"
   },
@@ -16,6 +16,8 @@
     "glm",
     "deepseek",
     "kimi",
+    "gemini",
+    "research",
     "dispatch"
   ]
 }

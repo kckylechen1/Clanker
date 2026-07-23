@@ -27760,7 +27760,7 @@ var RUNS_ROOT = process.env.CLANKER_RUNS_ROOT ?? path.join(os.homedir(), ".cache
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.2.5";
+var SERVER_VERSION = "0.3.0";
 var OC_MODEL_ALIASES = {
   glm: "zhipuai-coding-plan/glm-5.2",
   ds: "deepseek/deepseek-v4-pro",
@@ -31439,6 +31439,7 @@ async function resumeSession(ctx, sessionId, cwd) {
 // src/backends.ts
 import fs2 from "node:fs";
 import { createRequire } from "node:module";
+import os2 from "node:os";
 import path3 from "node:path";
 import { fileURLToPath } from "node:url";
 var nodeRequire = createRequire(import.meta.url);
@@ -31447,6 +31448,29 @@ function resolveCodexAcpEntry() {
   if (fs2.existsSync(packagedEntry)) return packagedEntry;
   const pkgJsonPath = nodeRequire.resolve("@agentclientprotocol/codex-acp/package.json");
   return path3.join(path3.dirname(pkgJsonPath), "dist", "index.js");
+}
+function resolveGeminiAcpEntry() {
+  const candidates = [
+    fileURLToPath(new URL("./gemini-acp.mjs", import.meta.url)),
+    fileURLToPath(new URL("./gemini-acp.js", import.meta.url)),
+    fileURLToPath(new URL("../plugin/dist/gemini-acp.mjs", import.meta.url))
+  ];
+  const entry = candidates.find((candidate) => fs2.existsSync(candidate));
+  if (entry) return entry;
+  throw new Error("Gemini ACP sidecar is missing; run `npm run bundle` before dispatching Clanker: Gemini");
+}
+function isGeminiModel(model) {
+  return model.trim().toLowerCase().startsWith("gemini-");
+}
+function requireGeminiWorkspaceSandbox() {
+  if (process.platform !== "darwin") {
+    throw new Error("Clanker: Gemini currently requires macOS sandbox-exec for a fail-closed workspace read-only boundary");
+  }
+  try {
+    fs2.accessSync("/usr/bin/sandbox-exec", fs2.constants.X_OK);
+  } catch {
+    throw new Error("Clanker: Gemini requires executable /usr/bin/sandbox-exec for a fail-closed workspace read-only boundary");
+  }
 }
 function resolveSystemCodexPath() {
   const searchPath = process.env.PATH ?? "";
@@ -31461,6 +31485,20 @@ function resolveSystemCodexPath() {
   }
   return "codex";
 }
+function resolveSystemAgyPath() {
+  const candidates = [
+    ...(process.env.PATH ?? "").split(path3.delimiter).filter(Boolean).map((dir) => path3.join(dir, "agy")),
+    path3.join(os2.homedir(), ".local", "bin", "agy")
+  ];
+  for (const candidate of candidates) {
+    try {
+      fs2.accessSync(candidate, fs2.constants.X_OK);
+      return candidate;
+    } catch {
+    }
+  }
+  return "agy";
+}
 var CAPS = {
   codex: { model: true, effort: true, sandbox: true, agent: false },
   // opencode's `agent` capability is retired as of the clanker-worker isolation
@@ -31468,11 +31506,13 @@ var CAPS = {
   // not caller-selectable, so a caller-supplied `opts.agent` now just warns
   // (see the file header MERGE NOTE for why this couldn't be a silent merge).
   opencode: { model: true, effort: false, sandbox: false, agent: false },
-  grok: { model: true, effort: true, sandbox: false, agent: false }
+  grok: { model: true, effort: true, sandbox: false, agent: false },
+  gemini: { model: true, effort: true, sandbox: false, agent: false }
 };
 var REQUIRED_ENV = {
   codex: [],
-  grok: []
+  grok: [],
+  gemini: []
 };
 function opencodeRequiredEnv(model) {
   return isGlmModel(model) ? ["ZHIPUAI_API_KEY"] : [];
@@ -31560,6 +31600,28 @@ function buildSpawnSpec(lane, opts, runDir) {
     warnings.push(`lane '${lane}' does not support agent profile override; ignoring agent='${opts.agent}'`);
   }
   switch (lane) {
+    case "gemini": {
+      if (opts.readOnly !== true) {
+        throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
+      }
+      requireGeminiWorkspaceSandbox();
+      const model = opts.model?.trim() || "gemini-3.6-flash-medium";
+      if (!isGeminiModel(model)) {
+        throw new Error(`Clanker: Gemini requires a Gemini model id; received '${model}'`);
+      }
+      const effort = opts.effort?.trim();
+      if (effort && effort !== "medium" && effort !== "high") {
+        throw new Error(`Clanker: Gemini effort must be 'medium' or 'high'; received '${effort}'`);
+      }
+      env.CLANKER_AGY_PATH = process.env.CLANKER_AGY_PATH ?? resolveSystemAgyPath();
+      env.CLANKER_GEMINI_MODEL = model;
+      env.CLANKER_GEMINI_PRINT_TIMEOUT = process.env.CLANKER_GEMINI_PRINT_TIMEOUT ?? "3m";
+      if (effort) env.CLANKER_GEMINI_EFFORT = effort;
+      return wrapWithVaultExec(
+        { command: process.execPath, args: [resolveGeminiAcpEntry()], env, warnings },
+        REQUIRED_ENV.gemini
+      );
+    }
     case "grok": {
       const args = [
         "--sandbox",
@@ -32152,11 +32214,11 @@ function truncate(s, max) {
 }
 
 // src/types.ts
-var LANE_NAMES = ["codex", "opencode", "grok"];
+var LANE_NAMES = ["codex", "opencode", "grok", "gemini"];
 
 // src/host.ts
 var HOSTS = ["claude", "codex", "standalone"];
-var CODEX_LANES = ["opencode", "grok"];
+var CODEX_LANES = ["opencode", "grok", "gemini"];
 function parseHostArgs(args) {
   let host;
   for (let i = 0; i < args.length; i += 1) {
@@ -32314,6 +32376,15 @@ var LaneManager = class {
       throw new Error("model='codex' is a lane name, not a Codex model id; omit model to use the configured default");
     }
     const readOnly = params.readOnly ?? false;
+    if (params.lane === "gemini" && !readOnly) {
+      throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
+    }
+    if (params.lane === "gemini" && params.worktree) {
+      throw new Error("Clanker: Gemini reconnaissance does not create or use managed worktrees");
+    }
+    if (params.lane === "gemini" && params.seat) {
+      throw new Error("Clanker: Gemini print-mode sessions do not support persistent seats");
+    }
     if (!readOnly && params.lane !== "codex" && !params.model?.trim()) {
       throw new Error(`an explicit model is required for write lane '${params.lane}'`);
     }
@@ -32638,7 +32709,7 @@ var LaneManager = class {
     if (run.isTerminalTurn()) return;
     let gitTouched = [];
     try {
-      if (await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
+      if (run.lane !== "gemini" && await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
     } catch {
     }
     const touched = dedupe([...gitTouched, ...run.toolTouchedFiles()]);
@@ -32794,7 +32865,7 @@ var LaneManager = class {
   async computeTouched(run) {
     let gitTouched = [];
     try {
-      if (await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
+      if (run.lane !== "gemini" && await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
     } catch {
     }
     run.setFinalTouched(dedupe([...gitTouched, ...run.toolTouchedFiles()]));
@@ -32906,7 +32977,7 @@ var dispatchOptionsShape = {
   model: external_exports.string().optional().describe(
     "Model override, e.g. 'zhipuai-coding-plan/glm-5.2' (opencode) \u2014 warned & echoed if the Clanker can't honor it. Required for lane=opencode on every start path, including read-only: omitting it lets opencode's own config default (possibly GLM) run outside the vault-exec credential wrap."
   ),
-  effort: external_exports.string().optional().describe("Reasoning effort override (codex/grok only)"),
+  effort: external_exports.string().optional().describe("Reasoning effort override (codex/grok; Gemini uses its dedicated research tool)"),
   read_only: external_exports.boolean().optional().describe("If true, the Clanker is gated read-only (default false)"),
   sandbox: external_exports.enum(["read-only", "workspace-write", "danger-full-access"]).optional().describe(
     'codex-only native sandbox strictness override (independent of read_only). "workspace-write" boxes writes to the session cwd + tmp \u2014 the review-seat recipe is worktree + sandbox="workspace-write", so cargo/go test can actually run instead of being Not-checked. Unset defaults writes to workspace-write; danger-full-access requires an explicit override. Ignored (warned) on grok/opencode. Grok still derives its native read-only/workspace sandbox from read_only; opencode has no native sandbox tier.'
@@ -32924,6 +32995,12 @@ var glmWriteDispatchShape = external_exports.object(dispatchOptionsShape).omit({
 var kimiCrewDispatchShape = {
   prompt: external_exports.string().trim().min(1).describe("Task for the fixed Kimi-led OpenCode crew"),
   worktree: external_exports.string().trim().min(1).describe("Required managed-worktree branch")
+};
+var geminiResearchDispatchShape = {
+  prompt: external_exports.string().trim().min(1).describe("Bounded reconnaissance or grounded-research question for Clanker: Gemini"),
+  cwd: external_exports.string().optional().describe("Absolute repository or working directory to inspect"),
+  model: external_exports.string().trim().regex(/^gemini-/i).optional().describe("Gemini model override (default gemini-3.6-flash-medium)"),
+  effort: external_exports.enum(["medium", "high"]).optional().describe("agy reasoning-effort override")
 };
 function rejectsUnsupervisedGlmWrite(args) {
   return isGlmModel(args.model) && !(args.read_only ?? false);
@@ -32958,9 +33035,10 @@ function fail(message, telemetry) {
 function registerTools(server, manager) {
   const host = manager.host ?? "standalone";
   const hostLanes = laneNamesForHost(host);
-  const hostLaneEnum = external_exports.enum(hostLanes);
+  const genericLanes = hostLanes.filter((lane) => lane !== "gemini");
+  const hostLaneEnum = external_exports.enum(genericLanes);
   const hostDispatchShape = {
-    lane: hostLaneEnum.describe(`Backend Clanker to drive: ${hostLanes.join(" | ")}`),
+    lane: hostLaneEnum.describe(`Backend Clanker to drive: ${genericLanes.join(" | ")}; use the dedicated Gemini research tool for reconnaissance`),
     ...dispatchOptionsShape
   };
   const hostReadonlyDispatchShape = external_exports.object(hostDispatchShape).omit({ read_only: true, sandbox: true }).shape;
@@ -32989,6 +33067,7 @@ function registerTools(server, manager) {
       try {
         const blocked = policyFailure(args.lane);
         if (blocked) return blocked;
+        if (args.lane === "gemini") return fail("Use clanker_dispatch_gemini_research_start for Clanker: Gemini reconnaissance");
         if (rejectsUnsupervisedGlmWrite(args)) {
           return fail(glmWriteBlockedMessage(host));
         }
@@ -33011,6 +33090,7 @@ function registerTools(server, manager) {
       try {
         const blocked = policyFailure(args.lane);
         if (blocked) return blocked;
+        if (args.lane === "gemini") return fail("Use clanker_dispatch_gemini_research_start for Clanker: Gemini reconnaissance");
         if (args.lane === "opencode" && !args.model?.trim()) {
           return fail(
             "an explicit model is required for read-only opencode dispatch: omitting it lets opencode's own config default (possibly GLM) run outside the vault-exec credential wrap"
@@ -33020,6 +33100,30 @@ function registerTools(server, manager) {
           ...toDispatch(args),
           readOnly: true,
           sandbox: void 0
+        });
+        return ok({ id, warnings });
+      } catch (e) {
+        return fail(msg(e));
+      }
+    }
+  );
+  server.registerTool(
+    "clanker_dispatch_gemini_research_start",
+    {
+      title: "Start Clanker: Gemini reconnaissance",
+      description: "Starts the fixed read-only Gemini research lane. The implementation uses authenticated local CLI state; no API key is accepted.",
+      inputSchema: geminiResearchDispatchShape,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+    },
+    async (args) => {
+      try {
+        const { id, warnings } = await manager.dispatchStart({
+          lane: "gemini",
+          prompt: args.prompt,
+          cwd: args.cwd,
+          model: args.model,
+          effort: args.effort,
+          readOnly: true
         });
         return ok({ id, warnings });
       } catch (e) {
@@ -33039,6 +33143,7 @@ function registerTools(server, manager) {
       try {
         const blocked = policyFailure(args.lane);
         if (blocked) return blocked;
+        if (args.lane === "gemini") return fail("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
         if (args.lane !== "codex" && !args.model) {
           return fail(`an explicit model is required for write lane '${args.lane}'`);
         }
@@ -33132,6 +33237,7 @@ function registerTools(server, manager) {
       try {
         const blocked = policyFailure(args.lane);
         if (blocked) return blocked;
+        if (args.lane === "gemini") return fail("Use clanker_dispatch_gemini_research_start for Clanker: Gemini reconnaissance");
         if (rejectsUnsupervisedGlmWrite(args)) {
           return fail(glmWriteBlockedMessage(host));
         }

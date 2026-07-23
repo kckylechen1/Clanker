@@ -18,8 +18,8 @@ test("host parser defaults and accepts both CLI forms", () => {
 });
 
 test("codex host lane set and block reason prohibit only self-dispatch", () => {
-  assert.deepEqual(laneNamesForHost("codex"), ["opencode", "grok"]);
-  assert.deepEqual(laneNamesForHost("claude"), ["codex", "opencode", "grok"]);
+  assert.deepEqual(laneNamesForHost("codex"), ["opencode", "grok", "gemini"]);
+  assert.deepEqual(laneNamesForHost("claude"), ["codex", "opencode", "grok", "gemini"]);
   assert.match(hostLaneBlockedReason("codex", "codex") ?? "", /self-dispatch/);
   assert.equal(hostLaneBlockedReason("codex", "grok"), undefined);
 });
@@ -77,6 +77,19 @@ test("Kimi crew tool is present on every host because each exposes opencode", ()
   }
 });
 
+test("Gemini research tool is present on every host", () => {
+  for (const host of ["standalone", "claude", "codex"] as const) {
+    assert.equal(captureTools({ host }).has("clanker_dispatch_gemini_research_start"), true);
+  }
+});
+
+test("Gemini ACP sidecars are bundled identically beside both plugin adapters", () => {
+  const claude = fs.readFileSync("plugin/dist/gemini-acp.mjs");
+  const codex = fs.readFileSync("codex-plugin/dist/gemini-acp.mjs");
+  assert.deepEqual(claude, codex);
+  assert.match(claude.toString("utf8"), /clanker-gemini/);
+});
+
 test("manager rejects the codex lane name as a model before backend resolution", async () => {
   let resolves = 0;
   const manager = new LaneManager({
@@ -130,7 +143,7 @@ test("plugin manifests, synchronized skill, marketplace, and bundles follow the 
   const codexEvals = fs.readFileSync("codex-plugin/skills/using-clanker/evals/evals.json");
   const skill = claudeSkill.toString("utf8");
   assert.equal(manifest.name, "clanker");
-  assert.equal(manifest.version, "0.2.5");
+  assert.equal(manifest.version, "0.3.0");
   assert.equal(claudeManifest.version, manifest.version);
   assert.equal(packageManifest.version, manifest.version);
   assert.equal(SERVER_VERSION, manifest.version);

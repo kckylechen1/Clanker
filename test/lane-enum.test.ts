@@ -17,8 +17,8 @@ test("tools.ts laneEnum accepts exactly LANE_NAMES and rejects anything else", (
     assert.equal(laneEnum.parse(lane), lane, `laneEnum should accept '${lane}'`);
   }
 
-  assert.equal(LANE_NAMES.length, 3, "lane set is still exactly the three known lanes");
-  assert.deepEqual([...LANE_NAMES].sort(), ["codex", "grok", "opencode"]);
+  assert.equal(LANE_NAMES.length, 4, "lane set includes the four known lanes");
+  assert.deepEqual([...LANE_NAMES].sort(), ["codex", "gemini", "grok", "opencode"]);
 
   assert.throws(() => laneEnum.parse("claude"), /Invalid enum value|invalid_value/);
   assert.throws(() => laneEnum.parse(""), /Invalid enum value|invalid_value/);
@@ -39,6 +39,7 @@ test("read-only start tool has no override and forces readOnly even for an extra
   let received: Record<string, unknown> | undefined;
   let supervisedGlmReceived: Record<string, unknown> | undefined;
   let crewReceived: Record<string, unknown> | undefined;
+  let geminiReceived: Record<string, unknown> | undefined;
   const manager = {
     async dispatchStart(params: Record<string, unknown>) {
       received = params;
@@ -57,6 +58,12 @@ test("read-only start tool has no override and forces readOnly even for an extra
       return { status: "done", final_message: "", touched_files: [], plan_final: undefined };
     },
   } as unknown as LaneManager;
+
+  const originalDispatchStart = manager.dispatchStart.bind(manager);
+  (manager as any).dispatchStart = async (params: Record<string, unknown>) => {
+    if (params.lane === "gemini") geminiReceived = params;
+    return originalDispatchStart(params as never);
+  };
 
   registerTools(server, manager);
   const tool = tools.get("clanker_dispatch_readonly_start");
@@ -84,6 +91,17 @@ test("read-only start tool has no override and forces readOnly even for an extra
   });
   assert.equal(received, beforeMissingReadonlyModel, "read-only opencode dispatch without a model must not reach the manager");
   assert.match(JSON.stringify(missingReadonlyModel), /explicit model is required for read-only opencode dispatch/);
+
+  const genericStart = tools.get("clanker_dispatch_start");
+  assert.ok(genericStart, "generic start tool is registered");
+  const genericStartSchema = z.object(genericStart.config.inputSchema as z.ZodRawShape);
+  assert.equal(
+    genericStartSchema.safeParse({ lane: "gemini", prompt: "research", read_only: true }).success,
+    false,
+    "generic start excludes Gemini in favor of its dedicated narrow research schema",
+  );
+  const rejectedGenericGemini = await genericStart.handler({ lane: "gemini", prompt: "research", read_only: true });
+  assert.match(JSON.stringify(rejectedGenericGemini), /clanker_dispatch_gemini_research_start/);
 
   const writeTool = tools.get("clanker_dispatch_write_start");
   assert.ok(writeTool, "isolated write start tool is registered");
@@ -159,7 +177,7 @@ test("read-only start tool has no override and forces readOnly even for an extra
         read_only: false,
       });
       assert.equal(received, beforeRejectedGlm, `${toolName} must reject GLM on lane '${lane}'`);
-      assert.match(JSON.stringify(rejectedGlm), /GLM writes require clanker_dispatch_glm_write_start/);
+      assert.match(JSON.stringify(rejectedGlm), lane === "gemini" ? /clanker_dispatch_gemini_research_start/ : /GLM writes require clanker_dispatch_glm_write_start/);
     }
   }
 
@@ -209,4 +227,22 @@ test("read-only start tool has no override and forces readOnly even for an extra
   });
   assert.deepEqual(crewReceived, { prompt: "implement", worktree: "clanker/kimi-crew-test" });
   assert.match(JSON.stringify(crewResponse), /crew-warning/);
+
+  const geminiTool = tools.get("clanker_dispatch_gemini_research_start");
+  assert.ok(geminiTool);
+  assert.deepEqual(Object.keys(geminiTool.config.inputSchema).sort(), ["cwd", "effort", "model", "prompt"]);
+  const geminiSchema = z.object(geminiTool.config.inputSchema as z.ZodRawShape);
+  assert.equal(geminiSchema.safeParse({ prompt: "research", model: "custom", effort: "high" }).success, false);
+  assert.equal(geminiSchema.safeParse({ prompt: "research", model: "gemini-3.6-flash-high", effort: "high" }).success, true);
+  await geminiTool.handler({ prompt: "research", model: "gemini-3.6-flash-high", effort: "high", lane: "codex", read_only: false, worktree: "bad" });
+  assert.deepEqual(geminiReceived, {
+    lane: "gemini", prompt: "research", cwd: undefined, model: "gemini-3.6-flash-high", effort: "high", readOnly: true,
+  });
+
+  const writeSchemaWithGemini = z.object(writeTool.config.inputSchema as z.ZodRawShape);
+  assert.equal(writeSchemaWithGemini.safeParse({ lane: "gemini", prompt: "write", model: "x", worktree: "bad" }).success, false);
+  const beforeRawWriteBypass = received;
+  const rawWriteBypass = await writeTool.handler({ lane: "gemini", prompt: "write", model: "x", worktree: "bad" });
+  assert.equal(received, beforeRawWriteBypass);
+  assert.match(JSON.stringify(rawWriteBypass), /reconnaissance-only/);
 });

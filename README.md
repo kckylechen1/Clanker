@@ -7,6 +7,7 @@ Clanker exposes these slash commands:
 | Command | Backend |
 |---|---|
 | `/clanker:codex <task>` | Codex ACP |
+| `/clanker:gemini <task>` | Clanker: Gemini read-only reconnaissance and grounded research |
 | `/clanker:grok <task>` | Grok ACP (`grok-4.5` by default; Composer 2.5 is a separate model) |
 | `/clanker:glm <task>` | Opencode with GLM |
 | `/clanker:deepseek <task>` | Opencode with DeepSeek |
@@ -18,6 +19,8 @@ Clanker exposes these slash commands:
 Default mode is background: the Claude `Agent` task owns the visible bottom task row, while the MCP server owns the ACP backend process. Use `--wait` to run foreground. Read-only commands use mechanically read-only lane relays. Non-GLM writes use `clanker:writer`; GLM writes alone use Sonnet `clanker:supervisor`. Every write runs in a mandatory managed worktree.
 
 `/clanker:kimi-crew` is deliberately thin: Clanker starts and monitors one Kimi/OpenCode ACP session. OpenCode's existing global profiles perform GLM implementation (`worker-glm`), DeepSeek cold review (`reviewer-deepseek`), and optional Sol/oracle analysis. Kimi leads, inspects the repository, and verifies results; Clanker does not own a deterministic workflow or copy those profiles into this repository. Direct GLM writes still use the Sonnet supervisor; inside Kimi Crew, Kimi is the intentional supervisor for its GLM worker.
+
+`/clanker:gemini` is workspace-read-only research. It always runs in plan mode inside a sandbox, cannot enter a Clanker write path, and uses the locally authenticated Gemini CLI state. The lane currently requires macOS `/usr/bin/sandbox-exec` and fails closed elsewhere; the sidecar denies writes beneath the inspected workspace while allowing Antigravity to maintain its own conversation and plan scratch outside that workspace. `agy` is an internal executor detail, not the product name or a credential surface. The default model is `gemini-3.6-flash-medium`; model and effort may be overridden.
 
 ## Layout
 
@@ -59,7 +62,7 @@ codex plugin marketplace add /Users/kckylechen/Projects/Clanker
 codex plugin add clanker@clanker
 ```
 
-Start a new Codex session after installation. The Codex MCP starts with `cwd: "."` and `--host codex` (Codex does not interpolate `${PLUGIN_ROOT}`). Under Codex, Clanker exposes only `opencode` and `grok`: the `codex` lane is absent from schemas and is hard-blocked before run creation. The dedicated GLM-write tool is also absent because GLM writes require the Claude/Sonnet supervisor; generic GLM writes remain loud errors. Native Sol/Luna/Terra/5.5 orchestration stays native V1.
+Start a new Codex session after installation. The Codex MCP starts with `cwd: "."` and `--host codex` (Codex does not interpolate `${PLUGIN_ROOT}`). Under Codex, Clanker exposes `opencode`, `grok`, and the external read-only `gemini` lane: the `codex` lane is absent from schemas and is hard-blocked before run creation. The dedicated GLM-write tool is also absent because GLM writes require the Claude/Sonnet supervisor; generic GLM writes remain loud errors. Native Sol/Luna/Terra/5.5 orchestration stays native V1.
 
 The active Claude config should point here:
 
@@ -88,13 +91,13 @@ npm run typecheck
 
 `npm run bundle` writes byte-identical MCP bundles to `plugin/dist/clanker-mcp.mjs` and
 `codex-plugin/dist/clanker-mcp.mjs`, plus byte-identical self-contained
-`dist/codex-acp.mjs` sidecars. The sidecar keeps the Codex lane runnable after either plugin
+`dist/codex-acp.mjs` and `dist/gemini-acp.mjs` sidecars. The sidecars keep those lanes runnable after either plugin
 manager copies only its adapter directory into the install cache without repository `node_modules`.
 
 ### Smoke — canary a lane before a real batch
 
 ```bash
-npm run smoke                       # full regression battery: all 3 lanes, "Reply DONE"
+npm run smoke                       # full regression battery: all 4 lanes, "Reply DONE"
 npm run smoke -- codex              # single-lane canary: one 1-turn "Reply PONG" dispatch
 npm run smoke -- codex gpt-5.6-sol  # canary a model override on that lane (e.g. the sol path)
 ```

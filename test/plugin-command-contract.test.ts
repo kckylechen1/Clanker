@@ -163,6 +163,15 @@ test("README documents the Claude-owned lifecycle instead of shell-style complet
   assert.doesNotMatch(body, /ACP turn, blocking, cannot detach/);
 });
 
+test("Gemini command and relay are read-only Clanker-owned research surfaces", async () => {
+  const command = await readFile(new URL("../plugin/commands/gemini.md", import.meta.url), "utf8");
+  const relay = await readFile(new URL("../plugin/agents/gemini.md", import.meta.url), "utf8");
+  assert.match(command, /subagent_type="clanker:gemini"/);
+  assert.doesNotMatch(command, /--write.*present|clanker:writer/);
+  assert.match(relay, /clanker_dispatch_gemini_research_start/);
+  assert.doesNotMatch(relay, /clanker_dispatch_write_start|Bash|Edit|Write/);
+});
+
 test("plugin metadata uses Clanker as the user-visible name", async () => {
   const manifest = JSON.parse(
     await readFile(new URL("../plugin/.claude-plugin/plugin.json", import.meta.url), "utf8"),

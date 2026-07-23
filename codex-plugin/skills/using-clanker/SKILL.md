@@ -1,6 +1,6 @@
 ---
 name: using-clanker
-description: "Routes bounded coding tasks through Clanker's host-aware Codex, Opencode, Grok, GLM, DeepSeek, Kimi, and Composer lanes. Use for cross-vendor review, external analysis, isolated implementation, or any clanker_dispatch_* lifecycle call."
+description: "Routes bounded coding and research tasks through Clanker's host-aware Codex, Opencode, Grok, Gemini, GLM, DeepSeek, Kimi, and Composer lanes. Use for cross-vendor review, external reconnaissance, isolated implementation, or any clanker_dispatch_* lifecycle call."
 compatibility: "Requires the Clanker MCP server and its host-filtered dispatch tools."
 ---
 
@@ -14,8 +14,8 @@ Trust the lane enum and available tools advertised by the running MCP server. Ne
 
 | Host | Available lanes | GLM write |
 |---|---|---|
-| Claude | `codex`, `opencode`, `grok` | Route through the packaged Sonnet `clanker:supervisor` |
-| Codex | `opencode`, `grok` only | Unavailable; it requires the Claude/Sonnet supervisor |
+| Claude | `codex`, `opencode`, `grok`, `gemini` | Route through the packaged Sonnet `clanker:supervisor` |
+| Codex | `opencode`, `grok`, `gemini` only | Unavailable; it requires the Claude/Sonnet supervisor |
 
 Under Codex, keep native Sol, Luna, Terra, and 5.5 work on native V1 orchestration. Clanker is for external Opencode or Grok workers there. Never self-dispatch Codex through Clanker.
 
@@ -31,6 +31,8 @@ Use `clanker_dispatch_readonly_start` by default. Supply:
 - real `model` override — required when `lane=opencode` (an omitted model would fall to opencode's own config default outside the vault-exec credential wrap and is rejected); optional for `lane=codex` — plus compatible `effort` overrides
 
 The server forces `read_only=true`; callers cannot turn this tool into a writer.
+
+For fast repository discovery, grounded web search, or reconnaissance, prefer `clanker_dispatch_gemini_research_start`. It accepts only `prompt` plus optional `cwd`, `model`, and `effort`; fixes `lane=gemini` and read-only mode server-side; and defaults to `gemini-3.6-flash-medium`. Gemini is excluded from generic and write schemas. The lane currently requires macOS `/usr/bin/sandbox-exec` and fails closed without it. Its local CLI is an implementation detail and uses its own authenticated state—never supply an API key.
 
 ### Non-GLM implementation
 
@@ -104,6 +106,7 @@ Do not return a launch acknowledgement as if it were a completed result.
 ## Routing examples
 
 - "Have Grok review this diff without edits" → read-only start, `lane=grok`, then wait to terminal.
+- "Research the upstream API and cite sources" → dedicated Gemini research start, then wait to terminal.
 - "Let Codex implement this using its configured default" on Claude → write start, `lane=codex`, unique `worktree`, omit `model`, then wait.
 - "Have DeepSeek implement this" → write start, `lane=opencode`, `model=ds`, unique `worktree`, then wait.
 - "Have Composer review this" → read-only start, `lane=opencode`, `model=composer`; do not use `lane=grok`.
