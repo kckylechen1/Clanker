@@ -207,7 +207,7 @@ test("Gemini ACP cancellation terminates agy and returns cancelled", { skip: !wo
   }
 });
 
-test("Gemini manager rejects managed worktrees and persistent seats before backend resolution", async () => {
+test("Gemini manager rejects managed worktrees before backend resolution", async () => {
   let resolutions = 0;
   const manager = new LaneManager({
     disableReaper: true,
@@ -219,11 +219,7 @@ test("Gemini manager rejects managed worktrees and persistent seats before backe
   try {
     await assert.rejects(
       manager.dispatchStart({ lane: "gemini", prompt: "research", readOnly: true, worktree: "never-created" }),
-      /does not create or use managed worktrees/,
-    );
-    await assert.rejects(
-      manager.dispatchStart({ lane: "gemini", prompt: "research", readOnly: true, seat: true }),
-      /do not support persistent seats/,
+      /Gemini rejects worktree/,
     );
     assert.equal(resolutions, 0);
   } finally {

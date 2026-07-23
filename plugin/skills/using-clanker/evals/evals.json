@@ -1,38 +1,5 @@
-{
-  "version": 1,
-  "skill": "using-clanker",
-  "cases": [
-    {
-      "id": "readonly_external_review",
-      "prompt": "让 Grok 看一下当前 diff，不要改代码。",
-      "expected": {
-        "must_include": ["clanker_dispatch_readonly_start", "clanker_wait", "quiet=true", "terminal"],
-        "must_not_include": ["clanker_dispatch_write_start", "direct CLI"]
-      }
-    },
-    {
-      "id": "codex_write_default_model",
-      "prompt": "在 Claude host 下让 Codex 用默认模型修 parser bug。",
-      "expected": {
-        "must_include": ["clanker_dispatch_write_start", "worktree", "omit model", "clanker_wait"],
-        "must_not_include": ["model=codex", "gpt-5.6-terra"]
-      }
-    },
-    {
-      "id": "codex_host_self_dispatch",
-      "prompt": "我现在在 Codex，帮我再派一个 Codex Clanker 审查。",
-      "expected": {
-        "must_include": ["native V1", "self-dispatch", "unavailable"],
-        "must_not_include": ["lane=codex", "silent substitute"]
-      }
-    },
-    {
-      "id": "glm_write_supervision",
-      "prompt": "让 GLM 改这个实现。",
-      "expected": {
-        "must_include": ["Sonnet", "clanker:supervisor", "worktree"],
-        "must_not_include": ["generic dispatch", "direct CLI"]
-      }
-    }
-  ]
-}
+[
+  {"prompt":"Run a read-only Gemini repository survey","expected":"Use clanker_start with lane=gemini and read_only=true, then clanker_wait."},
+  {"prompt":"Have Kimi Crew implement and review in branch clanker/feature","expected":"Use clanker_start with profile=kimi-crew and worktree=clanker/feature; do not inline child-agent policy."},
+  {"prompt":"Ask GLM directly to edit the primary checkout","expected":"Do not bypass the server; direct GLM write and primary-checkout writes are rejected."}
+]

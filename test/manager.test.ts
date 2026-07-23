@@ -103,12 +103,6 @@ test("terminal telemetry observes ACP config and usage and is persisted atomical
     assert.equal(r.telemetry?.actual_lane, "opencode");
     const persisted = JSON.parse(fs.readFileSync(path.join(process.env.CLANKER_RUNS_ROOT!, id, "telemetry.json"), "utf8"));
     assert.equal(persisted.observed_model, "observed/model");
-    await m.promptExisting(id, "ordinary continuation");
-    const continued = await waitTerminal(m, id);
-    assert.equal(continued.telemetry?.prompt_usage, undefined, "turn-local prompt usage resets");
-    assert.deepEqual(continued.telemetry?.session_usage, { used: 123, size: 4096, cost: { amount: 0.25, currency: "USD" } });
-    assert.equal(continued.telemetry?.observed_model, "observed/model");
-    assert.equal(continued.telemetry?.observed_effort, "high");
     assert.equal(m.status(id).telemetry?.tool_calls, 0);
   } finally { await m.shutdown(); }
 });
@@ -371,6 +365,33 @@ test("shutdown wakes capacity backoff immediately without spawning attempt two",
   }
 });
 
+test("cancel wakes capacity backoff immediately without spawning attempt two", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-backoff-cancel-"));
+  const counter = path.join(dir, "attempts");
+  const backoffMs = 4_000;
+  const m = new LaneManager({
+    resolveSpec: () => fakeSpec({ CLANKER_TEST_ATTEMPT_COUNTER: counter }),
+    disableReaper: true,
+    baseRepo: os.tmpdir(),
+    capacityRetryBackoffMs: backoffMs,
+  });
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "codex", prompt: "CAPACITY_ALWAYS please", cwd: os.tmpdir(), readOnly: true,
+    });
+    await until(() => m.status(id).telemetry?.retries === 1, 2_000);
+    const started = Date.now();
+    m.cancel(id);
+    await until(() => m.status(id).status === "cancelled", 1_000);
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 1_000, `cancel should wake backoff, elapsed=${elapsed}ms`);
+    assert.equal(fs.readFileSync(counter, "utf8"), "1", "cancel must not spawn attempt two");
+  } finally {
+    await m.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("dispatchStart forwards a strict sandbox override through to the spec resolver", async () => {
   // Regression coverage: dispatchStart's LaneRequestOptions construction once
   // dropped `sandbox` on the floor (only model/effort/readOnly were forwarded)
@@ -403,7 +424,7 @@ test("dispatchStart forwards a strict sandbox override through to the spec resol
   }
 });
 
-test("dispatchKimiCrew fixes the single OpenCode lifecycle request", async () => {
+test("kimi-crew profile fixes the single OpenCode lifecycle request", async () => {
   let capturedLane: string | undefined;
   let capturedOpts: LaneRequestOptions | undefined;
   const spy: SpecResolver = (lane, opts) => {
@@ -415,11 +436,13 @@ test("dispatchKimiCrew fixes the single OpenCode lifecycle request", async () =>
   const m = new LaneManager({ resolveSpec: spy, disableReaper: true, baseRepo: repo.base });
   const branch = `clanker/kimi-crew-test-${Date.now()}`;
   try {
-    const { id } = await m.dispatchKimiCrew({ prompt: "implement and review", worktree: branch });
+    const { id } = await m.dispatchStart({
+      lane: "opencode", profile: "kimi-crew", prompt: "implement and review", worktree: branch,
+    });
     assert.equal(capturedLane, "opencode");
     assert.equal(capturedOpts?.model, "kimi");
     assert.equal(capturedOpts?.readOnly, false);
-    assert.equal(capturedOpts?.kimiCrew, true);
+    assert.equal(capturedOpts?.profile, "kimi-crew");
     await waitTerminal(m, id);
   } finally {
     await m.shutdown();
@@ -465,7 +488,7 @@ test("manager requires explicit external write models and rejects unsupervised G
     for (const lane of ["codex", "opencode", "grok"] as const) {
       await assert.rejects(
         () => m.dispatchStart({ lane, model: "glm", prompt: "write", readOnly: false, worktree: "never-created" }),
-        /GLM writes require clanker_dispatch_glm_write_start and Sonnet supervision/,
+        /direct GLM write is prohibited; use profile='kimi-crew'/,
       );
     }
   } finally {
@@ -531,7 +554,11 @@ test("clanker_cancel maps a cancelled turn to status cancelled", async () => {
     const r = await waitTerminal(m, id);
     assert.equal(r.status, "cancelled");
     assert.equal(r.telemetry?.forced_kill, false);
-    assert.ok(m.list().some((entry) => entry.id === id), "cooperative cancellation keeps the session available");
+    assert.equal(
+      m.list().some((entry) => entry.id === id),
+      false,
+      "one-shot cooperative cancellation closes the ACP session",
+    );
   } finally {
     await m.shutdown();
   }
@@ -564,30 +591,6 @@ test("cancel during handshake waits for child exit and cannot publish a late con
     await m.shutdown();
     fs.rmSync(dir, { recursive: true, force: true });
   }
-});
-
-test("a reused session clears cancelled turn telemetry before the next successful turn", async () => {
-  const m = makeManager();
-  try {
-    const { id } = await m.dispatchStart({ lane: "codex", prompt: "CANCELME", cwd: os.tmpdir(), readOnly: true });
-    await until(() => m.status(id).tool_calls >= 1, 4000);
-    await m.cancel(id);
-    assert.equal(m.status(id).telemetry?.terminal_reason, "cancelled");
-    await m.promptExisting(id, "normal success", true);
-    const running = m.status(id).telemetry!;
-    assert.equal(running.terminal_at, undefined);
-    assert.equal(running.terminal_reason, undefined);
-    assert.equal(running.stop_reason, undefined);
-    const done = await waitTerminal(m, id);
-    assert.equal(done.status, "done");
-    assert.equal(done.telemetry?.stop_reason, "end_turn");
-    assert.equal(done.telemetry?.terminal_reason, "done");
-    assert.equal(done.telemetry?.cancellation_requested, false);
-    assert.equal(done.telemetry?.forced_kill, false);
-    assert.equal(done.telemetry?.turns, 2);
-    assert.equal(done.telemetry?.continuation_turns, 1);
-    assert.equal(done.telemetry?.corrections, 1);
-  } finally { await m.shutdown(); }
 });
 
 test("ignored cancel activity cannot shorten grace; forced cancel awaits exit and stays terminal", async () => {
@@ -652,37 +655,14 @@ test("telemetry persistence failure reports run id, path, and error on stderr", 
   assert.match(messages[0], /ENOTDIR|not a directory/i);
 });
 
-test("clanker_prompt reuses the session for a second turn", async () => {
-  const m = makeManager();
-  try {
-    const { id } = await m.dispatchStart({ lane: "codex", prompt: "reuse-one", cwd: os.tmpdir(), readOnly: true });
-    const r1 = await waitTerminal(m, id);
-    assert.equal(r1.final_message, "reuse-one");
-
-    await m.promptExisting(id, "reuse-two");
-    const r2 = await waitTerminal(m, id);
-    assert.equal(r2.status, "done");
-    assert.equal(r2.final_message, "reuse-two");
-
-    const entry = m.list().find((e) => e.id === id);
-    assert.ok(entry, "run still listed while session alive");
-    assert.equal(entry!.turns_count, 2);
-    assert.equal(entry!.state, "idle");
-  } finally {
-    await m.shutdown();
-  }
-});
-
-test("reaped session rejects clanker_prompt", async () => {
+test("reaper is idempotent after one-shot completion already closed the run", async () => {
   const m = makeManager({ sessionTtlMs: 60 });
   try {
     const { id } = await m.dispatchStart({ lane: "opencode", prompt: "reap-me", cwd: os.tmpdir(), readOnly: true });
     await waitTerminal(m, id);
-    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(m.list().find((e) => e.id === id), undefined, "completion closes the run immediately");
     const reaped = await m.reap();
-    assert.ok(reaped.includes(id), "run should be reaped after idle TTL");
-    assert.equal(m.list().find((e) => e.id === id), undefined, "reaped run drops off clanker_list");
-    await assert.rejects(() => m.promptExisting(id, "too late"), /reaped|not found/);
+    assert.equal(reaped.includes(id), false, "reaper must not report an already-closed run again");
   } finally {
     await m.shutdown();
   }

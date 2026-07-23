@@ -20,25 +20,11 @@
  *           same JSON is supplied through OPENCODE_CONFIG_CONTENT because
  *           project config loads after OPENCODE_CONFIG and could otherwise
  *           replace the selected agent or weaken its permissions.
+ *           `profile="kimi-crew"` is the one exception: it selects a named
+ *           profile installed and owned by OpenCode, while Clanker keeps
+ *           process and workspace lifecycle ownership.
  *           opencode has no ACP-mode reasoning-effort knob (that is the
  *           `--variant` run flag), so effort warns.
- *
- *           MERGE NOTE (rebase of fix/codex-acp-local-dep-bypass-npx onto
- *           main, 2026-07-18): main separately grew a caller-supplied
- *           `LaneRequestOptions.agent` (a named opencode agent-profile
- *           override via `default_agent`, e.g. a markdown profile under
- *           `~/.config/opencode/agents/<name>.md`) before this isolation
- *           commit existed. This isolation commit's own fixed `clanker-worker`
- *           contract is a security fix for an observed incident (a read-only
- *           lane reaching `tachi_task`/`tachi_skill`), so a caller-chosen
- *           `default_agent` overriding it here would silently reopen exactly
- *           that hole. This rebase resolution keeps the isolation
- *           non-bypassable and treats opencode's `agent` capability as
- *           retired (CAPS.opencode.agent = false; a request that sets
- *           `opts.agent` for opencode now just warns and is ignored, same as
- *           any other unsupported-capability request). That is a judgment
- *           call made during conflict resolution, not a verified product
- *           decision — flag for explicit sign-off before this lands.
  * - codex   `@agentclientprotocol/codex-acp` as a pinned build dependency,
  *           packaged into each plugin as a self-contained `dist/codex-acp.mjs`
  *           sidecar and spawned directly with Node instead of
@@ -110,7 +96,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { isGlmModel, resolveOcModel } from "./constants.js";
+import { resolveOcModel } from "./constants.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "./types.js";
 
 const nodeRequire = createRequire(import.meta.url);
@@ -204,61 +190,14 @@ interface LaneCapabilities {
   effort: boolean;
   /** Whether the CLI exposes a mid-strictness native sandbox tier (see CodexSandboxMode). */
   sandbox: boolean;
-  /** Whether the CLI can select a named agent/profile (see LaneRequestOptions.agent). */
-  agent: boolean;
 }
 
 const CAPS: Record<LaneName, LaneCapabilities> = {
-  codex: { model: true, effort: true, sandbox: true, agent: false },
-  // opencode's `agent` capability is retired as of the clanker-worker isolation
-  // fix below: the worker's identity and permission set are fixed by Clanker,
-  // not caller-selectable, so a caller-supplied `opts.agent` now just warns
-  // (see the file header MERGE NOTE for why this couldn't be a silent merge).
-  opencode: { model: true, effort: false, sandbox: false, agent: false },
-  grok: { model: true, effort: true, sandbox: false, agent: false },
-  gemini: { model: true, effort: true, sandbox: false, agent: false },
+  codex: { model: true, effort: true, sandbox: true },
+  opencode: { model: true, effort: false, sandbox: false },
+  grok: { model: true, effort: true, sandbox: false },
+  gemini: { model: true, effort: true, sandbox: false },
 };
-
-/**
- * Per-lane environment variables that must come from the vault (OS
- * keychain), never the ambient process environment, and therefore force the
- * spawned command through `tachi vault exec` (see wrapWithVaultExec below).
- * codex and grok authenticate via their own OAuth login state — Clanker
- * never holds a long-lived secret for them, so both declare an empty list.
- * opencode is model-dependent (most models it serves are also OAuth-backed
- * through opencode's own credential store); only the GLM lane authenticates
- * with a bare API key, so its requiredEnv is resolved per-request in
- * opencodeRequiredEnv rather than declared statically here.
- */
-const REQUIRED_ENV: Record<Exclude<LaneName, "opencode">, string[]> = {
-  codex: [],
-  grok: [],
-  gemini: [],
-};
-
-/** GLM is the only normal opencode lane that needs a vault-sourced secret. */
-function opencodeRequiredEnv(model: string | undefined): string[] {
-  return isGlmModel(model) ? ["ZHIPUAI_API_KEY"] : [];
-}
-
-/**
- * Rewrite a spawn command to run under `tachi vault exec --keychain
- * --require <vars> -- <original command> <original args>` when the lane
- * declares required env vars, so the secret is materialized from the OS
- * keychain into the child's environment at spawn time instead of living in
- * Clanker's (or the ambient shell's) own environment. `tachi` resolves via
- * PATH, same as every other lane binary here. An empty requiredEnv list is
- * a no-op — the returned spec is unchanged, so every existing OAuth lane's
- * spawn command stays byte-for-byte identical to before this wiring.
- */
-function wrapWithVaultExec(spec: SpawnSpec, requiredEnv: string[]): SpawnSpec {
-  if (requiredEnv.length === 0) return spec;
-  return {
-    ...spec,
-    command: "tachi",
-    args: ["vault", "exec", "--keychain", "--require", requiredEnv.join(","), "--", spec.command, ...spec.args],
-  };
-}
 
 /**
  * Maps the public `sandbox` option (CodexSandboxMode, mirroring codex-acp's
@@ -305,27 +244,6 @@ function opencodeClankerAgent(readOnly: boolean) {
   } as const;
 }
 
-function opencodeKimiCrewAgent() {
-  return {
-    description: "Kimi Crew lead for one OpenCode-native implementation and review session.",
-    mode: "primary",
-    permission: {
-      task: {
-        "*": "deny",
-        "worker-glm": "allow",
-        "reviewer-deepseek": "allow",
-        oracle: "allow",
-      },
-    },
-    prompt: [
-      "You are Kimi Crew. Lead the supplied task through the existing OpenCode agent profiles.",
-      "Prefer worker-glm for implementation, use reviewer-deepseek for cold review, and call oracle only when risk or evidence warrants it.",
-      "Use your normal OpenCode tools to inspect Git, understand the repository, and verify or repair the integrated result when useful.",
-      "Personally adjudicate the agents' findings, require verification evidence, and return concrete evidence and remaining concerns.",
-    ].join("\n"),
-  } as const;
-}
-
 /**
  * Build the concrete spawn recipe for a lane.
  *
@@ -350,9 +268,6 @@ export function buildSpawnSpec(
   if (opts.sandbox && !caps.sandbox) {
     warnings.push(`lane '${lane}' does not support sandbox override; ignoring sandbox='${opts.sandbox}'`);
   }
-  if (opts.agent && !caps.agent) {
-    warnings.push(`lane '${lane}' does not support agent profile override; ignoring agent='${opts.agent}'`);
-  }
 
   switch (lane) {
     case "gemini": {
@@ -372,10 +287,7 @@ export function buildSpawnSpec(
       env.CLANKER_GEMINI_MODEL = model;
       env.CLANKER_GEMINI_PRINT_TIMEOUT = process.env.CLANKER_GEMINI_PRINT_TIMEOUT ?? "3m";
       if (effort) env.CLANKER_GEMINI_EFFORT = effort;
-      return wrapWithVaultExec(
-        { command: process.execPath, args: [resolveGeminiAcpEntry()], env, warnings },
-        REQUIRED_ENV.gemini,
-      );
+      return { command: process.execPath, args: [resolveGeminiAcpEntry()], env, warnings };
     }
 
     case "grok": {
@@ -397,47 +309,36 @@ export function buildSpawnSpec(
       ];
       if (opts.effort) args.push("--reasoning-effort", opts.effort);
       args.push("stdio");
-      return wrapWithVaultExec({ command: "grok", args, env, warnings }, REQUIRED_ENV.grok);
+      return { command: "grok", args, env, warnings };
     }
 
     case "opencode": {
-      // Fail closed: without an explicit model, opencodeRequiredEnv(undefined)
-      // below returns [] and wrapWithVaultExec becomes a no-op, while the
-      // actual model that runs is decided by opencode's own config default —
-      // which this process does not control and cannot assume is non-GLM.
-      // That combination silently spawns a key-bearing lane outside the
-      // vault-exec credential wrap (found by codex cold review, run
-      // codex-2db38). Every buildSpawnSpec caller (tools/run/adapters) is
-      // routed through here, so the guard covers all of them, read-only
-      // included.
+      // Fail closed: without an explicit model, the actual model would be
+      // selected by OpenCode's interactive config rather than this request.
+      // Every caller is routed through here, so the guard also covers
+      // read-only workers.
       if (!opts.model?.trim()) {
         throw new Error(
-          "opencode lane requires an explicit model id — omitting it would let opencode's own config default (possibly GLM) run outside the vault-exec credential wrap",
+          "opencode lane requires an explicit model id — omitting it would let OpenCode's interactive default choose a different model",
         );
       }
       const args = ["acp"];
       // Shortnames (glm/ds/kimi/free) resolve to full provider/model ids from the
       // single source in constants.ts; full ids pass through unchanged.
       const model = resolveOcModel(opts.model);
-      // NOTE (rebase merge resolution): main's `opts.agent` (caller-selected
-      // default_agent) is intentionally NOT honored here — see the file
-      // header MERGE NOTE. The clanker-worker identity below is fixed.
-      const profile = opts.kimiCrew ? "clanker-kimi-crew" : "clanker-worker";
-      const agent = opts.kimiCrew
-        ? { [profile]: opencodeKimiCrewAgent() }
-        : { [profile]: opencodeClankerAgent(opts.readOnly === true) };
+      const profile = opts.profile === "kimi-crew" ? "kimi-crew" : "clanker-worker";
       const config: Record<string, unknown> = {
         $schema: "https://opencode.ai/config.json",
         default_agent: profile,
-        agent,
       };
+      if (opts.profile !== "kimi-crew") config.agent = { [profile]: opencodeClankerAgent(opts.readOnly === true) };
       if (model) config.model = model;
 
       const cfgPath = path.join(runDir, "opencode-config.json");
       fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2));
       env.OPENCODE_CONFIG = cfgPath;
       env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config);
-      if (!opts.kimiCrew) {
+      if (opts.profile !== "kimi-crew") {
         // The isolated generic worker must not ingest the interactive
         // Claude/Codex skill layer from ~/.claude or ~/.agents. Kimi Crew is
         // intentionally different: its installed child profiles retain their
@@ -445,10 +346,7 @@ export function buildSpawnSpec(
         env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
         env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
       }
-      const requiredEnv = opts.kimiCrew
-        ? ["KIMI_API_KEY", "ZHIPUAI_API_KEY"]
-        : opencodeRequiredEnv(opts.model);
-      return wrapWithVaultExec({ command: "opencode", args, env, warnings }, requiredEnv);
+      return { command: "opencode", args, env, warnings };
     }
 
     case "codex": {
@@ -475,10 +373,7 @@ export function buildSpawnSpec(
       // header), so its own bundled @openai/codex copy was never
       // downloaded — CODEX_PATH is load-bearing, not an optional override.
       env.CODEX_PATH = resolveSystemCodexPath();
-      return wrapWithVaultExec(
-        { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings },
-        REQUIRED_ENV.codex,
-      );
+      return { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings };
     }
   }
 }

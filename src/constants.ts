@@ -22,7 +22,7 @@ export const CANCEL_GRACE_MS = envInt("CLANKER_CANCEL_GRACE_MS", 5_000);
 /**
  * Hard per-turn ceiling. suspected_stall is only a warning; this timeout is the
  * guaranteed path to a terminal state — on hit the turn is forced to `error` and
- * the subprocess is killed, so clanker_dispatch can never hang forever.
+ * the subprocess is killed, so a job cannot hang forever.
  */
 export const TURN_TIMEOUT_MS = envInt("CLANKER_TURN_TIMEOUT_MS", 2_700_000);
 

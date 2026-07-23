@@ -59,28 +59,10 @@ test("CP3: opencode lane pins the resolved model and dedicated worker in inline 
   assert.deepEqual(cfg, JSON.parse(fs.readFileSync(spec.env.OPENCODE_CONFIG, "utf8")));
 });
 
-test("caller-selected agent profiles are warned and ignored on every lane", () => {
-  for (const lane of ["codex", "opencode", "grok"] as const) {
-    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), `clanker-${lane}-agent-`));
-    const spec = buildSpawnSpec(lane, { agent: "unsafe-profile", model: lane === "opencode" ? "kimi" : undefined }, runDir);
-    assert.ok(
-      spec.warnings.includes(
-        `lane '${lane}' does not support agent profile override; ignoring agent='unsafe-profile'`,
-      ),
-    );
-    if (lane === "opencode") {
-      const cfg = JSON.parse(spec.env.OPENCODE_CONFIG_CONTENT);
-      assert.equal(cfg.default_agent, "clanker-worker");
-      assert.equal(Object.hasOwn(cfg.agent, "unsafe-profile"), false);
-    }
-  }
-});
-
 test("opencode read-only lane denies delegation, skills, external paths, edits, and shell", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-default-"));
-  // model is required even for read-only opencode spawns (see "opencode spawn
-  // without an explicit model fails closed" below) so the vault-exec wrap
-  // decision is never left to opencode's own config default.
+  // Pin the model even for read-only work so an interactive OpenCode default
+  // cannot silently select a different provider.
   const spec = buildSpawnSpec("opencode", { readOnly: true, model: "kimi" }, runDir);
   assert.ok(spec.env.OPENCODE_CONFIG, "OPENCODE_CONFIG env is set");
   assert.equal(spec.env.OPENCODE_DISABLE_CLAUDE_CODE, "1");
@@ -112,94 +94,52 @@ test("opencode write lane keeps worktree-local edit and shell enabled", () => {
   assert.equal(cfg.agent?.["clanker-worker"]?.permission?.external_directory, "deny");
 });
 
-test("OpenCode crew pins Kimi, exact native task allowlist, isolation, and fixed credentials", () => {
+test("OpenCode crew pins Kimi and delegates orchestration to the installed profile", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-crew-"));
-  const spec = buildSpawnSpec("opencode", { model: "kimi", readOnly: false, kimiCrew: true }, runDir);
+  const spec = buildSpawnSpec("opencode", { model: "kimi", readOnly: false, profile: "kimi-crew" }, runDir);
   const cfg = JSON.parse(spec.env.OPENCODE_CONFIG_CONTENT);
   assert.equal(cfg.model, "kimi-for-coding/k3");
-  assert.equal(cfg.default_agent, "clanker-kimi-crew");
-  assert.deepEqual(Object.keys(cfg.agent), ["clanker-kimi-crew"], "installed child profiles are not copied or overlaid");
-  assert.deepEqual(Object.keys(cfg.agent?.["clanker-kimi-crew"]?.permission?.task), [
-    "*",
-    "worker-glm",
-    "reviewer-deepseek",
-    "oracle",
-  ]);
-  assert.deepEqual(cfg.agent?.["clanker-kimi-crew"]?.permission, {
-    task: {
-      "*": "deny",
-      "worker-glm": "allow",
-      "reviewer-deepseek": "allow",
-      oracle: "allow",
-    },
-  });
-  for (const capability of ["read", "edit", "bash", "skill", "webfetch", "websearch", "external_directory", "*_*"]) {
-    assert.equal(
-      cfg.agent?.["clanker-kimi-crew"]?.permission?.[capability],
-      undefined,
-      `${capability} remains owned by OpenCode instead of being downscoped by Clanker`,
-    );
-  }
-  const genericWorkerPermission = cfg.agent?.["clanker-kimi-crew"]?.permission?.task?.["generic-worker"]
-    ?? cfg.agent?.["clanker-kimi-crew"]?.permission?.task?.["*"];
-  assert.equal(genericWorkerPermission, "deny", "the wildcard denies globally discovered generic workers");
+  assert.equal(cfg.default_agent, "kimi-crew");
+  assert.equal(cfg.agent, undefined, "Clanker does not inline or override the installed crew profile");
   assert.equal(spec.env.OPENCODE_DISABLE_CLAUDE_CODE, undefined, "crew preserves installed child profiles and skills");
   assert.equal(spec.env.OPENCODE_DISABLE_EXTERNAL_SKILLS, undefined, "crew preserves external skill discovery");
   assert.deepEqual(cfg, JSON.parse(fs.readFileSync(spec.env.OPENCODE_CONFIG, "utf8")));
-  assert.equal(spec.command, "tachi");
-  assert.deepEqual(spec.args, [
-    "vault", "exec", "--keychain", "--require",
-    "KIMI_API_KEY,ZHIPUAI_API_KEY", "--", "opencode", "acp",
-  ]);
+  assert.equal(spec.command, "opencode");
+  assert.deepEqual(spec.args, ["acp"]);
 });
 
-// ---- vault-exec wiring: GLM's bare API key never touches the ambient env -
-
-test("GLM's opencode spawn is wrapped in tachi vault exec, original command intact after --", () => {
-  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-glm-vault-"));
+test("OpenCode authentication remains owned by OpenCode", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-glm-auth-"));
   const spec = buildSpawnSpec("opencode", { model: "glm" }, runDir);
-  assert.equal(spec.command, "tachi");
-  assert.equal(spec.args[0], "vault");
-  assert.equal(spec.args[1], "exec");
-  assert.equal(spec.args[2], "--keychain");
-  assert.equal(spec.args[3], "--require");
-  assert.equal(spec.args[4], "ZHIPUAI_API_KEY");
-  assert.equal(spec.args[5], "--");
-  // Everything the un-wrapped opencode lane would have spawned (command +
-  // args) survives intact after the `--` separator, byte-for-byte.
-  assert.deepEqual(spec.args.slice(6), ["opencode", "acp"]);
-  // env (OPENCODE_CONFIG/_CONTENT etc.) is untouched by the wrap — `tachi vault
-  // exec` inherits it and injects only the vaulted var into the child.
-  assert.ok(spec.env.OPENCODE_CONFIG_CONTENT, "opencode config env survives the wrap");
+  assert.equal(spec.command, "opencode");
+  assert.deepEqual(spec.args, ["acp"]);
+  assert.ok(spec.env.OPENCODE_CONFIG_CONTENT);
 });
 
-test("GLM full model id (not just the 'glm' shortname) also triggers the vault wrap", () => {
+test("GLM full model id also spawns OpenCode directly", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-glm-full-"));
   const spec = buildSpawnSpec("opencode", { model: "zhipuai-coding-plan/glm-5.2" }, runDir);
-  assert.equal(spec.command, "tachi");
-  assert.deepEqual(spec.args.slice(0, 6), ["vault", "exec", "--keychain", "--require", "ZHIPUAI_API_KEY", "--"]);
+  assert.equal(spec.command, "opencode");
+  assert.deepEqual(spec.args, ["acp"]);
 });
 
-test("non-GLM opencode models spawn unwrapped, byte-identical to a bare opencode lane", () => {
+test("OpenCode model aliases all use the same direct ACP spawn", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-nonglm-"));
   for (const model of ["kimi", "ds", "composer", "anthropic/claude"]) {
     const spec = buildSpawnSpec("opencode", { model }, runDir);
-    assert.equal(spec.command, "opencode", `model='${model}' must not be routed through vault exec`);
+    assert.equal(spec.command, "opencode", `model='${model}' must use OpenCode directly`);
     assert.deepEqual(spec.args, ["acp"]);
   }
 });
 
-// Regression for the fail-open credential bypass: an omitted opencode model
-// made opencodeRequiredEnv() return [], so wrapWithVaultExec became a no-op,
-// while the actual model was decided by opencode's own config default
-// (possibly GLM) — running a key-bearing lane outside the vault-exec wrap.
-// Found by codex cold review (run codex-2db38).
+// An omitted model would let OpenCode's interactive config choose a provider
+// that differs from the request Clanker records.
 test("opencode spawn without an explicit model fails closed", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-no-model-"));
   assert.throws(
     () => buildSpawnSpec("opencode", { readOnly: true }, runDir),
     /opencode lane requires an explicit model id/,
-    "read-only omission must fail closed, not silently bypass the vault wrap",
+    "read-only omission must fail closed rather than use an interactive default",
   );
   assert.throws(
     () => buildSpawnSpec("opencode", { readOnly: false }, runDir),
@@ -212,12 +152,12 @@ test("opencode spawn without an explicit model fails closed", () => {
   );
 });
 
-test("codex and grok lanes declare no required env and spawn unwrapped", () => {
+test("codex and grok lane spawn commands remain direct", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oauth-lanes-"));
   const codexSpec = buildSpawnSpec("codex", {}, runDir);
-  assert.equal(codexSpec.command, process.execPath, "codex spawn command unchanged by vault-exec wiring");
+  assert.equal(codexSpec.command, process.execPath);
   const grokSpec = buildSpawnSpec("grok", { readOnly: true }, runDir);
-  assert.equal(grokSpec.command, "grok", "grok spawn command unchanged by vault-exec wiring");
+  assert.equal(grokSpec.command, "grok");
 });
 
 // ---- grok process-local containment -------------------------------------
@@ -440,6 +380,29 @@ test("CP4: a large event burst yields a digest at/under the char budget with a t
   );
   assert.ok(digest.startsWith("…"), "over-budget digest starts with the truncation marker");
   run.closeStreams();
+});
+
+test("terminal events after session close remain ordered and do not reopen artifact streams", async () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-run-close-"));
+  const run = new LaneRun({
+    id: "unit-close-streams",
+    lane: "codex",
+    cwd: os.tmpdir(),
+    runDir,
+    readOnly: true,
+  });
+  run.beginTurn("finish after teardown");
+  await run.markClosed();
+  run.completeTurn();
+
+  const streams = run as unknown as { eventsStream: unknown; chunksStream: unknown };
+  assert.equal(streams.eventsStream, null);
+  assert.equal(streams.chunksStream, null);
+  const eventTypes = fs.readFileSync(path.join(runDir, "events.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => (JSON.parse(line) as { t: string }).t);
+  assert.deepEqual(eventTypes.slice(-2), ["session_closed", "turn_done"]);
 });
 
 test("identical normalized plans are activity but not a second significant digest", () => {

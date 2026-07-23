@@ -1,7 +1,7 @@
 {
   "name": "clanker-mcp-server",
   "version": "0.3.0",
-  "description": "Universal MCP runtime driving Codex, Opencode, Grok, and Gemini Clankers over ACP",
+  "description": "Thin MCP job controller for Codex, OpenCode, Grok, and Gemini over ACP",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

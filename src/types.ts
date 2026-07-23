@@ -45,14 +45,8 @@ export interface LaneRequestOptions {
   readOnly?: boolean;
   /** codex-only sandbox strictness override — see CodexSandboxMode. */
   sandbox?: CodexSandboxMode;
-  /**
-   * Deprecated compatibility field. Every lane ignores it with a warning;
-   * opencode always uses Clanker's fixed `clanker-worker` profile so callers
-   * cannot replace its permission boundary.
-   */
-  agent?: string;
-  /** Internal marker for the dedicated OpenCode-native Kimi Crew entrypoint. */
-  kimiCrew?: boolean;
+  /** Fixed Clanker-controlled OpenCode profile. */
+  profile?: "worker" | "kimi-crew";
 }
 
 /** Plan projection derived from ACP `plan` events. */
@@ -97,7 +91,7 @@ export interface RunTelemetry {
   requested_model?: string; resolved_model?: string | null; observed_model?: string | null;
   requested_effort?: string; observed_effort?: string | null;
   lane: LaneName; transport: "acp-stdio"; backend: string; read_only: boolean;
-  sandbox?: CodexSandboxMode; seat: boolean; created_at: string; started_at?: string;
+  sandbox?: CodexSandboxMode; created_at: string; started_at?: string;
   terminal_at?: string; duration_ms?: number; turns: number; retries: number; corrections: number;
   continuation_turns: number; cancellation_requested: boolean; forced_kill: boolean;
   tool_calls: number; stop_reason?: string; terminal_reason?: string;
