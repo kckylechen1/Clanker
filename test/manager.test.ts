@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { LaneManager, type SpecResolver, type WaitResult } from "../src/manager.js";
 import { INFRA_FAILURE_TAG } from "../src/failure-classifier.js";
+import { LaneRun } from "../src/run.js";
 import type { LaneRequestOptions } from "../src/types.js";
 import { fakeResolver, fakeSpec, until } from "./helpers.js";
 
@@ -14,6 +15,8 @@ function makeManager(
     sessionTtlMs?: number;
     turnTimeoutMs?: number;
     capacityRetryBackoffMs?: number;
+    cancelGraceMs?: number;
+    processTerminateGraceMs?: number;
   } = {},
 ) {
   return new LaneManager({
@@ -24,6 +27,8 @@ function makeManager(
     sessionTtlMs: opts.sessionTtlMs ?? 600_000,
     turnTimeoutMs: opts.turnTimeoutMs ?? 2_700_000,
     capacityRetryBackoffMs: opts.capacityRetryBackoffMs,
+    cancelGraceMs: opts.cancelGraceMs,
+    processTerminateGraceMs: opts.processTerminateGraceMs,
   });
 }
 
@@ -47,6 +52,38 @@ test("dispatch start + wait completes with final_message = prompt", async () => 
   } finally {
     await m.shutdown();
   }
+});
+
+test("terminal telemetry observes ACP config and usage and is persisted atomically", async () => {
+  const m = makeManager();
+  try {
+    const { id } = await m.dispatchStart({ lane: "opencode", prompt: "TELEMETRY", cwd: os.tmpdir(), readOnly: true, model: "glm" });
+    const r = await waitTerminal(m, id);
+    assert.equal(r.telemetry?.resolved_model, "zhipuai-coding-plan/glm-5.2");
+    assert.equal(r.telemetry?.observed_model, "observed/model");
+    assert.equal(r.telemetry?.observed_effort, "high");
+    assert.deepEqual(r.telemetry?.session_usage, { used: 123, size: 4096, cost: { amount: 0.25, currency: "USD" } });
+    assert.deepEqual(r.telemetry?.prompt_usage, {
+      totalTokens: 15, inputTokens: 10, outputTokens: 5, thoughtTokens: 2,
+      cachedReadTokens: 3, cachedWriteTokens: null,
+    });
+    assert.deepEqual(Object.keys(r.telemetry?.prompt_usage ?? {}).sort(),
+      ["cachedReadTokens", "cachedWriteTokens", "inputTokens", "outputTokens", "thoughtTokens", "totalTokens"].sort());
+    assert.ok((r.telemetry?.duration_ms ?? -1) >= 0);
+    assert.equal(r.telemetry?.terminal_reason, "done");
+    assert.equal(r.telemetry?.host, "standalone");
+    assert.equal(r.telemetry?.requested_lane, "opencode");
+    assert.equal(r.telemetry?.actual_lane, "opencode");
+    const persisted = JSON.parse(fs.readFileSync(path.join(process.env.CLANKER_RUNS_ROOT!, id, "telemetry.json"), "utf8"));
+    assert.equal(persisted.observed_model, "observed/model");
+    await m.promptExisting(id, "ordinary continuation");
+    const continued = await waitTerminal(m, id);
+    assert.equal(continued.telemetry?.prompt_usage, undefined, "turn-local prompt usage resets");
+    assert.deepEqual(continued.telemetry?.session_usage, { used: 123, size: 4096, cost: { amount: 0.25, currency: "USD" } });
+    assert.equal(continued.telemetry?.observed_model, "observed/model");
+    assert.equal(continued.telemetry?.observed_effort, "high");
+    assert.equal(m.status(id).telemetry?.tool_calls, 0);
+  } finally { await m.shutdown(); }
 });
 
 test("plan events project into status + touched_files from tool locations", async () => {
@@ -280,7 +317,34 @@ test("a capacity-transient failure on the SECOND attempt is not retried again (s
   }
 });
 
-test("dispatchStart forwards the sandbox override through to the spec resolver", async () => {
+test("shutdown wakes capacity backoff immediately without spawning attempt two", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-backoff-shutdown-"));
+  const counter = path.join(dir, "attempts");
+  const backoffMs = 4_000;
+  const m = new LaneManager({
+    resolveSpec: () => fakeSpec({ CLANKER_TEST_ATTEMPT_COUNTER: counter }),
+    disableReaper: true,
+    baseRepo: os.tmpdir(),
+    capacityRetryBackoffMs: backoffMs,
+  });
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "codex", prompt: "CAPACITY_ALWAYS please", cwd: os.tmpdir(), readOnly: true,
+    });
+    await until(() => m.status(id).telemetry?.retries === 1, 2_000);
+    const started = Date.now();
+    await m.shutdown();
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 1_000, `shutdown should wake backoff, elapsed=${elapsed}ms`);
+    assert.equal(m.status(id).status, "cancelled");
+    assert.equal(fs.readFileSync(counter, "utf8"), "1", "shutdown must not spawn attempt two");
+  } finally {
+    await m.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dispatchStart forwards a strict sandbox override through to the spec resolver", async () => {
   // Regression coverage: dispatchStart's LaneRequestOptions construction once
   // dropped `sandbox` on the floor (only model/effort/readOnly were forwarded)
   // — a resolveSpec spy is the only way to catch that class of gap, since
@@ -298,9 +362,9 @@ test("dispatchStart forwards the sandbox override through to the spec resolver",
       prompt: "hi",
       cwd: os.tmpdir(),
       readOnly: true,
-      sandbox: "workspace-write",
+      sandbox: "read-only",
     });
-    assert.equal(capturedOpts?.sandbox, "workspace-write");
+    assert.equal(capturedOpts?.sandbox, "read-only");
     // fakeSpec() spawns a real fake-agent process via the fire-and-forget
     // driveNewSession chain; wait for it to reach a terminal state so
     // shutdown() below actually has a live connection to close (otherwise
@@ -319,6 +383,40 @@ test("CP2: write dispatch without a worktree is rejected", async () => {
       () => m.dispatchStart({ lane: "codex", prompt: "do work", readOnly: false }),
       /must run in an isolated worktree/,
     );
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("CP2: a Codex read-only request with a write-capable sandbox still requires isolation", async () => {
+  const m = makeManager();
+  try {
+    for (const sandbox of ["workspace-write", "danger-full-access"] as const) {
+      await assert.rejects(
+        () => m.dispatchStart({ lane: "codex", prompt: "review", readOnly: true, sandbox }),
+        /write-capable dispatch must run in an isolated worktree/,
+      );
+    }
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("manager requires explicit external write models and rejects unsupervised GLM on every lane", async () => {
+  const m = makeManager();
+  try {
+    for (const lane of ["opencode", "grok"] as const) {
+      await assert.rejects(
+        () => m.dispatchStart({ lane, prompt: "write", readOnly: false, worktree: "never-created" }),
+        new RegExp(`explicit model is required for write lane '${lane}'`),
+      );
+    }
+    for (const lane of ["codex", "opencode", "grok"] as const) {
+      await assert.rejects(
+        () => m.dispatchStart({ lane, model: "glm", prompt: "write", readOnly: false, worktree: "never-created" }),
+        /GLM writes require clanker_dispatch_glm_write_start and Sonnet supervision/,
+      );
+    }
   } finally {
     await m.shutdown();
   }
@@ -381,9 +479,126 @@ test("clanker_cancel maps a cancelled turn to status cancelled", async () => {
     await m.cancel(id);
     const r = await waitTerminal(m, id);
     assert.equal(r.status, "cancelled");
+    assert.equal(r.telemetry?.forced_kill, false);
+    assert.ok(m.list().some((entry) => entry.id === id), "cooperative cancellation keeps the session available");
   } finally {
     await m.shutdown();
   }
+});
+
+test("cancel during handshake waits for child exit and cannot publish a late connection", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-pending-cancel-"));
+  const pidFile = path.join(dir, "pid");
+  const exitMarker = path.join(dir, "exited");
+  const m = new LaneManager({
+    resolveSpec: () => fakeSpec({
+      CLANKER_TEST_HANDSHAKE_DELAY_MS: "250", CLANKER_TEST_PID_FILE: pidFile,
+      CLANKER_TEST_EXIT_MARKER: exitMarker,
+    }),
+    disableReaper: true, baseRepo: os.tmpdir(), processTerminateGraceMs: 40,
+  });
+  try {
+    const { id } = await m.dispatchStart({ lane: "codex", prompt: "too late", cwd: os.tmpdir(), readOnly: true });
+    await until(() => fs.existsSync(pidFile), 1000);
+    const pid = Number(fs.readFileSync(pidFile, "utf8"));
+    const result = await m.cancel(id);
+    assert.equal(result.status, "cancelled");
+    assert.ok(fs.existsSync(exitMarker), "cancel resolves only after the pending child handles termination");
+    assert.equal(fs.readFileSync(exitMarker, "utf8"), String(pid));
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    assert.equal(m.status(id).status, "cancelled");
+    assert.equal(m.status(id).error, undefined);
+    assert.equal(m.list().some((entry) => entry.id === id), false);
+  } finally {
+    await m.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a reused session clears cancelled turn telemetry before the next successful turn", async () => {
+  const m = makeManager();
+  try {
+    const { id } = await m.dispatchStart({ lane: "codex", prompt: "CANCELME", cwd: os.tmpdir(), readOnly: true });
+    await until(() => m.status(id).tool_calls >= 1, 4000);
+    await m.cancel(id);
+    assert.equal(m.status(id).telemetry?.terminal_reason, "cancelled");
+    await m.promptExisting(id, "normal success", true);
+    const running = m.status(id).telemetry!;
+    assert.equal(running.terminal_at, undefined);
+    assert.equal(running.terminal_reason, undefined);
+    assert.equal(running.stop_reason, undefined);
+    const done = await waitTerminal(m, id);
+    assert.equal(done.status, "done");
+    assert.equal(done.telemetry?.stop_reason, "end_turn");
+    assert.equal(done.telemetry?.terminal_reason, "done");
+    assert.equal(done.telemetry?.cancellation_requested, false);
+    assert.equal(done.telemetry?.forced_kill, false);
+    assert.equal(done.telemetry?.turns, 2);
+    assert.equal(done.telemetry?.continuation_turns, 1);
+    assert.equal(done.telemetry?.corrections, 1);
+  } finally { await m.shutdown(); }
+});
+
+test("ignored cancel activity cannot shorten grace; forced cancel awaits exit and stays terminal", async () => {
+  const terminateGraceMs = 80;
+  const m = new LaneManager({
+    resolveSpec: (_lane, _opts, _runDir) => fakeSpec({ CLANKER_TEST_IGNORE_SIGTERM: "1" }),
+    disableReaper: true, baseRepo: os.tmpdir(), cancelGraceMs: 90,
+    processTerminateGraceMs: terminateGraceMs, turnTimeoutMs: 5_000,
+  });
+  try {
+    const { id } = await m.dispatchStart({ lane: "codex", prompt: "STALL_ACTIVITY forever", cwd: os.tmpdir(), readOnly: true });
+    await until(() => m.status(id).tool_calls === 1, 4000);
+    const started = Date.now();
+    const result = await m.cancel(id);
+    const elapsed = Date.now() - started;
+    assert.equal(result.status, "cancelled");
+    assert.ok(elapsed >= 75, `ordinary activity must not shorten 90ms grace (elapsed=${elapsed}ms)`);
+    assert.ok(elapsed >= terminateGraceMs, `cancel must await SIGKILL-backed actual exit (elapsed=${elapsed}ms)`);
+    assert.equal(m.status(id).telemetry?.forced_kill, true);
+    assert.equal(m.list().some((entry) => entry.id === id), false, "forced cancellation must close the live session");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(m.status(id).status, "cancelled", "late runTurn failure must not overwrite cancellation");
+  } finally { await m.shutdown(); }
+});
+
+test("shutdown terminates an active initial turn without deadlocking on its drive", async () => {
+  const m = makeManager({ processTerminateGraceMs: 40 });
+  const { id } = await m.dispatchStart({
+    lane: "codex", prompt: "STALL during shutdown", cwd: os.tmpdir(), readOnly: true,
+  });
+  await until(() => m.status(id).tool_calls === 1, 4000);
+  await Promise.race([
+    m.shutdown(),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("shutdown deadlocked")), 1000)),
+  ]);
+  assert.equal(m.status(id).status, "cancelled");
+  assert.equal(m.list().some((entry) => entry.id === id), false);
+  await assert.rejects(
+    m.dispatchStart({ lane: "codex", prompt: "too late", cwd: os.tmpdir(), readOnly: true }),
+    /shutting down/,
+  );
+});
+
+test("telemetry persistence failure reports run id, path, and error on stderr", () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-telemetry-fail-"));
+  const invalidRunDir = path.join(parent, "not-a-directory");
+  fs.writeFileSync(invalidRunDir, "file");
+  const original = console.error;
+  const messages: string[] = [];
+  console.error = (...args: unknown[]) => { messages.push(args.map(String).join(" ")); };
+  try {
+    const run = new LaneRun({ id: "telemetry-failure-run", lane: "codex", cwd: os.tmpdir(),
+      runDir: invalidRunDir, readOnly: true });
+    run.requestCancellation();
+  } finally {
+    console.error = original;
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /telemetry-failure-run/);
+  assert.match(messages[0], /telemetry\.json/);
+  assert.match(messages[0], /ENOTDIR|not a directory/i);
 });
 
 test("clanker_prompt reuses the session for a second turn", async () => {

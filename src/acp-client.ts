@@ -22,7 +22,7 @@ import type {
   WriteTextFileRequest,
   WriteTextFileResponse,
 } from "@agentclientprotocol/sdk";
-import { HANDSHAKE_TIMEOUT_MS } from "./constants.js";
+import { HANDSHAKE_TIMEOUT_MS, PROCESS_TERM_GRACE_MS } from "./constants.js";
 import type { SpawnSpec } from "./types.js";
 
 /** Minimal promise-with-resolvers helper (Node's Promise.withResolvers exists on 22+ but kept explicit). */
@@ -79,6 +79,10 @@ export interface LaneConnectionOptions {
   onFileWritten?: (absPath: string) => void;
   /** Handshake timeout override (ms). */
   handshakeTimeoutMs?: number;
+  /** SIGTERM grace before SIGKILL (test override). */
+  terminateGraceMs?: number;
+  /** Cancels a subprocess that is still completing the ACP handshake. */
+  signal?: AbortSignal;
   /**
    * When set, reconnect to this existing ACP session id via `session/resume`
    * instead of creating a fresh one via `session/new`. Used to respawn a
@@ -108,6 +112,8 @@ export class LaneConnection {
   private readonly shutdown: Deferred<void>;
   private readonly getStderr: () => string;
   private closed = false;
+  private exitedProcess = false;
+  private readonly terminateGraceMs: number;
 
   private constructor(
     session: ActiveSession,
@@ -116,6 +122,7 @@ export class LaneConnection {
     shutdown: Deferred<void>,
     exited: Promise<ExitInfo>,
     stderrRef: () => string,
+    terminateGraceMs: number,
   ) {
     this.session = session;
     this.child = child;
@@ -123,6 +130,8 @@ export class LaneConnection {
     this.shutdown = shutdown;
     this.exited = exited;
     this.getStderr = stderrRef;
+    this.terminateGraceMs = terminateGraceMs;
+    void exited.then(() => { this.exitedProcess = true; });
   }
 
   get sessionId(): string {
@@ -145,12 +154,31 @@ export class LaneConnection {
     } catch {
       /* already disposed */
     }
-    if (!this.child.killed) {
+    if (!this.exitedProcess) {
       this.child.kill("SIGTERM");
       // Escalate if the child ignores SIGTERM.
       setTimeout(() => {
-        if (!this.child.killed) this.child.kill("SIGKILL");
-      }, 2_000).unref();
+        if (!this.exitedProcess) this.child.kill("SIGKILL");
+      }, this.terminateGraceMs).unref();
+    }
+  }
+
+  /** Terminate the subprocess and wait until its actual exit event is observed. */
+  async closeAndWait(): Promise<ExitInfo> {
+    this.close();
+    const deadlineMs = this.terminateGraceMs + 2_000;
+    let handle: NodeJS.Timeout;
+    const timeout = new Promise<never>((_, reject) => {
+      handle = setTimeout(
+        () => reject(new Error(`lane process did not exit within ${deadlineMs}ms after termination began`)),
+        deadlineMs,
+      );
+      handle.unref?.();
+    });
+    try {
+      return await Promise.race([this.exited, timeout]);
+    } finally {
+      clearTimeout(handle!);
     }
   }
 
@@ -202,6 +230,22 @@ export class LaneConnection {
     const shutdown = new Deferred<void>();
     const exited = new Deferred<ExitInfo>();
     let resolvedReady = false;
+    let aborted = options.signal?.aborted ?? false;
+
+    const terminatePending = () => {
+      if (resolvedReady) return;
+      aborted = true;
+      try { child.kill("SIGTERM"); } catch { /* process may already be gone */ }
+      const killTimer = setTimeout(() => {
+        if (!resolvedReady) {
+          try { child.kill("SIGKILL"); } catch { /* process may already be gone */ }
+        }
+      }, options.terminateGraceMs ?? PROCESS_TERM_GRACE_MS);
+      killTimer.unref?.();
+      void exited.promise.finally(() => clearTimeout(killTimer));
+    };
+    options.signal?.addEventListener("abort", terminatePending, { once: true });
+    if (aborted) terminatePending();
 
     const hsTimer = setTimeout(() => {
       if (!resolvedReady) {
@@ -215,8 +259,8 @@ export class LaneConnection {
     }, handshakeTimeoutMs);
     hsTimer.unref?.();
     void ready.promise.then(
-      () => clearTimeout(hsTimer),
-      () => clearTimeout(hsTimer),
+      () => { clearTimeout(hsTimer); options.signal?.removeEventListener("abort", terminatePending); },
+      () => { clearTimeout(hsTimer); options.signal?.removeEventListener("abort", terminatePending); },
     );
 
     child.on("error", (err) => {
@@ -226,11 +270,11 @@ export class LaneConnection {
       shutdown.resolve();
       exited.resolve({ code, signal, stderr: stderrTail });
       if (!resolvedReady) {
-        ready.reject(
-          new Error(
+        ready.reject(aborted
+          ? new Error("lane connection cancelled before handshake completed")
+          : new Error(
             `lane process exited before handshake (code=${code} signal=${signal}). stderr: ${stderrTail.trim().slice(-800)}`,
-          ),
-        );
+          ));
       }
     });
 
@@ -241,9 +285,11 @@ export class LaneConnection {
     const handlePermission = (params: RequestPermissionRequest): RequestPermissionResponse =>
       choosePermissionOption(params.options ?? [], readOnly);
 
+    const root = fs.realpathSync(cwd);
     const handleReadTextFile = (params: ReadTextFileRequest): ReadTextFileResponse => {
       try {
-        const content = fs.readFileSync(params.path, "utf8");
+        const target = resolveContainedReadPath(root, params.path);
+        const content = fs.readFileSync(target, "utf8");
         return { content };
       } catch (e) {
         throw new Error(`read_text_file failed for ${params.path}: ${e instanceof Error ? e.message : String(e)}`);
@@ -256,8 +302,9 @@ export class LaneConnection {
       if (readOnly) {
         throw new Error(`write rejected: Clanker is read-only (path=${params.path})`);
       }
-      fs.writeFileSync(params.path, params.content);
-      onFileWritten?.(params.path);
+      const target = resolveContainedWritePath(root, params.path);
+      writeContainedTextFile(target, params.path, params.content);
+      onFileWritten?.(target);
       return {};
     };
 
@@ -271,12 +318,14 @@ export class LaneConnection {
       .connectWith(stream, async (ctx) => {
         await ctx.request(acp.methods.agent.initialize, {
           protocolVersion: acp.PROTOCOL_VERSION,
-          clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
+          clientCapabilities: { fs: { readTextFile: true, writeTextFile: !readOnly } },
         });
         const session = resumeSessionId
           ? await resumeSession(ctx, resumeSessionId, cwd)
           : await ctx.buildSession(cwd).start();
-        const conn = new LaneConnection(session, child, ctx, shutdown, exited.promise, () => stderrTail);
+        if (aborted) return;
+        const conn = new LaneConnection(session, child, ctx, shutdown, exited.promise, () => stderrTail,
+          options.terminateGraceMs ?? PROCESS_TERM_GRACE_MS);
         resolvedReady = true;
         ready.resolve(conn);
         await shutdown.promise;
@@ -300,6 +349,55 @@ export class LaneConnection {
       });
 
     return ready.promise;
+  }
+}
+
+function assertContained(root: string, target: string, requested: string): string {
+  if (target !== root && !target.startsWith(root + path.sep)) {
+    throw new Error(`filesystem boundary rejection: path is outside session cwd (${requested})`);
+  }
+  return target;
+}
+
+/** Resolve an existing read target through realpath and enforce the session root. */
+export function resolveContainedReadPath(root: string, requested: string): string {
+  const canonicalRoot = fs.realpathSync(root);
+  const lexical = path.resolve(canonicalRoot, requested);
+  if (!path.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
+  return assertContained(canonicalRoot, fs.realpathSync(lexical), requested);
+}
+
+/** Resolve a write through its real parent; final symlinks are never followed. */
+export function resolveContainedWritePath(root: string, requested: string): string {
+  const canonicalRoot = fs.realpathSync(root);
+  const lexical = path.resolve(canonicalRoot, requested);
+  if (!path.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
+  try {
+    if (fs.lstatSync(lexical).isSymbolicLink()) {
+      throw new Error(`filesystem boundary rejection: final write target is a symlink (${requested})`);
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+  const parent = assertContained(canonicalRoot, fs.realpathSync(path.dirname(lexical)), requested);
+  return assertContained(canonicalRoot, path.join(parent, path.basename(lexical)), requested);
+}
+
+/** Write a resolved cwd-contained target without following symlinks or modifying shared hardlink inodes. */
+export function writeContainedTextFile(target: string, requested: string, content: string): void {
+  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW ?? 0);
+  const fd = fs.openSync(target, flags, 0o666);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (stat.nlink > 1) {
+      throw new Error(
+        `filesystem boundary rejection: write target has ${stat.nlink} hardlinks (${requested})`,
+      );
+    }
+    fs.ftruncateSync(fd, 0);
+    fs.writeFileSync(fd, content);
+  } finally {
+    fs.closeSync(fd);
   }
 }
 

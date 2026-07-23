@@ -1,24 +1,49 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { choosePermissionOption } from "../src/acp-client.js";
-import { DIGEST_CHAR_BUDGET, resolveOcModel } from "../src/constants.js";
+import { DIGEST_CHAR_BUDGET, isGlmModel, SERVER_VERSION, resolveOcModel } from "../src/constants.js";
 import { buildSpawnSpec } from "../src/backends.js";
 import { LaneRun } from "../src/run.js";
 
 // ---- CP3: opencode model shortname single source ------------------------
 
+test("runtime, package, and plugin versions agree", () => {
+  const packageVersion = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8")).version;
+  const pluginVersion = JSON.parse(
+    fs.readFileSync(path.resolve("plugin/.claude-plugin/plugin.json"), "utf8"),
+  ).version;
+  assert.equal(SERVER_VERSION, "0.2.5");
+  assert.equal(packageVersion, SERVER_VERSION);
+  assert.equal(pluginVersion, SERVER_VERSION);
+  const codexPluginVersion = JSON.parse(
+    fs.readFileSync(path.resolve("codex-plugin/.codex-plugin/plugin.json"), "utf8"),
+  ).version;
+  assert.equal(codexPluginVersion, SERVER_VERSION);
+});
+
 test("CP3: resolveOcModel expands shortnames and passes full ids through", () => {
   assert.equal(resolveOcModel("glm"), "zhipuai-coding-plan/glm-5.2");
   assert.equal(resolveOcModel("ds"), "deepseek/deepseek-v4-pro");
-  assert.equal(resolveOcModel("kimi"), "kimi-for-coding/k2p7");
+  assert.equal(resolveOcModel("kimi"), "kimi-for-coding/k3");
   assert.equal(resolveOcModel("free"), "opencode/deepseek-v4-flash-free");
+  assert.equal(resolveOcModel("composer"), "xai/grok-composer-2.5-fast");
+  assert.equal(resolveOcModel("grok45"), "xai/grok-4.5");
   assert.equal(resolveOcModel("anthropic/claude"), "anthropic/claude");
   assert.equal(resolveOcModel("unknown"), "unknown");
   assert.equal(resolveOcModel(undefined), undefined);
+});
+
+test("GLM supervision recognizes every model under the configured provider", () => {
+  assert.equal(isGlmModel("glm"), true);
+  assert.equal(isGlmModel(" zhipuai-coding-plan/GLM-5.2 "), true);
+  assert.equal(isGlmModel("zhipuai-coding-plan/glm-5.3-future"), true);
+  assert.equal(isGlmModel("other-provider/glm-5.2"), false);
+  assert.equal(isGlmModel("composer"), false);
 });
 
 test("CP3: opencode lane pins the resolved model and dedicated worker in inline config", () => {
@@ -32,6 +57,23 @@ test("CP3: opencode lane pins the resolved model and dedicated worker in inline 
   assert.equal(cfg.agent?.["clanker-worker"]?.mode, "primary");
   assert.equal(cfg.agent?.["clanker-worker"]?.permission?.task, "deny");
   assert.deepEqual(cfg, JSON.parse(fs.readFileSync(spec.env.OPENCODE_CONFIG, "utf8")));
+});
+
+test("caller-selected agent profiles are warned and ignored on every lane", () => {
+  for (const lane of ["codex", "opencode", "grok"] as const) {
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), `clanker-${lane}-agent-`));
+    const spec = buildSpawnSpec(lane, { agent: "unsafe-profile" }, runDir);
+    assert.ok(
+      spec.warnings.includes(
+        `lane '${lane}' does not support agent profile override; ignoring agent='unsafe-profile'`,
+      ),
+    );
+    if (lane === "opencode") {
+      const cfg = JSON.parse(spec.env.OPENCODE_CONFIG_CONTENT);
+      assert.equal(cfg.default_agent, "clanker-worker");
+      assert.equal(Object.hasOwn(cfg.agent, "unsafe-profile"), false);
+    }
+  }
 });
 
 test("opencode read-only lane denies delegation, skills, external paths, edits, and shell", () => {
@@ -67,6 +109,45 @@ test("opencode write lane keeps worktree-local edit and shell enabled", () => {
   assert.equal(cfg.agent?.["clanker-worker"]?.permission?.external_directory, "deny");
 });
 
+// ---- grok process-local containment -------------------------------------
+
+test("grok read-only lane overrides permissive user config with native containment", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-grok-read-"));
+  const spec = buildSpawnSpec("grok", { readOnly: true, effort: "high" }, runDir);
+  assert.equal(spec.command, "grok");
+  assert.deepEqual(spec.args, [
+    "--sandbox",
+    "read-only",
+    "--permission-mode",
+    "default",
+    "--no-subagents",
+    "agent",
+    "--no-leader",
+    "--model",
+    "grok-4.5",
+    "--reasoning-effort",
+    "high",
+    "stdio",
+  ]);
+});
+
+test("grok write lane requests native workspace sandbox and honors a model override", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-grok-write-"));
+  const spec = buildSpawnSpec("grok", { readOnly: false, model: "grok-preview" }, runDir);
+  assert.deepEqual(spec.args, [
+    "--sandbox",
+    "workspace",
+    "--permission-mode",
+    "default",
+    "--no-subagents",
+    "agent",
+    "--no-leader",
+    "--model",
+    "grok-preview",
+    "stdio",
+  ]);
+});
+
 // ---- codex sandbox override (review-seat workspace-write tier) ----------
 //
 // Verified against codex-acp 1.1.2 source (src/AgentMode.ts): INITIAL_AGENT_MODE
@@ -91,10 +172,10 @@ test("codex sandbox='read-only' and 'danger-full-access' map to the matching INI
   );
 });
 
-test("codex with no sandbox override preserves legacy readOnly-derived behavior", () => {
+test("codex with no sandbox override defaults writes to workspace-write", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-sandbox-"));
   assert.equal(buildSpawnSpec("codex", { readOnly: true }, runDir).env.INITIAL_AGENT_MODE, "read-only");
-  assert.equal(buildSpawnSpec("codex", { readOnly: false }, runDir).env.INITIAL_AGENT_MODE, "agent-full-access");
+  assert.equal(buildSpawnSpec("codex", { readOnly: false }, runDir).env.INITIAL_AGENT_MODE, "agent");
 });
 
 test("codex sandbox override takes precedence over readOnly when both are set", () => {
@@ -104,7 +185,7 @@ test("codex sandbox override takes precedence over readOnly when both are set", 
   assert.equal(spec.env.INITIAL_AGENT_MODE, "agent");
 });
 
-test("grok/opencode warn and ignore a sandbox override (no native sandbox tier)", () => {
+test("grok/opencode warn and ignore the codex-only sandbox override", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-sandbox-"));
   const grokSpec = buildSpawnSpec("grok", { sandbox: "workspace-write" }, runDir);
   assert.ok(grokSpec.warnings.some((w) => /sandbox/.test(w)), `expected a sandbox warning, got ${JSON.stringify(grokSpec.warnings)}`);
@@ -133,6 +214,7 @@ test("codex lane always disables multi_agent_v2 in CODEX_CONFIG, with no model o
   const spec = buildSpawnSpec("codex", {}, runDir);
   assert.ok(spec.env.CODEX_CONFIG, "CODEX_CONFIG env is set even with no model/effort opts");
   const cfg = JSON.parse(spec.env.CODEX_CONFIG);
+  assert.equal(Object.hasOwn(cfg, "model"), false, "omitting model preserves the Codex configured default");
   assert.equal(cfg.features?.multi_agent_v2?.enabled, false);
 });
 
@@ -147,13 +229,13 @@ test("codex lane keeps multi_agent_v2 disabled alongside a model override (e.g. 
 // ---- codex lane: local dependency, not npx (2026-07-17 cold-start fix) --
 //
 // npx -y @agentclientprotocol/codex-acp cold-starts in ~35s per lane spawn
-// (registry/package resolution round trip). codex-acp is now a local
-// dependency (`npm i --save`, installed --ignore-scripts) spawned directly
-// as `node <its dist/index.js>`; CODEX_PATH tells it which system `codex`
-// binary to run its app-server against, since --ignore-scripts skipped its
-// own @openai/codex dependency's bundled-binary download.
+// (registry/package resolution round trip). Source mode resolves the pinned
+// local dependency; installed plugins use the self-contained codex-acp.mjs
+// sidecar built from it. CODEX_PATH tells either form which system `codex`
+// binary to run, since --ignore-scripts skipped the dependency's own binary
+// download.
 
-test("codex lane spawns codex-acp's local dist/index.js directly, not npx", () => {
+test("codex lane resolves the pinned local codex-acp dependency in source mode, not npx", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-codex-npx-"));
   const spec = buildSpawnSpec("codex", {}, runDir);
   assert.equal(spec.command, process.execPath, "spawns via the running node binary, not `npx`");
@@ -163,6 +245,15 @@ test("codex lane spawns codex-acp's local dist/index.js directly, not npx", () =
     `expected codex-acp's local dist/index.js, got: ${spec.args[0]}`,
   );
   assert.ok(fs.existsSync(spec.args[0]), "resolved entry script actually exists on disk");
+});
+
+test("packaged codex-acp sidecar is self-contained and executable", () => {
+  const result = spawnSync(process.execPath, ["plugin/dist/codex-acp.mjs", "--version"], {
+    cwd: path.resolve("."),
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr || "codex-acp sidecar did not execute");
+  assert.match(result.stdout, /^@agentclientprotocol\/codex-acp 1\.1\.4\s*$/);
 });
 
 test("codex lane sets CODEX_PATH to a real, executable file — not the bare 'codex' alias name", () => {
@@ -238,6 +329,18 @@ test("CP4: a large event burst yields a digest at/under the char budget with a t
   );
   assert.ok(digest.startsWith("…"), "over-budget digest starts with the truncation marker");
   run.closeStreams();
+});
+
+test("identical normalized plans are activity but not a second significant digest", () => {
+  const run = new LaneRun({ id: "plan-dedupe", lane: "codex", cwd: os.tmpdir(),
+    runDir: fs.mkdtempSync(path.join(os.tmpdir(), "clanker-plan-")), readOnly: true });
+  const first = { sessionUpdate: "plan", entries: [{ content: "one", status: "in_progress", priority: "high" }] } as unknown as SessionUpdate;
+  run.onUpdate(first);
+  run.drainDigest();
+  run.onUpdate(first);
+  assert.equal(run.hasUnreportedSignificant(), false);
+  run.onUpdate({ sessionUpdate: "plan", entries: [{ content: "one", status: "completed", priority: "high" }] } as unknown as SessionUpdate);
+  assert.equal(run.hasUnreportedSignificant(), true);
 });
 
 // ---- clanker_wait quiet-mode debounce: significant vs trivial events -----

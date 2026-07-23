@@ -2,7 +2,7 @@
   "mcpServers": {
     "clanker": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/clanker-mcp.mjs"]
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/clanker-mcp.mjs", "--host", "claude"]
     }
   }
 }

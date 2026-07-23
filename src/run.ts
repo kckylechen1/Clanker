@@ -12,17 +12,22 @@ import path from "node:path";
 import type {
   ContentBlock,
   PlanEntry,
+  PromptResponse,
+  SessionConfigOption,
   SessionUpdate,
   ToolCallLocation,
 } from "@agentclientprotocol/sdk";
-import { DIGEST_CHAR_BUDGET, FINAL_MESSAGE_CHAR_BUDGET } from "./constants.js";
+import { DIGEST_CHAR_BUDGET, FINAL_MESSAGE_CHAR_BUDGET, resolveOcModel } from "./constants.js";
 import type {
   LaneName,
   LaneRequestOptions,
   PlanEntrySnapshot,
   PlanState,
   RunStatus,
+  RunTelemetry,
+  PromptUsageTelemetry,
 } from "./types.js";
+import type { ClankerHost } from "./host.js";
 
 export type SessionState = "working" | "idle" | "stalled" | "closed";
 
@@ -51,6 +56,7 @@ const EMPTY_PLAN: PlanState = {
 export class LaneRun {
   readonly id: string;
   readonly lane: LaneName;
+  readonly host: ClankerHost;
   readonly cwd: string;
   readonly worktreeBranch?: string;
   readonly worktreePath?: string;
@@ -79,6 +85,17 @@ export class LaneRun {
   failureClass?: string;
   sessionId?: string;
   worktreeRetained?: string;
+  cancellationRequested = false;
+  private terminalAt?: number;
+  private startedAt?: number;
+  private retries = 0;
+  private corrections = 0;
+  private forcedKill = false;
+  private stopReason?: string;
+  private promptUsage?: PromptUsageTelemetry;
+  private sessionUsage?: RunTelemetry["session_usage"];
+  private observedModel: string | null = null;
+  private observedEffort: string | null = null;
 
   private plan: PlanState = EMPTY_PLAN;
   private finalTouchedFiles: string[] = [];
@@ -105,6 +122,7 @@ export class LaneRun {
   constructor(init: {
     id: string;
     lane: LaneName;
+    host?: ClankerHost;
     cwd: string;
     runDir: string;
     readOnly: boolean;
@@ -115,6 +133,7 @@ export class LaneRun {
   }) {
     this.id = init.id;
     this.lane = init.lane;
+    this.host = init.host ?? "standalone";
     this.cwd = init.cwd;
     this.runDir = init.runDir;
     this.readOnly = init.readOnly;
@@ -126,8 +145,18 @@ export class LaneRun {
 
   // ---- lifecycle ----------------------------------------------------------
 
-  beginTurn(prompt: string): void {
+  beginTurn(prompt: string, correction = false): void {
+    if (this.isTerminalTurn() && this.sessionClosed) return;
+    this.startedAt ??= Date.now();
+    this.cancellationRequested = false;
+    this.terminalAt = undefined;
+    this.stopReason = undefined;
+    this.promptUsage = undefined;
+    this.forcedKill = false;
+    this.error = undefined;
+    this.failureClass = undefined;
     this.turnsCount += 1;
+    if (correction) this.corrections += 1;
     this.turnStatus = "running";
     this.currentTurnMessage = "";
     this.lastEmittedMsgLen = 0;
@@ -135,9 +164,11 @@ export class LaneRun {
     this.touch("turn_start");
     this.pushDigest(`▶ turn ${this.turnsCount}: ${truncate(prompt, 160)}`, true);
     this.writeEvent({ t: "turn_start", turn: this.turnsCount, prompt });
+    this.persistTelemetry();
   }
 
   completeTurn(): void {
+    if (this.isTerminalTurn()) return;
     this.flushMessageDigest();
     this.turnStatus = "done";
     this.lastFinalMessage = this.currentTurnMessage.trim();
@@ -145,6 +176,7 @@ export class LaneRun {
     this.pushDigest(`✓ turn ${this.turnsCount} done (${this.toolCallCount} tools)`, true);
     this.writeEvent({ t: "turn_done", turn: this.turnsCount, stopReason: "end_turn" });
     this.touch("turn_done");
+    this.markTerminal("done");
   }
 
   /**
@@ -152,6 +184,7 @@ export class LaneRun {
    *   from failure-classifier.ts, surfaced verbatim to wait/status callers.
    */
   failTurn(message: string, failureClass?: string): void {
+    if (this.isTerminalTurn()) return;
     this.flushMessageDigest();
     this.turnStatus = "error";
     this.error = message;
@@ -161,6 +194,7 @@ export class LaneRun {
     this.pushDigest(`✗ error: ${truncate(message, 200)}${tag}`, true);
     this.writeEvent({ t: "turn_error", turn: this.turnsCount, message, failureClass });
     this.touch("turn_error");
+    this.markTerminal("error");
   }
 
   /**
@@ -171,6 +205,7 @@ export class LaneRun {
    * seeing a premature terminal state.
    */
   recordTransientRetry(message: string, backoffMs: number, attempt: number): void {
+    this.retries += 1;
     this.pushDigest(
       `↻ transient backend failure, retrying in ${backoffMs}ms (attempt ${attempt}): ${truncate(message, 160)}`,
     );
@@ -179,12 +214,14 @@ export class LaneRun {
   }
 
   cancelTurn(): void {
+    if (this.isTerminalTurn()) return;
     this.flushMessageDigest();
     this.turnStatus = "cancelled";
     this.idleSince = Date.now();
     this.pushDigest(`⊘ turn ${this.turnsCount} cancelled`, true);
     this.writeEvent({ t: "turn_cancelled", turn: this.turnsCount });
     this.touch("turn_cancelled");
+    this.markTerminal("cancelled");
   }
 
   markClosed(): void {
@@ -235,6 +272,16 @@ export class LaneRun {
         this.logChunk("thought", blockText(update.content));
         break;
       }
+      case "config_option_update":
+        this.observeConfigOptions(update.configOptions);
+        break;
+      case "usage_update":
+        this.sessionUsage = {
+          used: update.used, size: update.size,
+          ...(update.cost ? { cost: { amount: update.cost.amount, currency: update.cost.currency } } : {}),
+        };
+        this.persistTelemetry();
+        break;
       default:
         // user_message_chunk, available_commands_update, usage_update, etc. — ignored per §6.
         break;
@@ -251,7 +298,9 @@ export class LaneRun {
     const inProgress = snap.filter((e) => e.status === "in_progress").length;
     const pending = snap.filter((e) => e.status === "pending").length;
     const currentStep = snap.find((e) => e.status === "in_progress")?.content ?? null;
-    this.plan = { entries: snap, completed, inProgress, pending, total: snap.length, currentStep };
+    const next = { entries: snap, completed, inProgress, pending, total: snap.length, currentStep };
+    if (JSON.stringify(next) === JSON.stringify(this.plan)) return;
+    this.plan = next;
     this.pushDigest(`📋 ${this.planSummary()}`, true);
   }
 
@@ -370,6 +419,69 @@ export class LaneRun {
 
   toolCalls(): number {
     return this.toolCallCount;
+  }
+
+  requestCancellation(): void {
+    this.cancellationRequested = true;
+    this.touch("cancellation_requested");
+    this.persistTelemetry();
+  }
+  markForcedKill(): void { this.forcedKill = true; this.persistTelemetry(); }
+  recordStop(response: PromptResponse): void {
+    if (this.isTerminalTurn()) return;
+    this.stopReason = response.stopReason;
+    if (response.usage != null) {
+      const usage = response.usage;
+      this.promptUsage = {
+        totalTokens: usage.totalTokens,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        ...(usage.thoughtTokens !== undefined ? { thoughtTokens: usage.thoughtTokens } : {}),
+        ...(usage.cachedReadTokens !== undefined ? { cachedReadTokens: usage.cachedReadTokens } : {}),
+        ...(usage.cachedWriteTokens !== undefined ? { cachedWriteTokens: usage.cachedWriteTokens } : {}),
+      };
+    }
+    this.persistTelemetry();
+  }
+  observeConfigOptions(options: SessionConfigOption[] | null | undefined): void {
+    for (const option of options ?? []) {
+      if (option.category === "model") this.observedModel = String(option.currentValue);
+      if (option.category === "thought_level") this.observedEffort = String(option.currentValue);
+    }
+    this.persistTelemetry();
+  }
+  telemetry(): RunTelemetry {
+    const resolved = this.lane === "opencode"
+      ? (resolveOcModel(this.requestOpts.model) ?? null)
+      : this.lane === "grok" ? (this.requestOpts.model ?? "grok-4.5") : (this.requestOpts.model ?? null);
+    return {
+      host: this.host, requested_lane: this.lane, actual_lane: this.lane,
+      requested_model: this.requestOpts.model, resolved_model: resolved,
+      observed_model: this.observedModel, requested_effort: this.requestOpts.effort,
+      observed_effort: this.observedEffort, lane: this.lane, transport: "acp-stdio",
+      backend: this.lane, read_only: this.readOnly, sandbox: this.requestOpts.sandbox,
+      seat: this.seat, created_at: new Date(this.createdAt).toISOString(),
+      ...(this.startedAt ? { started_at: new Date(this.startedAt).toISOString() } : {}),
+      ...(this.terminalAt ? { terminal_at: new Date(this.terminalAt).toISOString(), duration_ms: this.terminalAt - (this.startedAt ?? this.createdAt) } : {}),
+      turns: this.turnsCount, retries: this.retries, corrections: this.corrections,
+      continuation_turns: Math.max(0, this.turnsCount - 1),
+      cancellation_requested: this.cancellationRequested, forced_kill: this.forcedKill,
+      tool_calls: this.toolCallCount, stop_reason: this.stopReason,
+      ...(this.terminalAt ? { terminal_reason: this.turnStatus } : {}),
+      prompt_usage: this.promptUsage, session_usage: this.sessionUsage,
+    };
+  }
+  private markTerminal(reason: string): void { this.terminalAt = Date.now(); this.stopReason ??= reason; this.persistTelemetry(); }
+  private persistTelemetry(): void {
+    const target = path.join(this.runDir, "telemetry.json");
+    const tmp = `${target}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(this.telemetry(), null, 2));
+      fs.renameSync(tmp, target);
+    } catch (error) {
+      try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort cleanup */ }
+      console.error(`[clanker] telemetry persistence failed for run '${this.id}' at '${target}': ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   setFinalTouched(files: string[]): void {

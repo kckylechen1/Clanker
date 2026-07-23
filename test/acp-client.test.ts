@@ -1,13 +1,68 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
-import { LaneConnection } from "../src/acp-client.js";
+import fs from "node:fs";
+import path from "node:path";
+import {
+  LaneConnection,
+  resolveContainedReadPath,
+  resolveContainedWritePath,
+  writeContainedTextFile,
+} from "../src/acp-client.js";
 import { fakeSpec } from "./helpers.js";
 
 test("handshake: connect completes initialize + session/new", async () => {
   const conn = await LaneConnection.connect({ spec: fakeSpec(), cwd: os.tmpdir(), readOnly: false });
   assert.match(conn.sessionId, /^sess-\d+$/);
   conn.close();
+});
+
+test("close escalates SIGTERM to SIGKILL based on actual exit", async () => {
+  const conn = await LaneConnection.connect({
+    spec: fakeSpec({ CLANKER_TEST_IGNORE_SIGTERM: "1" }), cwd: os.tmpdir(), readOnly: true, terminateGraceMs: 30,
+  });
+  conn.close();
+  const exit = await conn.exited;
+  assert.equal(exit.signal, "SIGKILL");
+});
+
+test("ACP filesystem paths are canonical and confined to cwd", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-fs-root-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-fs-out-"));
+  fs.writeFileSync(path.join(root, "ok.txt"), "ok");
+  fs.writeFileSync(path.join(outside, "secret.txt"), "secret");
+  fs.symlinkSync(path.join(outside, "secret.txt"), path.join(root, "read-link"));
+  fs.symlinkSync(path.join(outside, "secret.txt"), path.join(root, "write-link"));
+  fs.symlinkSync(outside, path.join(root, "parent-link"));
+  const canonicalRoot = fs.realpathSync(root);
+  assert.equal(resolveContainedReadPath(root, "ok.txt"), path.join(canonicalRoot, "ok.txt"));
+  assert.equal(resolveContainedReadPath(root, path.join(root, "ok.txt")), path.join(canonicalRoot, "ok.txt"));
+  assert.equal(resolveContainedWritePath(root, "new.txt"), path.join(canonicalRoot, "new.txt"));
+  assert.throws(() => resolveContainedReadPath(root, "../x"), /boundary rejection/);
+  assert.throws(() => resolveContainedReadPath(root, path.join(outside, "secret.txt")), /boundary rejection/);
+  assert.throws(() => resolveContainedReadPath(root, "read-link"), /boundary rejection/);
+  assert.throws(() => resolveContainedWritePath(root, "write-link"), /boundary rejection/);
+  assert.throws(() => resolveContainedWritePath(root, "parent-link/new.txt"), /boundary rejection/);
+});
+
+test("ACP write rejects a cwd-local hardlink without changing the outside inode", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-hardlink-root-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-hardlink-outside-"));
+  const outsideFile = path.join(outside, "outside.txt");
+  const localLink = path.join(root, "local-hardlink.txt");
+  fs.writeFileSync(outsideFile, "original outside content");
+  fs.linkSync(outsideFile, localLink);
+  try {
+    const target = resolveContainedWritePath(root, localLink);
+    assert.throws(
+      () => writeContainedTextFile(target, localLink, "outside-must-not-change"),
+      /filesystem boundary rejection.*hardlinks/i,
+    );
+    assert.equal(fs.readFileSync(outsideFile, "utf8"), "original outside content");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
 });
 
 test("prompt turn completes and yields the agent message as final text", async () => {

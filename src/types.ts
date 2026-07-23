@@ -29,10 +29,12 @@ export interface SpawnSpec {
  *                             `cargo test`/`go test` can write build/test
  *                             caches, but nothing outside the workspace)
  *   - "danger-full-access" -> INITIAL_AGENT_MODE=agent-full-access (writes
- *                             anywhere, no sandbox — today's `readOnly:
- *                             false` default when `sandbox` is unset)
- * Only the codex lane honors this (grok/opencode have no native sandbox
- * mode); other lanes warn and ignore it, same pattern as `model`/`effort`.
+ *                             anywhere, no sandbox; requires an explicit
+ *                             override)
+ * Only the codex lane honors this caller-selected override. Grok has its own
+ * fixed read-only/workspace sandbox mapping derived from `readOnly`, while
+ * opencode uses its fixed worker permission profile; both warn and ignore
+ * this codex-specific option.
  */
 export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 
@@ -44,10 +46,9 @@ export interface LaneRequestOptions {
   /** codex-only sandbox strictness override — see CodexSandboxMode. */
   sandbox?: CodexSandboxMode;
   /**
-   * opencode-only: selects a primary agent profile (e.g. a markdown agent
-   * under `~/.config/opencode/agents/<name>.md`) via OPENCODE_CONFIG's
-   * `default_agent`. Ignored (warned) on codex/grok, same pattern as
-   * `model`/`effort`/`sandbox`.
+   * Deprecated compatibility field. Every lane ignores it with a warning;
+   * opencode always uses Clanker's fixed `clanker-worker` profile so callers
+   * cannot replace its permission boundary.
    */
   agent?: string;
 }
@@ -84,6 +85,41 @@ export interface LaneStatusView {
   error?: string;
   /** Present alongside `error` when classifyTurnFailure tagged it (e.g. CLANKER-INFRA-FAILURE). */
   failure_class?: string;
+  telemetry?: RunTelemetry;
+}
+
+export interface RunTelemetry {
+  host: import("./host.js").ClankerHost;
+  requested_lane: LaneName;
+  actual_lane: LaneName;
+  requested_model?: string; resolved_model?: string | null; observed_model?: string | null;
+  requested_effort?: string; observed_effort?: string | null;
+  lane: LaneName; transport: "acp-stdio"; backend: string; read_only: boolean;
+  sandbox?: CodexSandboxMode; seat: boolean; created_at: string; started_at?: string;
+  terminal_at?: string; duration_ms?: number; turns: number; retries: number; corrections: number;
+  continuation_turns: number; cancellation_requested: boolean; forced_kill: boolean;
+  tool_calls: number; stop_reason?: string; terminal_reason?: string;
+  prompt_usage?: PromptUsageTelemetry;
+  /** Latest ACP session usage: tokens currently in context and cumulative session cost. */
+  session_usage?: { used: number; size: number; cost?: { amount: number; currency: string } };
+}
+
+/** Structured fallback when an in-process/stale caller reaches the host-policy handler. */
+export interface DispatchPolicyTelemetry {
+  host: import("./host.js").ClankerHost;
+  requested_lane: LaneName;
+  actual_lane: null;
+  blocked_reason: string;
+}
+
+/** Safe projection of ACP PromptResponse.usage; protocol extension metadata is deliberately excluded. */
+export interface PromptUsageTelemetry {
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  thoughtTokens?: number | null;
+  cachedReadTokens?: number | null;
+  cachedWriteTokens?: number | null;
 }
 
 /** Result payload attached once a run reaches a terminal state. */
