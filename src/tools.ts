@@ -30,7 +30,11 @@ const dispatchOptionsShape = {
   model: z
     .string()
     .optional()
-    .describe("Model override, e.g. 'zhipuai-coding-plan/glm-5.2' (opencode) — warned & echoed if the Clanker can't honor it"),
+    .describe(
+      "Model override, e.g. 'zhipuai-coding-plan/glm-5.2' (opencode) — warned & echoed if the Clanker can't honor it. " +
+        "Required for lane=opencode on every start path, including read-only: omitting it lets opencode's own config " +
+        "default (possibly GLM) run outside the vault-exec credential wrap.",
+    ),
   effort: z.string().optional().describe("Reasoning effort override (codex/grok only)"),
   read_only: z.boolean().optional().describe("If true, the Clanker is gated read-only (default false)"),
   sandbox: z
@@ -176,6 +180,16 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
       try {
         const blocked = policyFailure(args.lane);
         if (blocked) return blocked;
+        // opencode's own config default (possibly GLM) decides the model
+        // whenever we omit one, which bypasses wrapWithVaultExec — buildSpawnSpec
+        // throws on this too, but reject it here with a clear message before
+        // worktree/session setup runs. read_only is not a mitigating factor:
+        // it's exactly the path that was reaching buildSpawnSpec with no model.
+        if (args.lane === "opencode" && !args.model?.trim()) {
+          return fail(
+            "an explicit model is required for read-only opencode dispatch: omitting it lets opencode's own config default (possibly GLM) run outside the vault-exec credential wrap",
+          );
+        }
         const { id, warnings } = await manager.dispatchStart({
           ...toDispatch(args),
           readOnly: true,

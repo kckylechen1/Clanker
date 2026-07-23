@@ -312,6 +312,20 @@ export function buildSpawnSpec(
     }
 
     case "opencode": {
+      // Fail closed: without an explicit model, opencodeRequiredEnv(undefined)
+      // below returns [] and wrapWithVaultExec becomes a no-op, while the
+      // actual model that runs is decided by opencode's own config default —
+      // which this process does not control and cannot assume is non-GLM.
+      // That combination silently spawns a key-bearing lane outside the
+      // vault-exec credential wrap (found by codex cold review, run
+      // codex-2db38). Every buildSpawnSpec caller (tools/run/adapters) is
+      // routed through here, so the guard covers all of them, read-only
+      // included.
+      if (!opts.model?.trim()) {
+        throw new Error(
+          "opencode lane requires an explicit model id — omitting it would let opencode's own config default (possibly GLM) run outside the vault-exec credential wrap",
+        );
+      }
       const args = ["acp"];
       // Shortnames (glm/ds/kimi/free) resolve to full provider/model ids from the
       // single source in constants.ts; full ids pass through unchanged.
