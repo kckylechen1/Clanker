@@ -60,7 +60,7 @@ On Codex, report that GLM writes are unavailable through Clanker. Do not bypass 
 
 When the requester wants Kimi to lead the existing OpenCode worker/reviewer profiles, use `/clanker:kimi-crew` or its packaged `clanker:kimi-crew` relay. The relay calls `clanker_dispatch_kimi_crew_start` exactly once with only a bounded `prompt` and unique managed `worktree`, then owns `clanker_wait` to a terminal state.
 
-Kimi Crew is one write-capable OpenCode session, not a Clanker-owned multi-agent state machine. Kimi may inspect Git and run verification through shell, while OpenCode's installed `worker-glm`, `reviewer-deepseek`, and optional `oracle` profiles retain their own prompts, models, skills, permissions, and provider authentication. Direct GLM writes still require the Sonnet supervisor; inside Kimi Crew, Kimi intentionally leads its GLM worker.
+Kimi Crew is one write-capable OpenCode session, not a Clanker-owned multi-agent state machine. Clanker constrains Kimi's task delegation to the three named agents but does not downscope its other normal OpenCode tools or permissions. The installed `worker-glm`, `reviewer-deepseek`, and optional `oracle` profiles retain their own prompts, models, skills, permissions, and provider authentication. Direct GLM writes still require the Sonnet supervisor; inside Kimi Crew, Kimi intentionally leads its GLM worker.
 
 ## Own the lifecycle to terminal state
 

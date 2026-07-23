@@ -265,27 +265,17 @@ function opencodeKimiCrewAgent() {
     description: "Kimi Crew lead for one OpenCode-native implementation and review session.",
     mode: "primary",
     permission: {
-      "*_*": "deny",
       task: {
         "*": "deny",
         "worker-glm": "allow",
         "reviewer-deepseek": "allow",
         oracle: "allow",
       },
-      skill: "deny",
-      external_directory: "deny",
-      webfetch: "deny",
-      websearch: "deny",
-      edit: "deny",
-      // The lead needs git inspection and direct verification. This is not a
-      // hard read-only profile or shell sandbox: the managed worktree is the
-      // expected cwd, while bash itself remains trusted.
-      bash: "allow",
     },
     prompt: [
       "You are Kimi Crew. Lead the supplied task through the existing OpenCode agent profiles.",
       "Prefer worker-glm for implementation, use reviewer-deepseek for cold review, and call oracle only when risk or evidence warrants it.",
-      "Use shell access to inspect Git, understand the repository, and verify the integrated result when useful.",
+      "Use your normal OpenCode tools to inspect Git, understand the repository, and verify or repair the integrated result when useful.",
       "Personally adjudicate the agents' findings, require verification evidence, and return concrete evidence and remaining concerns.",
     ].join("\n"),
   } as const;

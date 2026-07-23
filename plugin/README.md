@@ -39,8 +39,9 @@ Bundles the Clanker dispatch surface over ACP:
 `/clanker:kimi-crew` launches one Kimi-led OpenCode session and monitors it to completion. OpenCode
 uses the already-installed `worker-glm` for implementation, `reviewer-deepseek` for cold review,
 and optional `oracle` (Sol) when warranted. Clanker does not orchestrate those children or claim
-a deterministic workflow. The Kimi lead can inspect Git and run verification through shell; direct
-GLM writes remain Sonnet-supervised, while the Crew's GLM worker is intentionally led by Kimi.
+a deterministic workflow. Clanker constrains Kimi's task delegation to those named agents but does
+not downscope its normal OpenCode tools or permissions. Direct GLM writes remain Sonnet-supervised,
+while the Crew's GLM worker is intentionally led by Kimi.
 
 All generic MCP start/dispatch paths reject Opencode GLM writes too; the dedicated
 `clanker_dispatch_glm_write_start` path is the only server-supported GLM write entrypoint.

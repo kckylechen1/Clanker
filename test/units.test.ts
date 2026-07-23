@@ -126,21 +126,20 @@ test("OpenCode crew pins Kimi, exact native task allowlist, isolation, and fixed
     "oracle",
   ]);
   assert.deepEqual(cfg.agent?.["clanker-kimi-crew"]?.permission, {
-    "*_*": "deny",
     task: {
       "*": "deny",
       "worker-glm": "allow",
       "reviewer-deepseek": "allow",
       oracle: "allow",
     },
-    skill: "deny",
-    external_directory: "deny",
-    webfetch: "deny",
-    websearch: "deny",
-    edit: "deny",
-    bash: "allow",
   });
-  assert.equal(cfg.agent?.["clanker-kimi-crew"]?.permission?.read, undefined, "read remains available");
+  for (const capability of ["read", "edit", "bash", "skill", "webfetch", "websearch", "external_directory", "*_*"]) {
+    assert.equal(
+      cfg.agent?.["clanker-kimi-crew"]?.permission?.[capability],
+      undefined,
+      `${capability} remains owned by OpenCode instead of being downscoped by Clanker`,
+    );
+  }
   const genericWorkerPermission = cfg.agent?.["clanker-kimi-crew"]?.permission?.task?.["generic-worker"]
     ?? cfg.agent?.["clanker-kimi-crew"]?.permission?.task?.["*"];
   assert.equal(genericWorkerPermission, "deny", "the wildcard denies globally discovered generic workers");
