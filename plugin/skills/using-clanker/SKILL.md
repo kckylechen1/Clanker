@@ -28,7 +28,7 @@ Use `clanker_dispatch_readonly_start` by default. Supply:
 - `lane`
 - a bounded `prompt` with acceptance evidence
 - `cwd` only when the task must run outside the server's base repository
-- optional real `model` and compatible `effort` overrides
+- real `model` override — required when `lane=opencode` (an omitted model would fall to opencode's own config default outside the vault-exec credential wrap and is rejected); optional for `lane=codex` — plus compatible `effort` overrides
 
 The server forces `read_only=true`; callers cannot turn this tool into a writer.
 

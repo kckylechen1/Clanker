@@ -31470,6 +31470,21 @@ var CAPS = {
   opencode: { model: true, effort: false, sandbox: false, agent: false },
   grok: { model: true, effort: true, sandbox: false, agent: false }
 };
+var REQUIRED_ENV = {
+  codex: [],
+  grok: []
+};
+function opencodeRequiredEnv(model) {
+  return isGlmModel(model) ? ["ZHIPUAI_API_KEY"] : [];
+}
+function wrapWithVaultExec(spec, requiredEnv) {
+  if (requiredEnv.length === 0) return spec;
+  return {
+    ...spec,
+    command: "tachi",
+    args: ["vault", "exec", "--keychain", "--require", requiredEnv.join(","), "--", spec.command, ...spec.args]
+  };
+}
 var SANDBOX_TO_AGENT_MODE = {
   "read-only": "read-only",
   "workspace-write": "agent",
@@ -31539,9 +31554,14 @@ function buildSpawnSpec(lane, opts, runDir) {
       ];
       if (opts.effort) args.push("--reasoning-effort", opts.effort);
       args.push("stdio");
-      return { command: "grok", args, env, warnings };
+      return wrapWithVaultExec({ command: "grok", args, env, warnings }, REQUIRED_ENV.grok);
     }
     case "opencode": {
+      if (!opts.model?.trim()) {
+        throw new Error(
+          "opencode lane requires an explicit model id \u2014 omitting it would let opencode's own config default (possibly GLM) run outside the vault-exec credential wrap"
+        );
+      }
       const args = ["acp"];
       const model = resolveOcModel(opts.model);
       const config2 = {
@@ -31556,7 +31576,7 @@ function buildSpawnSpec(lane, opts, runDir) {
       env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config2);
       env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
       env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
-      return { command: "opencode", args, env, warnings };
+      return wrapWithVaultExec({ command: "opencode", args, env, warnings }, opencodeRequiredEnv(opts.model));
     }
     case "codex": {
       const codexConfig = {
@@ -31568,7 +31588,10 @@ function buildSpawnSpec(lane, opts, runDir) {
       const agentMode = opts.sandbox ? SANDBOX_TO_AGENT_MODE[opts.sandbox] ?? (opts.readOnly ? "read-only" : "agent") : opts.readOnly ? "read-only" : "agent";
       env.INITIAL_AGENT_MODE = agentMode;
       env.CODEX_PATH = resolveSystemCodexPath();
-      return { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings };
+      return wrapWithVaultExec(
+        { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings },
+        REQUIRED_ENV.codex
+      );
     }
   }
 }
@@ -32846,7 +32869,9 @@ var dispatchOptionsShape = {
   prompt: external_exports.string().min(1).describe("The task/prompt to send to the Clanker"),
   cwd: external_exports.string().optional().describe("Absolute working directory (default: server base repo)"),
   worktree: external_exports.string().trim().min(1).optional().describe("Branch name; server creates a git worktree cut from origin/main and runs there"),
-  model: external_exports.string().optional().describe("Model override, e.g. 'zhipuai-coding-plan/glm-5.2' (opencode) \u2014 warned & echoed if the Clanker can't honor it"),
+  model: external_exports.string().optional().describe(
+    "Model override, e.g. 'zhipuai-coding-plan/glm-5.2' (opencode) \u2014 warned & echoed if the Clanker can't honor it. Required for lane=opencode on every start path, including read-only: omitting it lets opencode's own config default (possibly GLM) run outside the vault-exec credential wrap."
+  ),
   effort: external_exports.string().optional().describe("Reasoning effort override (codex/grok only)"),
   read_only: external_exports.boolean().optional().describe("If true, the Clanker is gated read-only (default false)"),
   sandbox: external_exports.enum(["read-only", "workspace-write", "danger-full-access"]).optional().describe(
@@ -32948,6 +32973,11 @@ function registerTools(server, manager) {
       try {
         const blocked = policyFailure(args.lane);
         if (blocked) return blocked;
+        if (args.lane === "opencode" && !args.model?.trim()) {
+          return fail(
+            "an explicit model is required for read-only opencode dispatch: omitting it lets opencode's own config default (possibly GLM) run outside the vault-exec credential wrap"
+          );
+        }
         const { id, warnings } = await manager.dispatchStart({
           ...toDispatch(args),
           readOnly: true,
