@@ -379,13 +379,14 @@ export function buildSpawnSpec(
       fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2));
       env.OPENCODE_CONFIG = cfgPath;
       env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config);
-      // Clanker's worker has its own fixed contract and must not ingest the
-      // interactive Claude/Codex skill layer from ~/.claude or ~/.agents.
-      // The public compatibility flag suppresses .claude; 1.17.x's narrower
-      // external-skills flag also suppresses .agents. `permission.skill=deny`
-      // above remains the enforcement fallback if discovery behavior changes.
-      env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
-      env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
+      if (!opts.kimiCrew) {
+        // The isolated generic worker must not ingest the interactive
+        // Claude/Codex skill layer from ~/.claude or ~/.agents. Kimi Crew is
+        // intentionally different: its installed child profiles retain their
+        // original prompts, skills, and permissions under OpenCode's merge.
+        env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
+        env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
+      }
       const requiredEnv = opts.kimiCrew
         ? ["KIMI_API_KEY", "ZHIPUAI_API_KEY"]
         : opencodeRequiredEnv(opts.model);

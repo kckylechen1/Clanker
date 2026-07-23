@@ -31606,8 +31606,10 @@ function buildSpawnSpec(lane, opts, runDir) {
       fs2.writeFileSync(cfgPath, JSON.stringify(config2, null, 2));
       env.OPENCODE_CONFIG = cfgPath;
       env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config2);
-      env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
-      env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
+      if (!opts.kimiCrew) {
+        env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
+        env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
+      }
       const requiredEnv = opts.kimiCrew ? ["KIMI_API_KEY", "ZHIPUAI_API_KEY"] : opencodeRequiredEnv(opts.model);
       return wrapWithVaultExec({ command: "opencode", args, env, warnings }, requiredEnv);
     }

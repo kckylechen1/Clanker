@@ -144,8 +144,8 @@ test("OpenCode crew pins Kimi, exact native task allowlist, isolation, and fixed
   const genericWorkerPermission = cfg.agent?.["clanker-kimi-crew"]?.permission?.task?.["generic-worker"]
     ?? cfg.agent?.["clanker-kimi-crew"]?.permission?.task?.["*"];
   assert.equal(genericWorkerPermission, "deny", "the wildcard denies globally discovered generic workers");
-  assert.equal(spec.env.OPENCODE_DISABLE_CLAUDE_CODE, "1");
-  assert.equal(spec.env.OPENCODE_DISABLE_EXTERNAL_SKILLS, "1");
+  assert.equal(spec.env.OPENCODE_DISABLE_CLAUDE_CODE, undefined, "crew preserves installed child profiles and skills");
+  assert.equal(spec.env.OPENCODE_DISABLE_EXTERNAL_SKILLS, undefined, "crew preserves external skill discovery");
   assert.deepEqual(cfg, JSON.parse(fs.readFileSync(spec.env.OPENCODE_CONFIG, "utf8")));
   assert.equal(spec.command, "tachi");
   assert.deepEqual(spec.args, [

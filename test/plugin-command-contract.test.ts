@@ -139,6 +139,7 @@ test("packaged skill documents Kimi Crew as an OpenCode-owned workflow", async (
   assert.match(skill, /### Kimi Crew/);
   assert.match(skill, /clanker_dispatch_kimi_crew_start/);
   assert.match(skill, /one write-capable OpenCode session/);
+  assert.match(skill, /prompts, models, skills, permissions/);
   assert.match(skill, /Kimi intentionally leads its GLM worker/);
 });
 
