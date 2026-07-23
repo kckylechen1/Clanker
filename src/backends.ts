@@ -109,7 +109,7 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveOcModel } from "./constants.js";
+import { isGlmModel, resolveOcModel } from "./constants.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "./types.js";
 
 const nodeRequire = createRequire(import.meta.url);
@@ -174,6 +174,46 @@ const CAPS: Record<LaneName, LaneCapabilities> = {
   opencode: { model: true, effort: false, sandbox: false, agent: false },
   grok: { model: true, effort: true, sandbox: false, agent: false },
 };
+
+/**
+ * Per-lane environment variables that must come from the vault (OS
+ * keychain), never the ambient process environment, and therefore force the
+ * spawned command through `tachi vault exec` (see wrapWithVaultExec below).
+ * codex and grok authenticate via their own OAuth login state — Clanker
+ * never holds a long-lived secret for them, so both declare an empty list.
+ * opencode is model-dependent (most models it serves are also OAuth-backed
+ * through opencode's own credential store); only the GLM lane authenticates
+ * with a bare API key, so its requiredEnv is resolved per-request in
+ * opencodeRequiredEnv rather than declared statically here.
+ */
+const REQUIRED_ENV: Record<Exclude<LaneName, "opencode">, string[]> = {
+  codex: [],
+  grok: [],
+};
+
+/** GLM is the only opencode-served model that needs a vault-sourced secret. */
+function opencodeRequiredEnv(model: string | undefined): string[] {
+  return isGlmModel(model) ? ["ZHIPUAI_API_KEY"] : [];
+}
+
+/**
+ * Rewrite a spawn command to run under `tachi vault exec --keychain
+ * --require <vars> -- <original command> <original args>` when the lane
+ * declares required env vars, so the secret is materialized from the OS
+ * keychain into the child's environment at spawn time instead of living in
+ * Clanker's (or the ambient shell's) own environment. `tachi` resolves via
+ * PATH, same as every other lane binary here. An empty requiredEnv list is
+ * a no-op — the returned spec is unchanged, so every existing OAuth lane's
+ * spawn command stays byte-for-byte identical to before this wiring.
+ */
+function wrapWithVaultExec(spec: SpawnSpec, requiredEnv: string[]): SpawnSpec {
+  if (requiredEnv.length === 0) return spec;
+  return {
+    ...spec,
+    command: "tachi",
+    args: ["vault", "exec", "--keychain", "--require", requiredEnv.join(","), "--", spec.command, ...spec.args],
+  };
+}
 
 /**
  * Maps the public `sandbox` option (CodexSandboxMode, mirroring codex-acp's
@@ -268,7 +308,7 @@ export function buildSpawnSpec(
       ];
       if (opts.effort) args.push("--reasoning-effort", opts.effort);
       args.push("stdio");
-      return { command: "grok", args, env, warnings };
+      return wrapWithVaultExec({ command: "grok", args, env, warnings }, REQUIRED_ENV.grok);
     }
 
     case "opencode": {
@@ -297,7 +337,7 @@ export function buildSpawnSpec(
       // above remains the enforcement fallback if discovery behavior changes.
       env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
       env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
-      return { command: "opencode", args, env, warnings };
+      return wrapWithVaultExec({ command: "opencode", args, env, warnings }, opencodeRequiredEnv(opts.model));
     }
 
     case "codex": {
@@ -324,7 +364,10 @@ export function buildSpawnSpec(
       // header), so its own bundled @openai/codex copy was never
       // downloaded — CODEX_PATH is load-bearing, not an optional override.
       env.CODEX_PATH = resolveSystemCodexPath();
-      return { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings };
+      return wrapWithVaultExec(
+        { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings },
+        REQUIRED_ENV.codex,
+      );
     }
   }
 }
