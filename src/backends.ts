@@ -191,7 +191,7 @@ const REQUIRED_ENV: Record<Exclude<LaneName, "opencode">, string[]> = {
   grok: [],
 };
 
-/** GLM is the only opencode-served model that needs a vault-sourced secret. */
+/** GLM is the only normal opencode lane that needs a vault-sourced secret. */
 function opencodeRequiredEnv(model: string | undefined): string[] {
   return isGlmModel(model) ? ["ZHIPUAI_API_KEY"] : [];
 }
@@ -256,6 +256,37 @@ function opencodeClankerAgent(readOnly: boolean) {
       "Clanker owns the session lifecycle, workspace or worktree selection, cancellation, and progress reporting.",
       "Never spawn or delegate to subagents, load skills, access paths outside the current worktree, create or switch worktrees, or attempt to manage Clanker itself.",
       "Return concrete results, changed files, verification evidence, and any remaining risk to the parent.",
+    ].join("\n"),
+  } as const;
+}
+
+function opencodeKimiCrewAgent() {
+  return {
+    description: "Kimi Crew lead for one OpenCode-native implementation and review session.",
+    mode: "primary",
+    permission: {
+      "*_*": "deny",
+      task: {
+        "*": "deny",
+        "worker-glm": "allow",
+        "reviewer-deepseek": "allow",
+        oracle: "allow",
+      },
+      skill: "deny",
+      external_directory: "deny",
+      webfetch: "deny",
+      websearch: "deny",
+      edit: "deny",
+      // The lead needs git inspection and direct verification. This is not a
+      // hard read-only profile or shell sandbox: the managed worktree is the
+      // expected cwd, while bash itself remains trusted.
+      bash: "allow",
+    },
+    prompt: [
+      "You are Kimi Crew. Lead the supplied task through the existing OpenCode agent profiles.",
+      "Prefer worker-glm for implementation, use reviewer-deepseek for cold review, and call oracle only when risk or evidence warrants it.",
+      "Use shell access to inspect Git, understand the repository, and verify the integrated result when useful.",
+      "Personally adjudicate the agents' findings, require verification evidence, and return concrete evidence and remaining concerns.",
     ].join("\n"),
   } as const;
 }
@@ -333,10 +364,14 @@ export function buildSpawnSpec(
       // NOTE (rebase merge resolution): main's `opts.agent` (caller-selected
       // default_agent) is intentionally NOT honored here — see the file
       // header MERGE NOTE. The clanker-worker identity below is fixed.
+      const profile = opts.kimiCrew ? "clanker-kimi-crew" : "clanker-worker";
+      const agent = opts.kimiCrew
+        ? { [profile]: opencodeKimiCrewAgent() }
+        : { [profile]: opencodeClankerAgent(opts.readOnly === true) };
       const config: Record<string, unknown> = {
         $schema: "https://opencode.ai/config.json",
-        default_agent: "clanker-worker",
-        agent: { "clanker-worker": opencodeClankerAgent(opts.readOnly === true) },
+        default_agent: profile,
+        agent,
       };
       if (model) config.model = model;
 
@@ -351,7 +386,10 @@ export function buildSpawnSpec(
       // above remains the enforcement fallback if discovery behavior changes.
       env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
       env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
-      return wrapWithVaultExec({ command: "opencode", args, env, warnings }, opencodeRequiredEnv(opts.model));
+      const requiredEnv = opts.kimiCrew
+        ? ["KIMI_API_KEY", "ZHIPUAI_API_KEY"]
+        : opencodeRequiredEnv(opts.model);
+      return wrapWithVaultExec({ command: "opencode", args, env, warnings }, requiredEnv);
     }
 
     case "codex": {

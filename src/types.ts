@@ -51,6 +51,8 @@ export interface LaneRequestOptions {
    * cannot replace its permission boundary.
    */
   agent?: string;
+  /** Internal marker for the dedicated OpenCode-native Kimi Crew entrypoint. */
+  kimiCrew?: boolean;
 }
 
 /** Plan projection derived from ACP `plan` events. */

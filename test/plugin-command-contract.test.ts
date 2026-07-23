@@ -113,6 +113,35 @@ test("packaged writer handles non-GLM writes without correction authority", asyn
   assert.match(body, /timeout_ms=55000/);
 });
 
+test("crew command and relay launch exactly one fixed Kimi/OpenCode session", async () => {
+  const command = await readFile(new URL("../plugin/commands/kimi-crew.md", import.meta.url), "utf8");
+  assert.match(command, /argument-hint: "\[--background\|--wait\] <task>"/);
+  assert.match(command, /subagent_type: "clanker:kimi-crew"/);
+  assert.match(command, /clanker\/kimi-crew-<short-timestamp>/);
+  assert.match(command, /Launch exactly one `Agent`/);
+  assert.match(command, /neither flag is present.*run_in_background: true/s);
+  assert.doesNotMatch(command, /--write|--model|--read-only|--cwd|--seat/);
+
+  const relay = await readFile(new URL("../plugin/agents/kimi-crew.md", import.meta.url), "utf8");
+  const frontmatter = relay.split("---")[1] ?? "";
+  assert.match(frontmatter, /clanker_dispatch_kimi_crew_start/);
+  assert.match(frontmatter, /clanker_wait/);
+  assert.doesNotMatch(frontmatter, /clanker_prompt|clanker_cancel|clanker_dispatch_write_start|Bash|Edit|Write|Read/);
+  assert.match(relay, /exactly once/);
+  assert.match(relay, /timeout_ms=55000/);
+  assert.match(relay, /quiet=true/);
+  assert.match(relay, /Return the real terminal result/);
+  assert.match(relay, /Do not orchestrate models/);
+});
+
+test("packaged skill documents Kimi Crew as an OpenCode-owned workflow", async () => {
+  const skill = await readFile(new URL("../plugin/skills/using-clanker/SKILL.md", import.meta.url), "utf8");
+  assert.match(skill, /### Kimi Crew/);
+  assert.match(skill, /clanker_dispatch_kimi_crew_start/);
+  assert.match(skill, /one write-capable OpenCode session/);
+  assert.match(skill, /Kimi intentionally leads its GLM worker/);
+});
+
 test("codex command omits unspecified model and effort instead of inventing aliases or overrides", async () => {
   const body = await readFile(new URL("../plugin/commands/codex.md", import.meta.url), "utf8");
   assert.match(body, /omit those fields for both read-only and write calls/);

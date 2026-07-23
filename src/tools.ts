@@ -75,6 +75,11 @@ const glmWriteDispatchShape = z
     worktree: z.string().trim().min(1).describe("Required branch name for the server-created isolated GLM worktree"),
   }).shape;
 
+const kimiCrewDispatchShape = {
+  prompt: z.string().trim().min(1).describe("Task for the fixed Kimi-led OpenCode crew"),
+  worktree: z.string().trim().min(1).describe("Required managed-worktree branch"),
+} as const;
+
 function rejectsUnsupervisedGlmWrite(args: { lane: string; model?: string; read_only?: boolean }): boolean {
   return isGlmModel(args.model) && !(args.read_only ?? false);
 }
@@ -245,6 +250,28 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
           cwd: args.cwd,
           worktree: args.worktree,
           seat: args.seat,
+        });
+        return ok({ id, warnings });
+      } catch (e) {
+        return fail(msg(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "clanker_dispatch_kimi_crew_start",
+    {
+      title: "Start one Kimi-led OpenCode crew session",
+      description:
+        "Starts one fixed Kimi/OpenCode ACP session in a managed worktree. OpenCode delegates natively to its existing named agents; poll with clanker_wait.",
+      inputSchema: kimiCrewDispatchShape,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    async (args) => {
+      try {
+        const { id, warnings } = await manager.dispatchKimiCrew({
+          prompt: args.prompt,
+          worktree: args.worktree,
         });
         return ok({ id, warnings });
       } catch (e) {

@@ -27,7 +27,7 @@ Bundles the Clanker dispatch surface over ACP:
   into both adapters at bundle time. It keeps Codex self-dispatch and GLM supervision
   boundaries explicit while teaching agents when a model must be supplied or omitted.
 - **Commands** `/clanker:codex`, `/clanker:grok`, `/clanker:glm`, `/clanker:deepseek`,
-  `/clanker:kimi`, `/clanker:free`, `/clanker:oc` ([`commands/`](commands)) —
+  `/clanker:kimi`, `/clanker:free`, `/clanker:oc`, `/clanker:kimi-crew` ([`commands/`](commands)) —
   argument mapping preserved from the current habits. Read-only calls use the lane relay;
   non-GLM writes use `clanker:writer`, while GLM writes alone use the Sonnet
   `clanker:supervisor`; both write paths require a managed worktree. `--background` /
@@ -35,6 +35,12 @@ Bundles the Clanker dispatch surface over ACP:
   `run_in_background`; oc model shortnames resolve server-side. The Claude `Agent` call is
   the visible lifecycle owner: it holds the Clanker task row while the MCP server only owns
   the ACP backend.
+
+`/clanker:kimi-crew` launches one Kimi-led OpenCode session and monitors it to completion. OpenCode
+uses the already-installed `worker-glm` for implementation, `reviewer-deepseek` for cold review,
+and optional `oracle` (Sol) when warranted. Clanker does not orchestrate those children or claim
+a deterministic workflow. The Kimi lead can inspect Git and run verification through shell; direct
+GLM writes remain Sonnet-supervised, while the Crew's GLM worker is intentionally led by Kimi.
 
 All generic MCP start/dispatch paths reject Opencode GLM writes too; the dedicated
 `clanker_dispatch_glm_write_start` path is the only server-supported GLM write entrypoint.

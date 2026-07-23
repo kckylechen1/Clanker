@@ -56,6 +56,12 @@ On Claude, route GLM writes with a unique managed `worktree` to the packaged Son
 
 On Codex, report that GLM writes are unavailable through Clanker. Do not bypass the missing supervisor with a generic dispatch tool, a direct CLI, or another lane.
 
+### Kimi Crew
+
+When the requester wants Kimi to lead the existing OpenCode worker/reviewer profiles, use `/clanker:kimi-crew` or its packaged `clanker:kimi-crew` relay. The relay calls `clanker_dispatch_kimi_crew_start` exactly once with only a bounded `prompt` and unique managed `worktree`, then owns `clanker_wait` to a terminal state.
+
+Kimi Crew is one write-capable OpenCode session, not a Clanker-owned multi-agent state machine. Kimi may inspect Git and run verification through shell, while OpenCode's installed `worker-glm`, `reviewer-deepseek`, and optional `oracle` profiles retain their own prompts, models, permissions, and provider authentication. Direct GLM writes still require the Sonnet supervisor; inside Kimi Crew, Kimi intentionally leads its GLM worker.
+
 ## Own the lifecycle to terminal state
 
 After any successful start:
@@ -102,3 +108,4 @@ Do not return a launch acknowledgement as if it were a completed result.
 - "Have DeepSeek implement this" → write start, `lane=opencode`, `model=ds`, unique `worktree`, then wait.
 - "Have Composer review this" → read-only start, `lane=opencode`, `model=composer`; do not use `lane=grok`.
 - "Have GLM implement this" on Claude → packaged `clanker:supervisor`; on Codex → reject as unavailable through this host.
+- "Have Kimi lead GLM implementation and DeepSeek review" → `/clanker:kimi-crew`, one unique managed worktree, then wait to terminal.

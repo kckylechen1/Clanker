@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,32 @@ import { INFRA_FAILURE_TAG } from "../src/failure-classifier.js";
 import { LaneRun } from "../src/run.js";
 import type { LaneRequestOptions } from "../src/types.js";
 import { fakeResolver, fakeSpec, until } from "./helpers.js";
+
+function makeCrewBaseRepo(): { base: string; root: string } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-kimi-crew-manager-"));
+  const origin = path.join(root, "origin.git");
+  const seed = path.join(root, "seed");
+  const base = path.join(root, "base");
+  const git = (cwd: string, args: string[]) => execFileSync("git", args, {
+    cwd,
+    stdio: "pipe",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@t",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@t",
+    },
+  });
+  git(root, ["init", "--bare", "-b", "main", origin]);
+  git(root, ["clone", origin, seed]);
+  fs.writeFileSync(path.join(seed, "README.md"), "seed\n");
+  git(seed, ["add", "."]);
+  git(seed, ["commit", "-m", "init"]);
+  git(seed, ["push", "origin", "main"]);
+  git(root, ["clone", origin, base]);
+  return { base, root };
+}
 
 function makeManager(
   opts: {
@@ -373,6 +400,30 @@ test("dispatchStart forwards a strict sandbox override through to the spec resol
     await waitTerminal(m, id);
   } finally {
     await m.shutdown();
+  }
+});
+
+test("dispatchKimiCrew fixes the single OpenCode lifecycle request", async () => {
+  let capturedLane: string | undefined;
+  let capturedOpts: LaneRequestOptions | undefined;
+  const spy: SpecResolver = (lane, opts) => {
+    capturedLane = lane;
+    capturedOpts = opts;
+    return fakeSpec();
+  };
+  const repo = makeCrewBaseRepo();
+  const m = new LaneManager({ resolveSpec: spy, disableReaper: true, baseRepo: repo.base });
+  const branch = `clanker/kimi-crew-test-${Date.now()}`;
+  try {
+    const { id } = await m.dispatchKimiCrew({ prompt: "implement and review", worktree: branch });
+    assert.equal(capturedLane, "opencode");
+    assert.equal(capturedOpts?.model, "kimi");
+    assert.equal(capturedOpts?.readOnly, false);
+    assert.equal(capturedOpts?.kimiCrew, true);
+    await waitTerminal(m, id);
+  } finally {
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
   }
 });
 

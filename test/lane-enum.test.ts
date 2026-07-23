@@ -38,6 +38,7 @@ test("read-only start tool has no override and forces readOnly even for an extra
   } as unknown as McpServer;
   let received: Record<string, unknown> | undefined;
   let supervisedGlmReceived: Record<string, unknown> | undefined;
+  let crewReceived: Record<string, unknown> | undefined;
   const manager = {
     async dispatchStart(params: Record<string, unknown>) {
       received = params;
@@ -46,6 +47,10 @@ test("read-only start tool has no override and forces readOnly even for an extra
     async dispatchSupervisedGlmWrite(params: Record<string, unknown>) {
       supervisedGlmReceived = params;
       return { id: "glm-write-test", warnings: [] };
+    },
+    async dispatchKimiCrew(params: Record<string, unknown>) {
+      crewReceived = params;
+      return { id: "kimi-crew-test", warnings: ["crew-warning"] };
     },
     async dispatchBlocking(params: Record<string, unknown>) {
       received = params;
@@ -184,4 +189,24 @@ test("read-only start tool has no override and forces readOnly even for an extra
     worktree: "clanker/test-glm-write",
     seat: undefined,
   }, "handler passes only the fixed supervised method's allowed fields");
+
+  const crewTool = tools.get("clanker_dispatch_kimi_crew_start");
+  assert.ok(crewTool, "dedicated Kimi crew tool is registered");
+  assert.deepEqual(Object.keys(crewTool.config.inputSchema).sort(), ["prompt", "worktree"]);
+  const crewSchema = z.object(crewTool.config.inputSchema as z.ZodRawShape);
+  assert.equal(crewSchema.safeParse({ prompt: "", worktree: "clanker/kimi-crew-test" }).success, false);
+  assert.equal(crewSchema.safeParse({ prompt: "implement", worktree: "   " }).success, false);
+  assert.equal(crewSchema.safeParse({ prompt: "implement", worktree: "clanker/kimi-crew-test" }).success, true);
+  const crewResponse = await crewTool.handler({
+    prompt: "implement",
+    worktree: "clanker/kimi-crew-test",
+    lane: "codex",
+    model: "unsafe",
+    read_only: true,
+    agent: "unsafe",
+    seat: true,
+    cwd: "/tmp",
+  });
+  assert.deepEqual(crewReceived, { prompt: "implement", worktree: "clanker/kimi-crew-test" });
+  assert.match(JSON.stringify(crewResponse), /crew-warning/);
 });

@@ -112,6 +112,48 @@ test("opencode write lane keeps worktree-local edit and shell enabled", () => {
   assert.equal(cfg.agent?.["clanker-worker"]?.permission?.external_directory, "deny");
 });
 
+test("OpenCode crew pins Kimi, exact native task allowlist, isolation, and fixed credentials", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-crew-"));
+  const spec = buildSpawnSpec("opencode", { model: "kimi", readOnly: false, kimiCrew: true }, runDir);
+  const cfg = JSON.parse(spec.env.OPENCODE_CONFIG_CONTENT);
+  assert.equal(cfg.model, "kimi-for-coding/k3");
+  assert.equal(cfg.default_agent, "clanker-kimi-crew");
+  assert.deepEqual(Object.keys(cfg.agent), ["clanker-kimi-crew"], "installed child profiles are not copied or overlaid");
+  assert.deepEqual(Object.keys(cfg.agent?.["clanker-kimi-crew"]?.permission?.task), [
+    "*",
+    "worker-glm",
+    "reviewer-deepseek",
+    "oracle",
+  ]);
+  assert.deepEqual(cfg.agent?.["clanker-kimi-crew"]?.permission, {
+    "*_*": "deny",
+    task: {
+      "*": "deny",
+      "worker-glm": "allow",
+      "reviewer-deepseek": "allow",
+      oracle: "allow",
+    },
+    skill: "deny",
+    external_directory: "deny",
+    webfetch: "deny",
+    websearch: "deny",
+    edit: "deny",
+    bash: "allow",
+  });
+  assert.equal(cfg.agent?.["clanker-kimi-crew"]?.permission?.read, undefined, "read remains available");
+  const genericWorkerPermission = cfg.agent?.["clanker-kimi-crew"]?.permission?.task?.["generic-worker"]
+    ?? cfg.agent?.["clanker-kimi-crew"]?.permission?.task?.["*"];
+  assert.equal(genericWorkerPermission, "deny", "the wildcard denies globally discovered generic workers");
+  assert.equal(spec.env.OPENCODE_DISABLE_CLAUDE_CODE, "1");
+  assert.equal(spec.env.OPENCODE_DISABLE_EXTERNAL_SKILLS, "1");
+  assert.deepEqual(cfg, JSON.parse(fs.readFileSync(spec.env.OPENCODE_CONFIG, "utf8")));
+  assert.equal(spec.command, "tachi");
+  assert.deepEqual(spec.args, [
+    "vault", "exec", "--keychain", "--require",
+    "KIMI_API_KEY,ZHIPUAI_API_KEY", "--", "opencode", "acp",
+  ]);
+});
+
 // ---- vault-exec wiring: GLM's bare API key never touches the ambient env -
 
 test("GLM's opencode spawn is wrapped in tachi vault exec, original command intact after --", () => {

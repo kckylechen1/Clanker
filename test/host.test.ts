@@ -70,6 +70,13 @@ test("Claude retains dedicated GLM tool and manager blocks codex before run crea
   await manager.shutdown();
 });
 
+test("Kimi crew tool is present on every host because each exposes opencode", () => {
+  for (const host of ["standalone", "claude", "codex"] as const) {
+    const tools = captureTools({ host });
+    assert.equal(tools.has("clanker_dispatch_kimi_crew_start"), true, `missing on host=${host}`);
+  }
+});
+
 test("manager rejects the codex lane name as a model before backend resolution", async () => {
   let resolves = 0;
   const manager = new LaneManager({

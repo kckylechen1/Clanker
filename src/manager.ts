@@ -173,9 +173,21 @@ export class LaneManager {
     );
   }
 
+  /** Start one fixed Kimi-led OpenCode session in a managed worktree. */
+  async dispatchKimiCrew(
+    params: Pick<DispatchParams, "prompt"> & { worktree: string },
+  ): Promise<{ id: string; warnings: string[] }> {
+    return this.dispatchStartInternal(
+      { ...params, lane: "opencode", model: "kimi", readOnly: false },
+      false,
+      true,
+    );
+  }
+
   private async dispatchStartInternal(
     params: DispatchParams,
     supervisedGlm: boolean,
+    kimiCrew = false,
   ): Promise<{ id: string; warnings: string[] }> {
     if (this.shuttingDown) throw new Error("Clanker manager is shutting down; refusing a new dispatch");
     if (!LANE_NAMES.includes(params.lane)) {
@@ -233,6 +245,7 @@ export class LaneManager {
       readOnly,
       sandbox: params.sandbox,
       agent: params.agent,
+      kimiCrew,
     };
     const spec = this.resolveSpec(params.lane, opts, runDir);
     this.warningsById.set(id, spec.warnings);

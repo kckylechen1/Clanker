@@ -31523,6 +31523,36 @@ function opencodeClankerAgent(readOnly) {
     ].join("\n")
   };
 }
+function opencodeKimiCrewAgent() {
+  return {
+    description: "Kimi Crew lead for one OpenCode-native implementation and review session.",
+    mode: "primary",
+    permission: {
+      "*_*": "deny",
+      task: {
+        "*": "deny",
+        "worker-glm": "allow",
+        "reviewer-deepseek": "allow",
+        oracle: "allow"
+      },
+      skill: "deny",
+      external_directory: "deny",
+      webfetch: "deny",
+      websearch: "deny",
+      edit: "deny",
+      // The lead needs git inspection and direct verification. This is not a
+      // hard read-only profile or shell sandbox: the managed worktree is the
+      // expected cwd, while bash itself remains trusted.
+      bash: "allow"
+    },
+    prompt: [
+      "You are Kimi Crew. Lead the supplied task through the existing OpenCode agent profiles.",
+      "Prefer worker-glm for implementation, use reviewer-deepseek for cold review, and call oracle only when risk or evidence warrants it.",
+      "Use shell access to inspect Git, understand the repository, and verify the integrated result when useful.",
+      "Personally adjudicate the agents' findings, require verification evidence, and return concrete evidence and remaining concerns."
+    ].join("\n")
+  };
+}
 function buildSpawnSpec(lane, opts, runDir) {
   const warnings = [];
   const env = {};
@@ -31564,10 +31594,12 @@ function buildSpawnSpec(lane, opts, runDir) {
       }
       const args = ["acp"];
       const model = resolveOcModel(opts.model);
+      const profile = opts.kimiCrew ? "clanker-kimi-crew" : "clanker-worker";
+      const agent = opts.kimiCrew ? { [profile]: opencodeKimiCrewAgent() } : { [profile]: opencodeClankerAgent(opts.readOnly === true) };
       const config2 = {
         $schema: "https://opencode.ai/config.json",
-        default_agent: "clanker-worker",
-        agent: { "clanker-worker": opencodeClankerAgent(opts.readOnly === true) }
+        default_agent: profile,
+        agent
       };
       if (model) config2.model = model;
       const cfgPath = path3.join(runDir, "opencode-config.json");
@@ -31576,7 +31608,8 @@ function buildSpawnSpec(lane, opts, runDir) {
       env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config2);
       env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
       env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
-      return wrapWithVaultExec({ command: "opencode", args, env, warnings }, opencodeRequiredEnv(opts.model));
+      const requiredEnv = opts.kimiCrew ? ["KIMI_API_KEY", "ZHIPUAI_API_KEY"] : opencodeRequiredEnv(opts.model);
+      return wrapWithVaultExec({ command: "opencode", args, env, warnings }, requiredEnv);
     }
     case "codex": {
       const codexConfig = {
@@ -32270,7 +32303,15 @@ var LaneManager = class {
       true
     );
   }
-  async dispatchStartInternal(params, supervisedGlm) {
+  /** Start one fixed Kimi-led OpenCode session in a managed worktree. */
+  async dispatchKimiCrew(params) {
+    return this.dispatchStartInternal(
+      { ...params, lane: "opencode", model: "kimi", readOnly: false },
+      false,
+      true
+    );
+  }
+  async dispatchStartInternal(params, supervisedGlm, kimiCrew = false) {
     if (this.shuttingDown) throw new Error("Clanker manager is shutting down; refusing a new dispatch");
     if (!LANE_NAMES.includes(params.lane)) {
       throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
@@ -32317,7 +32358,8 @@ var LaneManager = class {
       effort: params.effort,
       readOnly,
       sandbox: params.sandbox,
-      agent: params.agent
+      agent: params.agent,
+      kimiCrew
     };
     const spec = this.resolveSpec(params.lane, opts, runDir);
     this.warningsById.set(id, spec.warnings);
@@ -32887,6 +32929,10 @@ var dispatchOptionsShape = {
 var glmWriteDispatchShape = external_exports.object(dispatchOptionsShape).omit({ model: true, effort: true, read_only: true, sandbox: true, agent: true }).extend({
   worktree: external_exports.string().trim().min(1).describe("Required branch name for the server-created isolated GLM worktree")
 }).shape;
+var kimiCrewDispatchShape = {
+  prompt: external_exports.string().trim().min(1).describe("Task for the fixed Kimi-led OpenCode crew"),
+  worktree: external_exports.string().trim().min(1).describe("Required managed-worktree branch")
+};
 function rejectsUnsupervisedGlmWrite(args) {
   return isGlmModel(args.model) && !(args.read_only ?? false);
 }
@@ -33029,6 +33075,26 @@ function registerTools(server, manager) {
           cwd: args.cwd,
           worktree: args.worktree,
           seat: args.seat
+        });
+        return ok({ id, warnings });
+      } catch (e) {
+        return fail(msg(e));
+      }
+    }
+  );
+  server.registerTool(
+    "clanker_dispatch_kimi_crew_start",
+    {
+      title: "Start one Kimi-led OpenCode crew session",
+      description: "Starts one fixed Kimi/OpenCode ACP session in a managed worktree. OpenCode delegates natively to its existing named agents; poll with clanker_wait.",
+      inputSchema: kimiCrewDispatchShape,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+    },
+    async (args) => {
+      try {
+        const { id, warnings } = await manager.dispatchKimiCrew({
+          prompt: args.prompt,
+          worktree: args.worktree
         });
         return ok({ id, warnings });
       } catch (e) {
