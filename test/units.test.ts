@@ -62,7 +62,7 @@ test("CP3: opencode lane pins the resolved model and dedicated worker in inline 
 test("caller-selected agent profiles are warned and ignored on every lane", () => {
   for (const lane of ["codex", "opencode", "grok"] as const) {
     const runDir = fs.mkdtempSync(path.join(os.tmpdir(), `clanker-${lane}-agent-`));
-    const spec = buildSpawnSpec(lane, { agent: "unsafe-profile" }, runDir);
+    const spec = buildSpawnSpec(lane, { agent: "unsafe-profile", model: lane === "opencode" ? "kimi" : undefined }, runDir);
     assert.ok(
       spec.warnings.includes(
         `lane '${lane}' does not support agent profile override; ignoring agent='unsafe-profile'`,
@@ -78,12 +78,15 @@ test("caller-selected agent profiles are warned and ignored on every lane", () =
 
 test("opencode read-only lane denies delegation, skills, external paths, edits, and shell", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-default-"));
-  const spec = buildSpawnSpec("opencode", { readOnly: true }, runDir);
-  assert.ok(spec.env.OPENCODE_CONFIG, "OPENCODE_CONFIG env is set without a model override");
+  // model is required even for read-only opencode spawns (see "opencode spawn
+  // without an explicit model fails closed" below) so the vault-exec wrap
+  // decision is never left to opencode's own config default.
+  const spec = buildSpawnSpec("opencode", { readOnly: true, model: "kimi" }, runDir);
+  assert.ok(spec.env.OPENCODE_CONFIG, "OPENCODE_CONFIG env is set");
   assert.equal(spec.env.OPENCODE_DISABLE_CLAUDE_CODE, "1");
   assert.equal(spec.env.OPENCODE_DISABLE_EXTERNAL_SKILLS, "1");
   const cfg = JSON.parse(spec.env.OPENCODE_CONFIG_CONTENT);
-  assert.equal(Object.hasOwn(cfg, "model"), false, "the user's normal model resolution remains intact");
+  assert.equal(cfg.model, "kimi-for-coding/k3", "the caller's explicit model is pinned into the config");
   assert.equal(cfg.default_agent, "clanker-worker");
   assert.equal(cfg.agent?.["clanker-worker"]?.mode, "primary");
   assert.deepEqual(cfg.agent?.["clanker-worker"]?.permission, {
@@ -102,11 +105,78 @@ test("opencode read-only lane denies delegation, skills, external paths, edits, 
 
 test("opencode write lane keeps worktree-local edit and shell enabled", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-write-"));
-  const spec = buildSpawnSpec("opencode", { readOnly: false }, runDir);
+  const spec = buildSpawnSpec("opencode", { readOnly: false, model: "kimi" }, runDir);
   const cfg = JSON.parse(spec.env.OPENCODE_CONFIG_CONTENT);
   assert.equal(cfg.agent?.["clanker-worker"]?.permission?.edit, "allow");
   assert.equal(cfg.agent?.["clanker-worker"]?.permission?.bash, "allow");
   assert.equal(cfg.agent?.["clanker-worker"]?.permission?.external_directory, "deny");
+});
+
+// ---- vault-exec wiring: GLM's bare API key never touches the ambient env -
+
+test("GLM's opencode spawn is wrapped in tachi vault exec, original command intact after --", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-glm-vault-"));
+  const spec = buildSpawnSpec("opencode", { model: "glm" }, runDir);
+  assert.equal(spec.command, "tachi");
+  assert.equal(spec.args[0], "vault");
+  assert.equal(spec.args[1], "exec");
+  assert.equal(spec.args[2], "--keychain");
+  assert.equal(spec.args[3], "--require");
+  assert.equal(spec.args[4], "ZHIPUAI_API_KEY");
+  assert.equal(spec.args[5], "--");
+  // Everything the un-wrapped opencode lane would have spawned (command +
+  // args) survives intact after the `--` separator, byte-for-byte.
+  assert.deepEqual(spec.args.slice(6), ["opencode", "acp"]);
+  // env (OPENCODE_CONFIG/_CONTENT etc.) is untouched by the wrap — `tachi vault
+  // exec` inherits it and injects only the vaulted var into the child.
+  assert.ok(spec.env.OPENCODE_CONFIG_CONTENT, "opencode config env survives the wrap");
+});
+
+test("GLM full model id (not just the 'glm' shortname) also triggers the vault wrap", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-glm-full-"));
+  const spec = buildSpawnSpec("opencode", { model: "zhipuai-coding-plan/glm-5.2" }, runDir);
+  assert.equal(spec.command, "tachi");
+  assert.deepEqual(spec.args.slice(0, 6), ["vault", "exec", "--keychain", "--require", "ZHIPUAI_API_KEY", "--"]);
+});
+
+test("non-GLM opencode models spawn unwrapped, byte-identical to a bare opencode lane", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-nonglm-"));
+  for (const model of ["kimi", "ds", "composer", "anthropic/claude"]) {
+    const spec = buildSpawnSpec("opencode", { model }, runDir);
+    assert.equal(spec.command, "opencode", `model='${model}' must not be routed through vault exec`);
+    assert.deepEqual(spec.args, ["acp"]);
+  }
+});
+
+// Regression for the fail-open credential bypass: an omitted opencode model
+// made opencodeRequiredEnv() return [], so wrapWithVaultExec became a no-op,
+// while the actual model was decided by opencode's own config default
+// (possibly GLM) — running a key-bearing lane outside the vault-exec wrap.
+// Found by codex cold review (run codex-2db38).
+test("opencode spawn without an explicit model fails closed", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-no-model-"));
+  assert.throws(
+    () => buildSpawnSpec("opencode", { readOnly: true }, runDir),
+    /opencode lane requires an explicit model id/,
+    "read-only omission must fail closed, not silently bypass the vault wrap",
+  );
+  assert.throws(
+    () => buildSpawnSpec("opencode", { readOnly: false }, runDir),
+    /opencode lane requires an explicit model id/,
+  );
+  assert.throws(
+    () => buildSpawnSpec("opencode", { model: "   " }, runDir),
+    /opencode lane requires an explicit model id/,
+    "a blank/whitespace-only model must not slip through as 'provided'",
+  );
+});
+
+test("codex and grok lanes declare no required env and spawn unwrapped", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oauth-lanes-"));
+  const codexSpec = buildSpawnSpec("codex", {}, runDir);
+  assert.equal(codexSpec.command, process.execPath, "codex spawn command unchanged by vault-exec wiring");
+  const grokSpec = buildSpawnSpec("grok", { readOnly: true }, runDir);
+  assert.equal(grokSpec.command, "grok", "grok spawn command unchanged by vault-exec wiring");
 });
 
 // ---- grok process-local containment -------------------------------------
@@ -189,7 +259,7 @@ test("grok/opencode warn and ignore the codex-only sandbox override", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-sandbox-"));
   const grokSpec = buildSpawnSpec("grok", { sandbox: "workspace-write" }, runDir);
   assert.ok(grokSpec.warnings.some((w) => /sandbox/.test(w)), `expected a sandbox warning, got ${JSON.stringify(grokSpec.warnings)}`);
-  const ocSpec = buildSpawnSpec("opencode", { sandbox: "workspace-write" }, runDir);
+  const ocSpec = buildSpawnSpec("opencode", { sandbox: "workspace-write", model: "kimi" }, runDir);
   assert.ok(ocSpec.warnings.some((w) => /sandbox/.test(w)), `expected a sandbox warning, got ${JSON.stringify(ocSpec.warnings)}`);
 });
 

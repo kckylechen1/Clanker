@@ -68,6 +68,18 @@ test("read-only start tool has no override and forces readOnly even for an extra
   assert.equal(received?.readOnly, true, "handler override wins even if a raw caller injects read_only=false");
   assert.equal(received?.sandbox, undefined, "handler drops a raw write-capable sandbox injection");
 
+  // Regression: an omitted opencode model let opencode's own config default
+  // (possibly GLM) run outside the vault-exec credential wrap. read_only was
+  // exactly the path that skipped both the old manager-level write-only model
+  // check and buildSpawnSpec's own vault-wrap decision.
+  const beforeMissingReadonlyModel: Record<string, unknown> | undefined = received;
+  const missingReadonlyModel = await tool.handler({
+    lane: "opencode",
+    prompt: "inspect only",
+  });
+  assert.equal(received, beforeMissingReadonlyModel, "read-only opencode dispatch without a model must not reach the manager");
+  assert.match(JSON.stringify(missingReadonlyModel), /explicit model is required for read-only opencode dispatch/);
+
   const writeTool = tools.get("clanker_dispatch_write_start");
   assert.ok(writeTool, "isolated write start tool is registered");
   assert.equal(Object.hasOwn(writeTool.config.inputSchema, "read_only"), false);
