@@ -212,11 +212,15 @@ export class LaneManager {
     // what silently polluted an unrelated primary checkout: the worker was told
     // its cwd was a worktree of the wrong repo, couldn't find the target repo's
     // files there, and fell back to absolute paths into the target's primary
-    // checkout. When an isolating dispatch carries a cwd, resolve its repo and
-    // fail LOUDLY if that cwd is not inside a git work tree (resolveTargetRepo);
-    // only when no cwd is given do we fall back to the host baseRepo.
+    // checkout. Whenever a worktree dispatch carries a cwd — read-only or write;
+    // the wrong-repo cut is identical either way — resolve its repo and fail
+    // LOUDLY if that cwd is not inside a git work tree (resolveTargetRepo). Only
+    // when no cwd is given do we fall back to the host baseRepo (the legitimate
+    // "cut from my own repo" default). This condition MUST stay aligned with the
+    // `if (params.worktree)` creation guard below, or a path that creates a
+    // worktree without resolving targetRepo silently cuts from the host again.
     let targetRepo = path.resolve(this.baseRepo);
-    if (requiresIsolation && params.worktree && params.cwd) {
+    if (params.worktree && params.cwd) {
       targetRepo = await resolveTargetRepo(params.cwd);
     }
 
@@ -728,16 +732,41 @@ function errMessage(e: unknown): string {
 }
 
 /**
+ * Resolve symlinks in a path that may not exist yet: realpath the deepest
+ * ancestor that DOES exist, then re-append the not-yet-created tail. A bare
+ * `path.resolve` leaves symlinks unresolved, so a WORKTREES_ROOT that is a
+ * symlink pointing inside the target repo would pass a literal-string overlap
+ * check while git still lands the worktree inside the checkout (#12 hardening).
+ */
+function realpathBestEffort(p: string): string {
+  let cur = path.resolve(p);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync(cur);
+      return tail.length ? path.join(real, ...tail) : real;
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return path.resolve(p); // reached the root; nothing resolved
+      tail.unshift(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+/**
  * Enforce the target-aware isolation invariant (#12): the worktree a write
  * dispatch runs in must be a distinct path from the target repo's primary
  * checkout — never equal to it, inside it, or containing it. Under normal
  * config (WORKTREES_ROOT under ~/.cache) this always holds; the guard exists to
  * reject a misconfiguration that would route writes back onto the checkout the
- * isolation is meant to protect.
+ * isolation is meant to protect. Both sides are realpath-resolved first so a
+ * symlinked WORKTREES_ROOT cannot slip a worktree inside the repo undetected.
+ * Exported for a direct unit test.
  */
-function assertWorktreeOutsideRepo(worktreePath: string, targetRepo: string): void {
-  const wt = path.resolve(worktreePath);
-  const repo = path.resolve(targetRepo);
+export function assertWorktreeOutsideRepo(worktreePath: string, targetRepo: string): void {
+  const wt = realpathBestEffort(worktreePath);
+  const repo = realpathBestEffort(targetRepo);
   if (wt === repo || wt.startsWith(repo + path.sep) || repo.startsWith(wt + path.sep)) {
     throw new Error(
       `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; ` +

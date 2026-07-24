@@ -32491,7 +32491,7 @@ var LaneManager = class {
       );
     }
     let targetRepo = path7.resolve(this.baseRepo);
-    if (requiresIsolation && params.worktree && params.cwd) {
+    if (params.worktree && params.cwd) {
       targetRepo = await resolveTargetRepo(params.cwd);
     }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
@@ -32950,9 +32950,24 @@ var LaneManager = class {
 function errMessage(e) {
   return e instanceof Error ? e.message : String(e);
 }
+function realpathBestEffort(p) {
+  let cur = path7.resolve(p);
+  const tail = [];
+  for (; ; ) {
+    try {
+      const real = fs6.realpathSync(cur);
+      return tail.length ? path7.join(real, ...tail) : real;
+    } catch {
+      const parent = path7.dirname(cur);
+      if (parent === cur) return path7.resolve(p);
+      tail.unshift(path7.basename(cur));
+      cur = parent;
+    }
+  }
+}
 function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
-  const wt = path7.resolve(worktreePath);
-  const repo = path7.resolve(targetRepo);
+  const wt = realpathBestEffort(worktreePath);
+  const repo = realpathBestEffort(targetRepo);
   if (wt === repo || wt.startsWith(repo + path7.sep) || repo.startsWith(wt + path7.sep)) {
     throw new Error(
       `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT outside the repo)`

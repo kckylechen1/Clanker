@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { changedFiles, createWorktree, isGitWorkTree, removeIfClean } from "../src/worktree.js";
+import { changedFiles, createWorktree, isGitWorkTree, removeIfClean, resolveTargetRepo } from "../src/worktree.js";
 
 function git(cwd: string, args: string[]): void {
   execFileSync("git", args, {
@@ -93,4 +93,26 @@ test("#12: createWorktree cuts a no-remote repo from local HEAD (not hardcoded o
   // Cleanup runs against the SOURCE repo (targetRepo), never a hardcoded host.
   execFileSync("git", ["-C", repo, "worktree", "remove", "--force", wtPath]);
   fs.rmSync(repo, { recursive: true, force: true });
+});
+
+test("#12: resolveTargetRepo returns the repo toplevel and throws loudly outside a work tree", async () => {
+  const base = makeBaseRepo(); // a real git work tree
+  assert.equal(
+    fs.realpathSync(await resolveTargetRepo(base)),
+    fs.realpathSync(base),
+    "resolves cwd at the repo root to the toplevel",
+  );
+  // A subdirectory inside the repo still resolves to the toplevel.
+  const sub = path.join(base, "sub");
+  fs.mkdirSync(sub);
+  assert.equal(
+    fs.realpathSync(await resolveTargetRepo(sub)),
+    fs.realpathSync(base),
+    "resolves a subdir to the repo toplevel",
+  );
+  // A real directory that is not a git work tree throws loudly rather than
+  // silently returning a host fallback.
+  const nonRepo = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-nonrepo-"));
+  await assert.rejects(() => resolveTargetRepo(nonRepo), /not inside a git work tree/);
+  fs.rmSync(nonRepo, { recursive: true, force: true });
 });
