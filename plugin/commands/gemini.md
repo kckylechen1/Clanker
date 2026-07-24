@@ -4,4 +4,4 @@ argument-hint: "<research task>"
 allowed-tools: Agent
 ---
 
-Dispatch exactly one `Agent(subagent_type="clanker:clanker")` with `lane: "gemini"` and the request. Gemini is server-forced read-only; do not request a worktree or non-worker profile.
+Dispatch exactly one `Agent(subagent_type="clanker:gemini")` with the research request. That seat holds only the `gemini-recon` profile's start tool, which is server-forced read-only; there is no lane, read_only, sandbox, model or worktree parameter to pass, so do not request a worktree or a non-worker profile.
