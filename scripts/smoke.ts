@@ -7,7 +7,7 @@
  * Two modes:
  *
  *   npm run smoke
- *     Full regression battery: all 3 lanes, "Reply DONE", ~120s budget/lane
+ *     Full regression battery: all 4 lanes, "Reply DONE", ~120s budget/lane
  *     (default). Exit code 1 if any lane fails.
  *
  *   npm run smoke -- <lane> [model]
@@ -126,9 +126,9 @@ async function runCanary(lane: LaneName, model: string | undefined): Promise<voi
   process.exitCode = r.ok ? 0 : 1;
 }
 
-/** Full 3-lane regression sweep — `npm run smoke` with no args. */
+/** Full 4-lane regression sweep — `npm run smoke` with no args. */
 async function runFullBattery(): Promise<void> {
-  const backends: LaneName[] = ["codex", "opencode", "grok"];
+  const backends: LaneName[] = ["codex", "opencode", "grok", "gemini"];
   const rows: Row[] = [];
   for (const lane of backends) {
     process.stderr.write(`\n[smoke] ${lane}: dispatching read-only micro prompt...\n`);

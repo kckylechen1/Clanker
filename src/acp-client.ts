@@ -83,25 +83,14 @@ export interface LaneConnectionOptions {
   terminateGraceMs?: number;
   /** Cancels a subprocess that is still completing the ACP handshake. */
   signal?: AbortSignal;
-  /**
-   * When set, reconnect to this existing ACP session id via `session/resume`
-   * instead of creating a fresh one via `session/new`. Used to respawn a
-   * seat's subprocess after the idle-TTL reaper (or an out-of-band process
-   * death) killed it, without losing the backend's own conversation state
-   * (e.g. opencode's persisted session store) — see manager.ts
-   * resumeConnection. Only meaningful for a lane whose agent advertises the
-   * `session/resume` capability (verified: opencode); other lanes will
-   * surface a JSON-RPC error from the agent, which propagates as a rejected
-   * connect().
-   */
-  resumeSessionId?: string;
 }
 
 /**
  * A live ACP connection to one lane subprocess.
  *
- * The connection stays open across multiple prompt turns (G1c persistent
- * session). Call `close()` to dispose the session and kill the subprocess.
+ * The connection stays open until the job is cancelled, closed after its idle
+ * TTL, or the manager shuts down. `close()` disposes the session and kills the
+ * subprocess.
  */
 export class LaneConnection {
   readonly session: ActiveSession;
@@ -192,7 +181,7 @@ export class LaneConnection {
    * spawn fails, or the handshake exceeds `handshakeTimeoutMs`.
    */
   static async connect(options: LaneConnectionOptions): Promise<LaneConnection> {
-    const { spec, cwd, readOnly, onFileWritten, resumeSessionId } = options;
+    const { spec, cwd, readOnly, onFileWritten } = options;
     const handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
 
     // The MCP server is often launched with an absolute node path but a minimal
@@ -320,9 +309,7 @@ export class LaneConnection {
           protocolVersion: acp.PROTOCOL_VERSION,
           clientCapabilities: { fs: { readTextFile: true, writeTextFile: !readOnly } },
         });
-        const session = resumeSessionId
-          ? await resumeSession(ctx, resumeSessionId, cwd)
-          : await ctx.buildSession(cwd).start();
+        const session = await ctx.buildSession(cwd).start();
         if (aborted) return;
         const conn = new LaneConnection(session, child, ctx, shutdown, exited.promise, () => stderrTail,
           options.terminateGraceMs ?? PROCESS_TERM_GRACE_MS);
@@ -337,12 +324,9 @@ export class LaneConnection {
       })
       .catch((e) => {
         if (!resolvedReady) {
-          // A rejection here (e.g. initialize/session-resume/session-new
-          // itself failing at the JSON-RPC level, not a process crash) means
-          // the subprocess is still alive with its stdio pipes open — kill
-          // it, or it leaks forever and keeps the parent's event loop alive
-          // waiting on those pipes (found via a real hang: a rejected
-          // session/resume never terminated its fake-agent child).
+          // A JSON-RPC handshake rejection can leave the subprocess alive
+          // with stdio pipes open. Kill it so the parent's event loop cannot
+          // leak a failed backend connection.
           if (!child.killed) child.kill("SIGKILL");
           ready.reject(e);
         }
@@ -399,40 +383,4 @@ export function writeContainedTextFile(target: string, requested: string, conten
   } finally {
     fs.closeSync(fd);
   }
-}
-
-/**
- * Reconnect to a previously created ACP session by id via `session/resume`,
- * returning an `ActiveSession` usable exactly like the one `buildSession(...)
- * .start()` returns.
- *
- * `session/resume` (unlike `session/load`) resumes the backend's session
- * context without replaying prior message history back to us as
- * `session/update` notifications — the right primitive here since we're
- * respawning a dead subprocess and only care that the NEXT turn continues
- * the same conversation, not about re-ingesting history we already digested
- * once.
- *
- * `@agentclientprotocol/sdk` 1.1.0's public `ClientContext` has no
- * loadSession/resumeSession -> `ActiveSession` bridge: `ActiveSession`
- * objects are only ever built by the private `attachSession(response)`
- * method, which `SessionBuilder.start()` (session/new) calls internally.
- * `ResumeSessionResponse` omits `sessionId` (the caller already supplied it
- * in the request), so we synthesize a `NewSessionResponse`-shaped object
- * carrying the id we already have and reuse `attachSession` via a runtime
- * cast — verified against the installed SDK source (dist/acp.js):
- * `attachSession` is a plain instance method, not a `#`-private field, and
- * `SessionUpdateRouter.attach(response, updates)` only ever reads
- * `response.sessionId` off the object it's given.
- */
-async function resumeSession(ctx: acp.ClientContext, sessionId: string, cwd: string): Promise<ActiveSession> {
-  const resumed = await ctx.request(acp.methods.agent.session.resume, { sessionId, cwd });
-  const synthetic: acp.NewSessionResponse = {
-    sessionId,
-    modes: resumed.modes,
-    configOptions: resumed.configOptions,
-    _meta: resumed._meta,
-  };
-  const attach = ctx as unknown as { attachSession(response: acp.NewSessionResponse): ActiveSession };
-  return attach.attachSession(synthetic);
 }

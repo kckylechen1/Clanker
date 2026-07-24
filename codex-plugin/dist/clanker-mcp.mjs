@@ -1204,13 +1204,13 @@ var require_util = __commonJS({
       return jsPropertySyntax ? (0, codegen_1.getProperty)(dataProp).toString() : "/" + escapeJsonPointer(dataProp);
     }
     exports.getErrorPath = getErrorPath;
-    function checkStrictMode(it, msg2, mode = it.opts.strictSchema) {
+    function checkStrictMode(it, msg, mode = it.opts.strictSchema) {
       if (!mode)
         return;
-      msg2 = `strict mode: ${msg2}`;
+      msg = `strict mode: ${msg}`;
       if (mode === true)
-        throw new Error(msg2);
-      it.self.logger.warn(msg2);
+        throw new Error(msg);
+      it.self.logger.warn(msg);
     }
     exports.checkStrictMode = checkStrictMode;
   }
@@ -1942,11 +1942,11 @@ var require_keyword = __commonJS({
       if (def.validateSchema) {
         const valid = def.validateSchema(schema[keyword]);
         if (!valid) {
-          const msg2 = `keyword "${keyword}" value is invalid at path "${errSchemaPath}": ` + self.errorsText(def.validateSchema.errors);
+          const msg = `keyword "${keyword}" value is invalid at path "${errSchemaPath}": ` + self.errorsText(def.validateSchema.errors);
           if (opts.validateSchema === "log")
-            self.logger.error(msg2);
+            self.logger.error(msg);
           else
-            throw new Error(msg2);
+            throw new Error(msg);
         }
       }
     }
@@ -2465,13 +2465,13 @@ var require_validate = __commonJS({
         throw new Error("async schema in sync schema");
     }
     function commentKeyword({ gen, schemaEnv, schema, errSchemaPath, opts }) {
-      const msg2 = schema.$comment;
+      const msg = schema.$comment;
       if (opts.$comment === true) {
-        gen.code((0, codegen_1._)`${names_1.default.self}.logger.log(${msg2})`);
+        gen.code((0, codegen_1._)`${names_1.default.self}.logger.log(${msg})`);
       } else if (typeof opts.$comment == "function") {
         const schemaPath = (0, codegen_1.str)`${errSchemaPath}/$comment`;
         const rootName = gen.scopeValue("root", { ref: schemaEnv.root });
-        gen.code((0, codegen_1._)`${names_1.default.self}.opts.$comment(${msg2}, ${schemaPath}, ${rootName}.schema)`);
+        gen.code((0, codegen_1._)`${names_1.default.self}.opts.$comment(${msg}, ${schemaPath}, ${rootName}.schema)`);
       }
     }
     function returnResults(it) {
@@ -2590,10 +2590,10 @@ var require_validate = __commonJS({
       }
       it.dataTypes = ts;
     }
-    function strictTypesError(it, msg2) {
+    function strictTypesError(it, msg) {
       const schemaPath = it.schemaEnv.baseId + it.errSchemaPath;
-      msg2 += ` at "${schemaPath}" (strictTypes)`;
-      (0, util_1.checkStrictMode)(it, msg2, it.opts.strictTypes);
+      msg += ` at "${schemaPath}" (strictTypes)`;
+      (0, util_1.checkStrictMode)(it, msg, it.opts.strictTypes);
     }
     var KeywordCxt = class {
       constructor(it, def, keyword) {
@@ -2847,8 +2847,8 @@ var require_ref_error = __commonJS({
     Object.defineProperty(exports, "__esModule", { value: true });
     var resolve_1 = require_resolve();
     var MissingRefError = class extends Error {
-      constructor(resolver, baseId, ref, msg2) {
-        super(msg2 || `can't resolve reference ${ref} from id ${baseId}`);
+      constructor(resolver, baseId, ref, msg) {
+        super(msg || `can't resolve reference ${ref} from id ${baseId}`);
         this.missingRef = (0, resolve_1.resolveUrl)(resolver, baseId, ref);
         this.missingSchema = (0, resolve_1.normalizeId)((0, resolve_1.getFullPath)(resolver, this.missingRef));
       }
@@ -4312,7 +4312,7 @@ var require_core = __commonJS({
       errorsText(errors = this.errors, { separator = ", ", dataVar = "data" } = {}) {
         if (!errors || errors.length === 0)
           return "No errors";
-        return errors.map((e) => `${dataVar}${e.instancePath} ${e.message}`).reduce((text, msg2) => text + separator + msg2);
+        return errors.map((e) => `${dataVar}${e.instancePath} ${e.message}`).reduce((text, msg) => text + separator + msg);
       }
       $dataMetaSchema(metaSchema, keywordsJsonPointers) {
         const rules = this.RULES.all;
@@ -4401,11 +4401,11 @@ var require_core = __commonJS({
     Ajv2.ValidationError = validation_error_1.default;
     Ajv2.MissingRefError = ref_error_1.default;
     exports.default = Ajv2;
-    function checkOptions(checkOpts, options, msg2, log = "error") {
+    function checkOptions(checkOpts, options, msg, log = "error") {
       for (const key in checkOpts) {
         const opt = key;
         if (opt in options)
-          this.logger[log](`${msg2}: option ${key}. ${checkOpts[opt]}`);
+          this.logger[log](`${msg}: option ${key}. ${checkOpts[opt]}`);
       }
     }
     function getSchEnv(keyRef) {
@@ -4907,8 +4907,8 @@ var require_required = __commonJS({
           for (const requiredKey of schema) {
             if ((props === null || props === void 0 ? void 0 : props[requiredKey]) === void 0 && !definedProperties.has(requiredKey)) {
               const schemaPath = it.schemaEnv.baseId + it.errSchemaPath;
-              const msg2 = `required property "${requiredKey}" is not defined at "${schemaPath}" (strictRequired)`;
-              (0, util_1.checkStrictMode)(it, msg2, it.opts.strictRequired);
+              const msg = `required property "${requiredKey}" is not defined at "${schemaPath}" (strictRequired)`;
+              (0, util_1.checkStrictMode)(it, msg, it.opts.strictRequired);
             }
           }
         }
@@ -5278,8 +5278,8 @@ var require_items = __commonJS({
         const l = schArr.length;
         const fullTuple = l === sch.minItems && (l === sch.maxItems || sch[extraItems] === false);
         if (opts.strictTuples && !fullTuple) {
-          const msg2 = `"${keyword}" is ${l}-tuple, but minItems or maxItems/${extraItems} are not specified or different at path "${errSchemaPath}"`;
-          (0, util_1.checkStrictMode)(it, msg2, opts.strictTuples);
+          const msg = `"${keyword}" is ${l}-tuple, but minItems or maxItems/${extraItems} are not specified or different at path "${errSchemaPath}"`;
+          (0, util_1.checkStrictMode)(it, msg, opts.strictTuples);
         }
       }
     }
@@ -27760,7 +27760,7 @@ var RUNS_ROOT = process.env.CLANKER_RUNS_ROOT ?? path.join(os.homedir(), ".cache
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.2.5";
+var SERVER_VERSION = "0.3.0";
 var OC_MODEL_ALIASES = {
   glm: "zhipuai-coding-plan/glm-5.2",
   ds: "deepseek/deepseek-v4-pro",
@@ -31248,7 +31248,7 @@ var LaneConnection = class _LaneConnection {
    * spawn fails, or the handshake exceeds `handshakeTimeoutMs`.
    */
   static async connect(options) {
-    const { spec, cwd, readOnly, onFileWritten, resumeSessionId } = options;
+    const { spec, cwd, readOnly, onFileWritten } = options;
     const handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
     if (cwd && !fs.existsSync(cwd)) {
       throw new Error(
@@ -31355,7 +31355,7 @@ var LaneConnection = class _LaneConnection {
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: { fs: { readTextFile: true, writeTextFile: !readOnly } }
       });
-      const session = resumeSessionId ? await resumeSession(ctx, resumeSessionId, cwd) : await ctx.buildSession(cwd).start();
+      const session = await ctx.buildSession(cwd).start();
       if (aborted2) return;
       const conn = new _LaneConnection(
         session,
@@ -31424,21 +31424,11 @@ function writeContainedTextFile(target, requested, content) {
     fs.closeSync(fd);
   }
 }
-async function resumeSession(ctx, sessionId, cwd) {
-  const resumed = await ctx.request(methods.agent.session.resume, { sessionId, cwd });
-  const synthetic = {
-    sessionId,
-    modes: resumed.modes,
-    configOptions: resumed.configOptions,
-    _meta: resumed._meta
-  };
-  const attach = ctx;
-  return attach.attachSession(synthetic);
-}
 
 // src/backends.ts
 import fs2 from "node:fs";
 import { createRequire } from "node:module";
+import os2 from "node:os";
 import path3 from "node:path";
 import { fileURLToPath } from "node:url";
 var nodeRequire = createRequire(import.meta.url);
@@ -31447,6 +31437,29 @@ function resolveCodexAcpEntry() {
   if (fs2.existsSync(packagedEntry)) return packagedEntry;
   const pkgJsonPath = nodeRequire.resolve("@agentclientprotocol/codex-acp/package.json");
   return path3.join(path3.dirname(pkgJsonPath), "dist", "index.js");
+}
+function resolveGeminiAcpEntry() {
+  const candidates = [
+    fileURLToPath(new URL("./gemini-acp.mjs", import.meta.url)),
+    fileURLToPath(new URL("./gemini-acp.js", import.meta.url)),
+    fileURLToPath(new URL("../plugin/dist/gemini-acp.mjs", import.meta.url))
+  ];
+  const entry = candidates.find((candidate) => fs2.existsSync(candidate));
+  if (entry) return entry;
+  throw new Error("Gemini ACP sidecar is missing; run `npm run bundle` before dispatching Clanker: Gemini");
+}
+function isGeminiModel(model) {
+  return model.trim().toLowerCase().startsWith("gemini-");
+}
+function requireGeminiWorkspaceSandbox() {
+  if (process.platform !== "darwin") {
+    throw new Error("Clanker: Gemini currently requires macOS sandbox-exec for a fail-closed workspace read-only boundary");
+  }
+  try {
+    fs2.accessSync("/usr/bin/sandbox-exec", fs2.constants.X_OK);
+  } catch {
+    throw new Error("Clanker: Gemini requires executable /usr/bin/sandbox-exec for a fail-closed workspace read-only boundary");
+  }
 }
 function resolveSystemCodexPath() {
   const searchPath = process.env.PATH ?? "";
@@ -31461,30 +31474,26 @@ function resolveSystemCodexPath() {
   }
   return "codex";
 }
+function resolveSystemAgyPath() {
+  const candidates = [
+    ...(process.env.PATH ?? "").split(path3.delimiter).filter(Boolean).map((dir) => path3.join(dir, "agy")),
+    path3.join(os2.homedir(), ".local", "bin", "agy")
+  ];
+  for (const candidate of candidates) {
+    try {
+      fs2.accessSync(candidate, fs2.constants.X_OK);
+      return candidate;
+    } catch {
+    }
+  }
+  return "agy";
+}
 var CAPS = {
-  codex: { model: true, effort: true, sandbox: true, agent: false },
-  // opencode's `agent` capability is retired as of the clanker-worker isolation
-  // fix below: the worker's identity and permission set are fixed by Clanker,
-  // not caller-selectable, so a caller-supplied `opts.agent` now just warns
-  // (see the file header MERGE NOTE for why this couldn't be a silent merge).
-  opencode: { model: true, effort: false, sandbox: false, agent: false },
-  grok: { model: true, effort: true, sandbox: false, agent: false }
+  codex: { model: true, effort: true, sandbox: true },
+  opencode: { model: true, effort: false, sandbox: false },
+  grok: { model: true, effort: true, sandbox: false },
+  gemini: { model: true, effort: true, sandbox: false }
 };
-var REQUIRED_ENV = {
-  codex: [],
-  grok: []
-};
-function opencodeRequiredEnv(model) {
-  return isGlmModel(model) ? ["ZHIPUAI_API_KEY"] : [];
-}
-function wrapWithVaultExec(spec, requiredEnv) {
-  if (requiredEnv.length === 0) return spec;
-  return {
-    ...spec,
-    command: "tachi",
-    args: ["vault", "exec", "--keychain", "--require", requiredEnv.join(","), "--", spec.command, ...spec.args]
-  };
-}
 var SANDBOX_TO_AGENT_MODE = {
   "read-only": "read-only",
   "workspace-write": "agent",
@@ -31536,10 +31545,26 @@ function buildSpawnSpec(lane, opts, runDir) {
   if (opts.sandbox && !caps.sandbox) {
     warnings.push(`lane '${lane}' does not support sandbox override; ignoring sandbox='${opts.sandbox}'`);
   }
-  if (opts.agent && !caps.agent) {
-    warnings.push(`lane '${lane}' does not support agent profile override; ignoring agent='${opts.agent}'`);
-  }
   switch (lane) {
+    case "gemini": {
+      if (opts.readOnly !== true) {
+        throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
+      }
+      requireGeminiWorkspaceSandbox();
+      const model = opts.model?.trim() || "gemini-3.6-flash-medium";
+      if (!isGeminiModel(model)) {
+        throw new Error(`Clanker: Gemini requires a Gemini model id; received '${model}'`);
+      }
+      const effort = opts.effort?.trim();
+      if (effort && effort !== "medium" && effort !== "high") {
+        throw new Error(`Clanker: Gemini effort must be 'medium' or 'high'; received '${effort}'`);
+      }
+      env.CLANKER_AGY_PATH = process.env.CLANKER_AGY_PATH ?? resolveSystemAgyPath();
+      env.CLANKER_GEMINI_MODEL = model;
+      env.CLANKER_GEMINI_PRINT_TIMEOUT = process.env.CLANKER_GEMINI_PRINT_TIMEOUT ?? "3m";
+      if (effort) env.CLANKER_GEMINI_EFFORT = effort;
+      return { command: process.execPath, args: [resolveGeminiAcpEntry()], env, warnings };
+    }
     case "grok": {
       const args = [
         "--sandbox",
@@ -31554,29 +31579,32 @@ function buildSpawnSpec(lane, opts, runDir) {
       ];
       if (opts.effort) args.push("--reasoning-effort", opts.effort);
       args.push("stdio");
-      return wrapWithVaultExec({ command: "grok", args, env, warnings }, REQUIRED_ENV.grok);
+      return { command: "grok", args, env, warnings };
     }
     case "opencode": {
       if (!opts.model?.trim()) {
         throw new Error(
-          "opencode lane requires an explicit model id \u2014 omitting it would let opencode's own config default (possibly GLM) run outside the vault-exec credential wrap"
+          "opencode lane requires an explicit model id \u2014 omitting it would let OpenCode's interactive default choose a different model"
         );
       }
       const args = ["acp"];
       const model = resolveOcModel(opts.model);
+      const profile = opts.profile === "kimi-crew" ? "kimi-crew" : "clanker-worker";
       const config2 = {
         $schema: "https://opencode.ai/config.json",
-        default_agent: "clanker-worker",
-        agent: { "clanker-worker": opencodeClankerAgent(opts.readOnly === true) }
+        default_agent: profile
       };
+      if (opts.profile !== "kimi-crew") config2.agent = { [profile]: opencodeClankerAgent(opts.readOnly === true) };
       if (model) config2.model = model;
       const cfgPath = path3.join(runDir, "opencode-config.json");
       fs2.writeFileSync(cfgPath, JSON.stringify(config2, null, 2));
       env.OPENCODE_CONFIG = cfgPath;
       env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config2);
-      env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
-      env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
-      return wrapWithVaultExec({ command: "opencode", args, env, warnings }, opencodeRequiredEnv(opts.model));
+      if (opts.profile !== "kimi-crew") {
+        env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
+        env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
+      }
+      return { command: "opencode", args, env, warnings };
     }
     case "codex": {
       const codexConfig = {
@@ -31588,10 +31616,7 @@ function buildSpawnSpec(lane, opts, runDir) {
       const agentMode = opts.sandbox ? SANDBOX_TO_AGENT_MODE[opts.sandbox] ?? (opts.readOnly ? "read-only" : "agent") : opts.readOnly ? "read-only" : "agent";
       env.INITIAL_AGENT_MODE = agentMode;
       env.CODEX_PATH = resolveSystemCodexPath();
-      return wrapWithVaultExec(
-        { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings },
-        REQUIRED_ENV.codex
-      );
+      return { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings };
     }
   }
 }
@@ -31642,18 +31667,6 @@ var LaneRun = class {
   readOnly;
   runDir;
   createdAt = Date.now();
-  /**
-   * True for a persistent seat (clanker_dispatch_start seat=true). Seats are
-   * exempt from the idle-TTL reaper's terminal close(): reap() only kills the
-   * subprocess, leaving `sessionClosed` false so clanker_prompt can respawn +
-   * session/resume the same ACP session (see LaneManager.resumeConnection).
-   */
-  seat;
-  /**
-   * The exact LaneRequestOptions the spec resolver was originally called
-   * with — retained so a seat can be respawned with an identical spec
-   * (model/agent/sandbox/readOnly) after its subprocess dies.
-   */
   requestOpts;
   turnStatus = "running";
   turnsCount = 0;
@@ -31702,7 +31715,6 @@ var LaneRun = class {
     this.readOnly = init.readOnly;
     this.worktreeBranch = init.worktreeBranch;
     this.worktreePath = init.worktreePath;
-    this.seat = init.seat ?? false;
     this.requestOpts = init.requestOpts ?? {};
   }
   // ---- lifecycle ----------------------------------------------------------
@@ -31780,10 +31792,11 @@ var LaneRun = class {
     this.touch("turn_cancelled");
     this.markTerminal("cancelled");
   }
-  markClosed() {
-    this.sessionClosed = true;
+  async markClosed() {
+    if (this.sessionClosed) return;
     this.writeEvent({ t: "session_closed" });
-    this.closeStreams();
+    await this.closeStreamsAndWait();
+    this.sessionClosed = true;
     this.touch("session_closed");
   }
   // ---- event ingestion ----------------------------------------------------
@@ -32001,7 +32014,6 @@ var LaneRun = class {
       backend: this.lane,
       read_only: this.readOnly,
       sandbox: this.requestOpts.sandbox,
-      seat: this.seat,
       created_at: new Date(this.createdAt).toISOString(),
       ...this.startedAt ? { started_at: new Date(this.startedAt).toISOString() } : {},
       ...this.terminalAt ? { terminal_at: new Date(this.terminalAt).toISOString(), duration_ms: this.terminalAt - (this.startedAt ?? this.createdAt) } : {},
@@ -32084,26 +32096,68 @@ var LaneRun = class {
     if (this.digestLog.length > 500) this.digestLog.splice(0, this.digestLog.length - 500);
   }
   writeEvent(obj) {
+    const line = JSON.stringify({ ts: Date.now(), ...obj }) + "\n";
+    if (this.sessionClosed) {
+      fs3.mkdirSync(this.runDir, { recursive: true });
+      fs3.appendFileSync(path4.join(this.runDir, "events.jsonl"), line);
+      return;
+    }
     if (!this.eventsStream) {
       fs3.mkdirSync(this.runDir, { recursive: true });
       this.eventsStream = fs3.createWriteStream(path4.join(this.runDir, "events.jsonl"), { flags: "a" });
     }
-    this.eventsStream.write(JSON.stringify({ ts: Date.now(), ...obj }) + "\n");
+    this.eventsStream.write(line);
   }
   logChunk(kind, text) {
     if (!text) return;
+    const line = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${kind}: ${text}
+`;
+    if (this.sessionClosed) {
+      fs3.mkdirSync(this.runDir, { recursive: true });
+      fs3.appendFileSync(path4.join(this.runDir, "chunks.log"), line);
+      return;
+    }
     if (!this.chunksStream) {
       fs3.mkdirSync(this.runDir, { recursive: true });
       this.chunksStream = fs3.createWriteStream(path4.join(this.runDir, "chunks.log"), { flags: "a" });
     }
-    this.chunksStream.write(`[${(/* @__PURE__ */ new Date()).toISOString()}] ${kind}: ${text}
-`);
+    this.chunksStream.write(line);
   }
   closeStreams() {
     this.eventsStream?.end();
     this.chunksStream?.end();
     this.eventsStream = null;
     this.chunksStream = null;
+  }
+  async closeStreamsAndWait() {
+    const eventsStream = this.eventsStream;
+    const chunksStream = this.chunksStream;
+    await Promise.all([
+      this.finishStream(eventsStream, "events"),
+      this.finishStream(chunksStream, "chunks")
+    ]);
+    if (this.eventsStream === eventsStream) this.eventsStream = null;
+    if (this.chunksStream === chunksStream) this.chunksStream = null;
+  }
+  finishStream(stream, artifact) {
+    if (!stream) return Promise.resolve();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        stream.off("error", onError);
+        resolve();
+      };
+      const onError = (error40) => {
+        console.error(
+          `[clanker] ${artifact} stream close failed for '${this.id}': ${error40.message}`
+        );
+        finish();
+      };
+      stream.once("error", onError);
+      stream.end(finish);
+    });
   }
   relToCwd(p) {
     try {
@@ -32127,11 +32181,10 @@ function truncate(s, max) {
 }
 
 // src/types.ts
-var LANE_NAMES = ["codex", "opencode", "grok"];
+var LANE_NAMES = ["codex", "opencode", "grok", "gemini"];
 
 // src/host.ts
 var HOSTS = ["claude", "codex", "standalone"];
-var CODEX_LANES = ["opencode", "grok"];
 function parseHostArgs(args) {
   let host;
   for (let i = 0; i < args.length; i += 1) {
@@ -32145,9 +32198,6 @@ function parseHostArgs(args) {
     host = value;
   }
   return host ?? "standalone";
-}
-function laneNamesForHost(host) {
-  return host === "codex" ? CODEX_LANES : LANE_NAMES;
 }
 function hostLaneBlockedReason(host, lane) {
   if (host === "codex" && lane === "codex") {
@@ -32233,6 +32283,7 @@ var LaneManager = class {
   warningsById = /* @__PURE__ */ new Map();
   pendingConnects = /* @__PURE__ */ new Map();
   turnDrives = /* @__PURE__ */ new Map();
+  closing = /* @__PURE__ */ new Map();
   shuttingDown = false;
   /** CP6: at most one active clanker_wait per id (single-consumer contract). */
   activeWaits = /* @__PURE__ */ new Set();
@@ -32261,31 +32312,34 @@ var LaneManager = class {
    * creation) throw here; runtime errors surface through clanker_wait.
    */
   async dispatchStart(params) {
-    return this.dispatchStartInternal(params, false);
+    return this.dispatchStartInternal(params);
   }
-  /** Dedicated entrypoint that fixes the only supervised GLM write shape. */
-  async dispatchSupervisedGlmWrite(params) {
-    return this.dispatchStartInternal(
-      { ...params, lane: "opencode", model: "glm", readOnly: false },
-      true
-    );
-  }
-  async dispatchStartInternal(params, supervisedGlm) {
+  async dispatchStartInternal(params) {
     if (this.shuttingDown) throw new Error("Clanker manager is shutting down; refusing a new dispatch");
     if (!LANE_NAMES.includes(params.lane)) {
       throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
+    }
+    const profile = params.profile ?? "worker";
+    if (profile !== "worker" && profile !== "kimi-crew") throw new Error(`unsupported profile '${profile}'`);
+    if (params.lane === "gemini" && profile !== "worker") throw new Error("Clanker: Gemini rejects profile");
+    if (profile === "kimi-crew") {
+      params = { ...params, lane: "opencode", model: "kimi", readOnly: false, profile };
     }
     const blockedReason = hostLaneBlockedReason(this.host, params.lane);
     if (blockedReason) throw new Error(blockedReason);
     if (params.lane === "codex" && params.model?.trim().toLowerCase() === "codex") {
       throw new Error("model='codex' is a lane name, not a Codex model id; omit model to use the configured default");
     }
-    const readOnly = params.readOnly ?? false;
+    const readOnly = params.lane === "gemini" ? true : params.readOnly ?? false;
+    if (params.lane === "gemini" && !readOnly) {
+      throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
+    }
+    if (params.lane === "gemini" && params.worktree) throw new Error("Clanker: Gemini rejects worktree");
     if (!readOnly && params.lane !== "codex" && !params.model?.trim()) {
       throw new Error(`an explicit model is required for write lane '${params.lane}'`);
     }
-    if (!readOnly && isGlmModel(params.model) && !supervisedGlm) {
-      throw new Error("GLM writes require clanker_dispatch_glm_write_start and Sonnet supervision");
+    if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew") {
+      throw new Error("direct GLM write is prohibited; use profile='kimi-crew'");
     }
     const writeCapableSandbox = params.lane === "codex" && params.sandbox !== void 0 && params.sandbox !== "read-only";
     const requiresIsolation = !readOnly || writeCapableSandbox;
@@ -32317,7 +32371,7 @@ var LaneManager = class {
       effort: params.effort,
       readOnly,
       sandbox: params.sandbox,
-      agent: params.agent
+      profile
     };
     const spec = this.resolveSpec(params.lane, opts, runDir);
     this.warningsById.set(id, spec.warnings);
@@ -32330,43 +32384,12 @@ var LaneManager = class {
       readOnly,
       worktreeBranch: params.worktree,
       worktreePath,
-      seat: params.seat,
       requestOpts: opts
     });
     this.runs.set(id, run);
     const drive = this.driveNewSession(run, spec, params.prompt);
     this.trackDrive(id, drive);
     return { id, warnings: spec.warnings };
-  }
-  /**
-   * Start a new turn on an existing, still-open session.
-   *
-   * A seat run can lose its live connection without being sessionClosed —
-   * the idle-TTL reaper only kills a seat's subprocess (see reap()), keeping
-   * the run around specifically so this path can respawn + session/resume
-   * instead of failing. Non-seat runs are unaffected: their connection is
-   * only ever missing after a full close() (which also flips sessionClosed),
-   * so they still hit the "not found or already reaped" branch above.
-   */
-  async promptExisting(id, prompt, correction = false) {
-    if (this.shuttingDown) throw new Error("Clanker manager is shutting down; refusing a new prompt");
-    const run = this.runs.get(id);
-    if (!run || run.sessionClosed) {
-      throw new Error(`session '${id}' not found or already reaped; start a new dispatch`);
-    }
-    if (run.turnStatus === "running") {
-      throw new Error(`session '${id}' already has a turn in progress`);
-    }
-    let conn = this.connections.get(id);
-    if (!conn) {
-      if (!run.seat || !run.sessionId) {
-        throw new Error(`session '${id}' has no live connection`);
-      }
-      conn = await this.resumeConnection(run);
-    }
-    const drive = this.runTurn(run, conn, prompt, correction).then((outcome) => this.settleTurn(run, outcome));
-    this.trackDrive(id, drive);
-    return { id };
   }
   trackDrive(id, drive) {
     this.turnDrives.set(id, drive);
@@ -32379,68 +32402,6 @@ var LaneManager = class {
       }
     );
   }
-  /**
-   * Respawn a seat's subprocess and reconnect to its known ACP session via
-   * session/resume (see acp-client.ts resumeSession). Throws if the backend
-   * doesn't support session/resume or the spawn/handshake otherwise fails —
-   * that failure surfaces straight to the promptExisting caller, since a
-   * failed resume attempt is a real, reportable error, not a silent fallback.
-   */
-  async resumeConnection(run) {
-    const spec = this.resolveSpec(run.lane, run.requestOpts, run.runDir);
-    const conn = await LaneConnection.connect({
-      spec,
-      cwd: run.cwd,
-      readOnly: run.readOnly,
-      onFileWritten: (p) => run.recordFileWritten(p),
-      handshakeTimeoutMs: this.handshakeTimeoutMs,
-      terminateGraceMs: this.processTerminateGraceMs,
-      resumeSessionId: run.sessionId
-    });
-    this.connections.set(run.id, conn);
-    run.sessionId = conn.sessionId;
-    this.writeSeatFile(run);
-    return conn;
-  }
-  /**
-   * Persist seat metadata to <runDir>/seat.json. Never deleted by close() —
-   * the file is the durable record a caller can use to know what to resume,
-   * even past a terminal close (clanker_close / a genuine turn failure).
-   * No-op for non-seat runs.
-   */
-  writeSeatFile(run) {
-    if (!run.seat) return;
-    const payload = {
-      id: run.id,
-      lane: run.lane,
-      cwd: run.cwd,
-      worktree: run.worktreePath,
-      sessionId: run.sessionId,
-      model: run.requestOpts.model,
-      agent: run.requestOpts.agent,
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    try {
-      fs5.writeFileSync(path6.join(run.runDir, "seat.json"), JSON.stringify(payload, null, 2));
-    } catch (err) {
-      console.error(`[clanker] failed to write seat.json for '${run.id}': ${errMessage(err)}`);
-    }
-  }
-  /** Resolve a runTurn() outcome into terminal failTurn+close, when it failed. Never retries (only the fresh-dispatch path in attemptInitialTurn does). */
-  async settleTurn(run, outcome) {
-    if (run.cancellationRequested) {
-      run.cancelTurn();
-      return;
-    }
-    if (outcome.ok) return;
-    const failureClass = classifyTurnFailure({
-      message: outcome.message,
-      turnsCount: run.turnsCount,
-      toolCalls: run.toolCalls()
-    });
-    run.failTurn(outcome.message, failureClass);
-    await this.close(run.id);
-  }
   async driveNewSession(run, spec, prompt) {
     await this.attemptInitialTurn(run, spec, prompt, 1);
   }
@@ -32451,12 +32412,13 @@ var LaneManager = class {
    * retries here — retrying an identical request against a backend that just
    * rejected its shape wastes a turn and hides the real signal (2026-07-13
    * incident: exactly that class was hand-retried 3 times before anyone
-   * noticed). Retry scope is intentionally limited to a fresh dispatch's
-   * first turn — clanker_prompt (session continuation) never retries.
+   * noticed). Retry scope is intentionally limited to the job's first turn.
    */
   async attemptInitialTurn(run, spec, prompt, attempt) {
     if (run.cancellationRequested || this.shuttingDown) {
       if (!run.cancellationRequested) run.requestCancellation();
+      await this.computeTouched(run);
+      await this.close(run.id);
       run.cancelTurn();
       return;
     }
@@ -32476,8 +32438,9 @@ var LaneManager = class {
     } catch (e) {
       if (run.cancellationRequested || this.shuttingDown) {
         if (!run.cancellationRequested) run.requestCancellation();
-        run.cancelTurn();
+        await this.computeTouched(run);
         await this.close(run.id);
+        run.cancelTurn();
         return;
       }
       const message = errMessage(e);
@@ -32485,6 +32448,8 @@ var LaneManager = class {
         await this.retryAfterBackoff(run, message, attempt + 1);
         return this.attemptInitialTurn(run, spec, prompt, attempt + 1);
       }
+      await this.computeTouched(run);
+      await this.close(run.id);
       run.failTurn(message);
       return;
     } finally {
@@ -32492,20 +32457,24 @@ var LaneManager = class {
     }
     if (run.cancellationRequested || this.shuttingDown) {
       if (!run.cancellationRequested) run.requestCancellation();
-      run.cancelTurn();
       try {
         await conn.closeAndWait();
-      } finally {
-        await this.close(run.id);
+      } catch (err) {
+        console.error(
+          `[clanker] subprocess shutdown failed for '${run.id}': ${errMessage(err)}`
+        );
       }
+      await this.computeTouched(run);
+      await this.close(run.id);
+      run.cancelTurn();
       return;
     }
     this.connections.set(run.id, conn);
     run.sessionId = conn.sessionId;
     run.observeConfigOptions(conn.session.newSessionResponse.configOptions);
-    this.writeSeatFile(run);
     const outcome = await this.runTurn(run, conn, prompt);
     if (run.cancellationRequested) {
+      await this.close(run.id);
       run.cancelTurn();
       return;
     }
@@ -32517,12 +32486,13 @@ var LaneManager = class {
       toolCalls: run.toolCalls()
     });
     if (attempt === 1 && failureClass !== INFRA_FAILURE_TAG && isCapacityTransient(outcome.message)) {
-      this.killConnection(run.id);
+      await this.killConnection(run.id);
       await this.retryAfterBackoff(run, outcome.message, attempt + 1);
       return this.attemptInitialTurn(run, spec, prompt, attempt + 1);
     }
-    run.failTurn(outcome.message, failureClass);
+    await this.computeTouched(run);
     await this.close(run.id);
+    run.failTurn(outcome.message, failureClass);
   }
   async retryAfterBackoff(run, message, nextAttempt) {
     run.recordTransientRetry(message, this.capacityRetryBackoffMs, nextAttempt);
@@ -32593,22 +32563,30 @@ var LaneManager = class {
     }
   }
   /** Kill a run's live connection/process without touching worktree state (used by the capacity-retry respawn path; run.close() is the terminal, worktree-reaping teardown). */
-  killConnection(runId) {
+  async killConnection(runId) {
     const conn = this.connections.get(runId);
     if (conn) {
-      conn.close();
-      this.connections.delete(runId);
+      try {
+        await conn.closeAndWait();
+      } catch (err) {
+        console.error(
+          `[clanker] subprocess shutdown failed for '${runId}': ${errMessage(err)}`
+        );
+      } finally {
+        if (this.connections.get(runId) === conn) this.connections.delete(runId);
+      }
     }
   }
   async finalizeTurn(run, stopReason) {
     if (run.isTerminalTurn()) return;
     let gitTouched = [];
     try {
-      if (await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
+      if (run.lane !== "gemini" && await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
     } catch {
     }
     const touched = dedupe([...gitTouched, ...run.toolTouchedFiles()]);
     run.setFinalTouched(touched);
+    await this.close(run.id);
     if (stopReason === "cancelled") {
       run.cancelTurn();
     } else {
@@ -32642,15 +32620,6 @@ var LaneManager = class {
       return this.buildWaitResult(run);
     } finally {
       this.activeWaits.delete(id);
-    }
-  }
-  /** Blocking convenience: start + loop wait until the first turn is terminal. */
-  async dispatchBlocking(params, onProgress) {
-    const { id } = await this.dispatchStart(params);
-    for (; ; ) {
-      const r = await this.wait(id, MAX_WAIT_MS);
-      onProgress?.(r);
-      if (r.status !== "running") return r;
     }
   }
   buildWaitResult(run) {
@@ -32741,70 +32710,81 @@ var LaneManager = class {
       if (run.turnStatus === "running") {
         run.markForcedKill();
         await this.computeTouched(run);
+        await this.close(id);
         run.cancelTurn();
-        try {
-          await conn.closeAndWait();
-        } finally {
-          this.connections.delete(id);
-          await this.close(id);
-        }
       }
     }
     if (run.turnStatus === "running") {
       await this.computeTouched(run);
-      run.cancelTurn();
       await this.close(id);
+      run.cancelTurn();
     }
     return { id, status: run.turnStatus };
   }
   async computeTouched(run) {
     let gitTouched = [];
     try {
-      if (await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
+      if (run.lane !== "gemini" && await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
     } catch {
     }
     run.setFinalTouched(dedupe([...gitTouched, ...run.toolTouchedFiles()]));
   }
   /** Close a session: dispose ACP session, kill subprocess, clean worktree. */
   async close(id) {
+    const existing = this.closing.get(id);
+    if (existing) return existing;
+    const operation = this.closeRun(id);
+    this.closing.set(id, operation);
+    try {
+      await operation;
+    } finally {
+      if (this.closing.get(id) === operation) this.closing.delete(id);
+    }
+  }
+  async closeRun(id) {
     const run = this.runs.get(id);
     if (!run || run.sessionClosed) return;
     const conn = this.connections.get(id);
-    conn?.close();
-    this.connections.delete(id);
-    if (run.worktreePath && run.worktreeBranch) {
+    let processStopped = true;
+    if (conn) {
       try {
-        const removed = await removeIfClean(run.worktreePath, this.baseRepo);
-        if (!removed) run.worktreeRetained = run.worktreePath;
+        await conn.closeAndWait();
       } catch (err) {
+        processStopped = false;
         console.error(
-          `[clanker] worktree cleanup failed for '${run.worktreePath}': ${errMessage(err)}`
+          `[clanker] subprocess shutdown failed for '${id}': ${errMessage(err)}`
         );
-        run.worktreeRetained = run.worktreePath;
+      } finally {
+        if (this.connections.get(id) === conn) this.connections.delete(id);
       }
     }
-    run.markClosed();
+    if (run.worktreePath && run.worktreeBranch) {
+      if (!processStopped) {
+        run.worktreeRetained = run.worktreePath;
+      } else {
+        try {
+          const removed = await removeIfClean(run.worktreePath, this.baseRepo);
+          if (!removed) run.worktreeRetained = run.worktreePath;
+        } catch (err) {
+          console.error(
+            `[clanker] worktree cleanup failed for '${run.worktreePath}': ${errMessage(err)}`
+          );
+          run.worktreeRetained = run.worktreePath;
+        }
+      }
+    }
+    await run.markClosed();
   }
   /**
    * Reap idle sessions past TTL. Exposed for tests.
    *
-   * Seat runs get a soft reap: only the subprocess is killed (process death),
-   * never the session/worktree (session death) — `sessionClosed` stays false
-   * so clanker_prompt can respawn + session/resume later (promptExisting).
-   * Non-seat runs are unaffected: full close() as before.
+   * Completed jobs are closed after the idle TTL.
    */
   async reap() {
     const reaped = [];
     for (const run of [...this.runs.values()]) {
       if (run.sessionClosed) continue;
       if (run.turnStatus !== "running" && run.idleMs() > this.sessionTtlMs) {
-        if (run.seat) {
-          if (this.connections.has(run.id)) {
-            this.killConnection(run.id);
-            reaped.push(run.id);
-          }
-          continue;
-        }
         await this.close(run.id);
         reaped.push(run.id);
       }
@@ -32820,9 +32800,7 @@ var LaneManager = class {
       if (run.turnStatus === "running") run.requestCancellation();
     }
     for (const controller of this.pendingConnects.values()) controller.abort();
-    for (const id of [...this.connections.keys()]) {
-      this.killConnection(id);
-    }
+    await Promise.all([...this.connections.keys()].map((id) => this.killConnection(id)));
     await Promise.allSettled([...this.turnDrives.values()]);
     for (const id of [...this.runs.keys()]) {
       await this.close(id);
@@ -32865,321 +32843,100 @@ function envInt2(name, fallback) {
 
 // src/tools.ts
 var laneEnum = external_exports.enum(LANE_NAMES);
-var dispatchOptionsShape = {
-  prompt: external_exports.string().min(1).describe("The task/prompt to send to the Clanker"),
-  cwd: external_exports.string().optional().describe("Absolute working directory (default: server base repo)"),
-  worktree: external_exports.string().trim().min(1).optional().describe("Branch name; server creates a git worktree cut from origin/main and runs there"),
-  model: external_exports.string().optional().describe(
-    "Model override, e.g. 'zhipuai-coding-plan/glm-5.2' (opencode) \u2014 warned & echoed if the Clanker can't honor it. Required for lane=opencode on every start path, including read-only: omitting it lets opencode's own config default (possibly GLM) run outside the vault-exec credential wrap."
-  ),
-  effort: external_exports.string().optional().describe("Reasoning effort override (codex/grok only)"),
-  read_only: external_exports.boolean().optional().describe("If true, the Clanker is gated read-only (default false)"),
-  sandbox: external_exports.enum(["read-only", "workspace-write", "danger-full-access"]).optional().describe(
-    'codex-only native sandbox strictness override (independent of read_only). "workspace-write" boxes writes to the session cwd + tmp \u2014 the review-seat recipe is worktree + sandbox="workspace-write", so cargo/go test can actually run instead of being Not-checked. Unset defaults writes to workspace-write; danger-full-access requires an explicit override. Ignored (warned) on grok/opencode. Grok still derives its native read-only/workspace sandbox from read_only; opencode has no native sandbox tier.'
-  ),
-  agent: external_exports.string().optional().describe(
-    "Deprecated compatibility field; ignored with a warning on every lane. Opencode always runs Clanker's fixed clanker-worker profile so callers cannot replace its permission boundary."
-  ),
-  seat: external_exports.boolean().optional().describe(
-    "If true, this run is a persistent seat: the idle-TTL reaper only kills the backend subprocess (never the session/worktree), and clanker_prompt on a dead-process seat transparently respawns + resumes the same ACP session via session/resume. Verified against opencode; codex/grok backends don't implement session/resume, so resuming a dead-process seat on those lanes surfaces an error instead of reconnecting. Use clanker_close to explicitly end a seat."
-  )
+var startShape = {
+  lane: laneEnum.describe(`Backend lane: ${LANE_NAMES.join(" | ")}`),
+  prompt: external_exports.string().trim().min(1),
+  cwd: external_exports.string().optional(),
+  worktree: external_exports.string().trim().min(1).optional().describe("Managed worktree branch name"),
+  model: external_exports.string().trim().min(1).optional(),
+  effort: external_exports.string().trim().min(1).optional(),
+  read_only: external_exports.boolean().optional(),
+  sandbox: external_exports.enum(["read-only", "workspace-write", "danger-full-access"]).optional(),
+  profile: external_exports.enum(["worker", "kimi-crew"]).optional().default("worker")
 };
-var glmWriteDispatchShape = external_exports.object(dispatchOptionsShape).omit({ model: true, effort: true, read_only: true, sandbox: true, agent: true }).extend({
-  worktree: external_exports.string().trim().min(1).describe("Required branch name for the server-created isolated GLM worktree")
-}).shape;
-function rejectsUnsupervisedGlmWrite(args) {
-  return isGlmModel(args.model) && !(args.read_only ?? false);
+function ok(payload) {
+  return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
 }
-function glmWriteBlockedMessage(host) {
-  return host === "codex" ? "GLM writes are unavailable on host=codex because they require the Claude/Sonnet supervisor" : "GLM writes require clanker_dispatch_glm_write_start and Sonnet supervision";
+function fail(error40) {
+  const message = error40 instanceof Error ? error40.message : String(error40);
+  return { content: [{ type: "text", text: JSON.stringify({ error: message }, null, 2) }], isError: true };
 }
 function progressSender(extra) {
   if (!PROGRESS_EXPERIMENTAL) return void 0;
   const e = extra;
   const token = e?._meta?.progressToken;
-  if (token === void 0 || token === null || typeof e.sendNotification !== "function") return void 0;
-  return (r) => {
-    void e.sendNotification({
-      method: "notifications/progress",
-      params: {
-        progressToken: token,
-        progress: r.plan_final?.completed ?? 0,
-        total: r.plan_final?.total ?? void 0,
-        message: `[${r.lane}] ${r.plan_summary}`
-      }
-    }).catch(() => {
-    });
-  };
-}
-function ok(payload) {
-  return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
-}
-function fail(message, telemetry) {
-  return { content: [{ type: "text", text: JSON.stringify({ error: message, ...telemetry ? { telemetry } : {} }, null, 2) }], isError: true };
+  if (token === void 0 || typeof e.sendNotification !== "function") return void 0;
+  return (r) => void e.sendNotification({
+    method: "notifications/progress",
+    params: { progressToken: token, progress: r.plan_final?.completed ?? 0, total: r.plan_final?.total, message: `[${r.lane}] ${r.plan_summary}` }
+  }).catch(() => {
+  });
 }
 function registerTools(server, manager) {
-  const host = manager.host ?? "standalone";
-  const hostLanes = laneNamesForHost(host);
-  const hostLaneEnum = external_exports.enum(hostLanes);
-  const hostDispatchShape = {
-    lane: hostLaneEnum.describe(`Backend Clanker to drive: ${hostLanes.join(" | ")}`),
-    ...dispatchOptionsShape
-  };
-  const hostReadonlyDispatchShape = external_exports.object(hostDispatchShape).omit({ read_only: true, sandbox: true }).shape;
-  const writeModelSchema = external_exports.string().trim().min(1);
-  const hostWriteDispatchShape = external_exports.object(hostDispatchShape).omit({ read_only: true }).extend({
-    model: host === "codex" ? writeModelSchema.describe("Required explicit model id or supported model alias for opencode/grok writes") : writeModelSchema.optional().describe(
-      "Model override. Optional for lane=codex (omit it to use Codex's configured default); required for opencode/grok writes. A lane name is not a model id."
-    ),
-    worktree: external_exports.string().trim().min(1).describe("Required branch name for the server-created isolated worktree")
-  }).shape;
-  const policyFailure = (lane) => {
-    const blocked_reason = hostLaneBlockedReason(host, lane);
-    if (!blocked_reason) return void 0;
-    const telemetry = { host, requested_lane: lane, actual_lane: null, blocked_reason };
-    return fail(blocked_reason, telemetry);
-  };
-  server.registerTool(
-    "clanker_dispatch_start",
-    {
-      title: "Start a Clanker turn (non-blocking)",
-      description: "Spawn/handshake a Clanker and start a prompt turn, returning {id} immediately. Poll progress with clanker_wait(id). Setup errors (unknown backend, worktree creation) fail here; runtime errors surface via clanker_wait.",
-      inputSchema: hostDispatchShape,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
-    },
-    async (args) => {
-      try {
-        const blocked = policyFailure(args.lane);
-        if (blocked) return blocked;
-        if (rejectsUnsupervisedGlmWrite(args)) {
-          return fail(glmWriteBlockedMessage(host));
-        }
-        const { id, warnings } = await manager.dispatchStart(toDispatch(args));
-        return ok({ id, warnings });
-      } catch (e) {
-        return fail(msg(e));
-      }
+  server.registerTool("clanker_start", {
+    title: "Start a Clanker job",
+    description: "Start one asynchronous cross-harness job. Routing, host gates, write isolation, and profile policy are normalized server-side.",
+    inputSchema: startShape,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+  }, async (args) => {
+    try {
+      const result = await manager.dispatchStart({
+        lane: args.lane,
+        prompt: args.prompt,
+        cwd: args.cwd,
+        worktree: args.worktree,
+        model: args.model,
+        effort: args.effort,
+        readOnly: args.read_only,
+        sandbox: args.sandbox,
+        profile: args.profile
+      });
+      return ok(result);
+    } catch (error40) {
+      return fail(error40);
     }
-  );
-  server.registerTool(
-    "clanker_dispatch_readonly_start",
-    {
-      title: "Start a read-only Clanker turn (non-blocking)",
-      description: "Relay-only start path. The server always forces read_only=true and exposes no caller override. Returns {id} immediately; poll with clanker_wait(id).",
-      inputSchema: hostReadonlyDispatchShape,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true }
-    },
-    async (args) => {
-      try {
-        const blocked = policyFailure(args.lane);
-        if (blocked) return blocked;
-        if (args.lane === "opencode" && !args.model?.trim()) {
-          return fail(
-            "an explicit model is required for read-only opencode dispatch: omitting it lets opencode's own config default (possibly GLM) run outside the vault-exec credential wrap"
-          );
-        }
-        const { id, warnings } = await manager.dispatchStart({
-          ...toDispatch(args),
-          readOnly: true,
-          sandbox: void 0
-        });
-        return ok({ id, warnings });
-      } catch (e) {
-        return fail(msg(e));
-      }
+  });
+  server.registerTool("clanker_wait", {
+    title: "Long-poll a Clanker job",
+    description: `Wait for progress or completion (default ${DEFAULT_WAIT_MS}ms, cap ${MAX_WAIT_MS}ms).`,
+    inputSchema: { id: external_exports.string(), timeout_ms: external_exports.number().int().min(0).optional(), quiet: external_exports.boolean().optional() },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+  }, async (args, extra) => {
+    try {
+      const result = await manager.wait(args.id, args.timeout_ms, args.quiet);
+      progressSender(extra)?.(result);
+      return ok(result);
+    } catch (error40) {
+      return fail(error40);
     }
-  );
-  server.registerTool(
-    "clanker_dispatch_write_start",
-    {
-      title: "Start an isolated write-capable Clanker turn (non-blocking)",
-      description: "Write-relay start path. The server always forces read_only=false and requires a managed worktree branch. Returns {id} immediately; poll with clanker_wait(id).",
-      inputSchema: hostWriteDispatchShape,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
-    },
-    async (args) => {
-      try {
-        const blocked = policyFailure(args.lane);
-        if (blocked) return blocked;
-        if (args.lane !== "codex" && !args.model) {
-          return fail(`an explicit model is required for write lane '${args.lane}'`);
-        }
-        if (isGlmModel(args.model)) {
-          return fail(glmWriteBlockedMessage(host));
-        }
-        const { id, warnings } = await manager.dispatchStart({ ...toDispatch(args), readOnly: false });
-        return ok({ id, warnings });
-      } catch (e) {
-        return fail(msg(e));
-      }
+  });
+  server.registerTool("clanker_status", {
+    title: "Get Clanker job status",
+    inputSchema: { id: external_exports.string() },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }, async (args) => {
+    try {
+      return ok(manager.status(args.id));
+    } catch (error40) {
+      return fail(error40);
     }
-  );
-  if (host !== "codex") server.registerTool(
-    "clanker_dispatch_glm_write_start",
-    {
-      title: "Start a supervised isolated GLM write turn (non-blocking)",
-      description: "GLM-supervisor-only start path. The server fixes lane=opencode, model=glm, read_only=false, and requires a managed worktree branch. Returns {id} immediately; poll with clanker_wait(id).",
-      inputSchema: glmWriteDispatchShape,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
-    },
-    async (args) => {
-      try {
-        const { id, warnings } = await manager.dispatchSupervisedGlmWrite({
-          prompt: args.prompt,
-          cwd: args.cwd,
-          worktree: args.worktree,
-          seat: args.seat
-        });
-        return ok({ id, warnings });
-      } catch (e) {
-        return fail(msg(e));
-      }
+  });
+  server.registerTool("clanker_cancel", {
+    title: "Cancel a Clanker job",
+    inputSchema: { id: external_exports.string() },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }
+  }, async (args) => {
+    try {
+      return ok(await manager.cancel(args.id));
+    } catch (error40) {
+      return fail(error40);
     }
-  );
-  server.registerTool(
-    "clanker_wait",
-    {
-      title: "Long-poll a Clanker run",
-      description: `Wait up to timeout_ms (default ${DEFAULT_WAIT_MS}, cap ${MAX_WAIT_MS}) for new events or completion. Returns {status, digest, plan_summary, last_event_age_ms, suspected_stall}; when status is terminal also {final_message, touched_files, plan_final}, and on error also {error, failure_class}. digest is a human-readable summary of events since the previous wait \u2014 tool titles, file writes, plan check changes, key message sentences. failure_class="CLANKER-INFRA-FAILURE" means the backend rejected the request shape on turn 1 with zero tool calls \u2014 retrying the identical dispatch is pointless; run a smoke check first. Quiet mode (default on): only wakes before the deadline on a plan/status change, a tool error, a suspected stall, or a terminal state \u2014 trivial chatter (a tool_call starting, a file-location echo, a message-chunk fragment) does not cut the wait short, so callers no longer need to repoll tightly just because the run is reading/grepping. Pass quiet:false for the old any-event wake-up.`,
-      inputSchema: {
-        id: external_exports.string().describe(
-          "Run id from a Clanker dispatch/start tool"
-        ),
-        timeout_ms: external_exports.number().int().min(0).optional().describe(`Long-poll window in ms (default ${DEFAULT_WAIT_MS}, capped at ${MAX_WAIT_MS})`),
-        quiet: external_exports.boolean().optional().describe(
-          "Debounce mode (default true): wake early only on plan/status change, tool error, suspected stall, or terminal state. quiet:false restores waking on every trivial event (tool_call start, file echo, message chunk) \u2014 the pre-debounce behavior."
-        )
-      },
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true }
-    },
-    async (args, extra) => {
-      try {
-        const result = await manager.wait(args.id, args.timeout_ms, args.quiet);
-        progressSender(extra)?.(result);
-        return ok(result);
-      } catch (e) {
-        return fail(msg(e));
-      }
-    }
-  );
-  server.registerTool(
-    "clanker_dispatch",
-    {
-      title: "Dispatch to a Clanker and block until the turn completes",
-      description: "Convenience path = clanker_dispatch_start + loop clanker_wait until the turn is terminal. Returns the terminal WaitResult {status, final_message, touched_files, plan_final}. For long tasks prefer clanker_dispatch_start + clanker_wait so the caller controls polling and avoids MCP request timeouts.",
-      inputSchema: hostDispatchShape,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
-    },
-    async (args, extra) => {
-      try {
-        const blocked = policyFailure(args.lane);
-        if (blocked) return blocked;
-        if (rejectsUnsupervisedGlmWrite(args)) {
-          return fail(glmWriteBlockedMessage(host));
-        }
-        const result = await manager.dispatchBlocking(toDispatch(args), progressSender(extra));
-        return ok(result);
-      } catch (e) {
-        return fail(msg(e));
-      }
-    }
-  );
-  server.registerTool(
-    "clanker_prompt",
-    {
-      title: "Continue an existing Clanker session with a new turn",
-      description: "Start a new prompt turn on an already-open session (persistent-session reuse). Set correction=true only when this turn is a supervisor correction; telemetry counts it separately from ordinary continuation turns. Returns {id}; poll with clanker_wait(id). Errors if the session was reaped/closed or a turn is already running.",
-      inputSchema: {
-        id: external_exports.string().describe("Existing run/session id"),
-        prompt: external_exports.string().min(1).describe("Prompt for the new turn"),
-        correction: external_exports.boolean().optional().describe("Mark this continuation as a supervisor correction in run telemetry")
-      },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
-    },
-    async (args) => {
-      try {
-        return ok(await manager.promptExisting(args.id, args.prompt, args.correction ?? false));
-      } catch (e) {
-        return fail(msg(e));
-      }
-    }
-  );
-  server.registerTool(
-    "clanker_status",
-    {
-      title: "Cheap status of a Clanker run",
-      description: 'Return {status, plan (checkbox counts + current step), tool_calls, last_event_age_ms, suspected_stall}. Does not wait. suspected_stall flags a running turn silent past the stall threshold. When status is "error" also returns {error, failure_class}; failure_class="CLANKER-INFRA-FAILURE" means the backend rejected the request shape before the agent did anything \u2014 retrying the identical dispatch is pointless.',
-      inputSchema: { id: external_exports.string().describe("Run id") },
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
-    },
-    async (args) => {
-      try {
-        return ok(manager.status(args.id));
-      } catch (e) {
-        return fail(msg(e));
-      }
-    }
-  );
-  server.registerTool(
-    "clanker_cancel",
-    {
-      title: "Cancel a Clanker's in-flight turn",
-      description: "Request ACP cancellation, wait for a terminal result, and force-terminate an uncooperative backend after CLANKER_CANCEL_GRACE_MS. Returns only after cancelled (or a loud terminal error). No-op if idle.",
-      inputSchema: { id: external_exports.string().describe("Run id") },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }
-    },
-    async (args) => {
-      try {
-        return ok(await manager.cancel(args.id));
-      } catch (e) {
-        return fail(msg(e));
-      }
-    }
-  );
-  server.registerTool(
-    "clanker_list",
-    {
-      title: "List active Clanker sessions",
-      description: "Overview of live Clankers: [{id, lane, state (working|idle|stalled), idle_ms, turns_count, plan_summary, suspected_stall}]. Reaped/closed sessions are omitted.",
-      inputSchema: {},
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
-    },
-    async () => ok({ clankers: manager.list() })
-  );
-  server.registerTool(
-    "clanker_close",
-    {
-      title: "Explicitly close a Clanker session",
-      description: "Terminal close: disposes the ACP session, kills the subprocess, and cleans the worktree if unchanged (retained if dirty, same as the idle-TTL reaper's non-seat path). Seat runs are never closed by the idle-TTL reaper (it only kills the subprocess, keeping the session resumable) \u2014 this is how a seat gets deliberately ended. No-op if already closed.",
-      inputSchema: { id: external_exports.string().describe("Run id") },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }
-    },
-    async (args) => {
-      try {
-        await manager.close(args.id);
-        return ok({ id: args.id, closed: true });
-      } catch (e) {
-        return fail(msg(e));
-      }
-    }
-  );
-}
-function toDispatch(args) {
-  return {
-    lane: args.lane,
-    prompt: args.prompt,
-    cwd: args.cwd,
-    worktree: args.worktree,
-    model: args.model,
-    effort: args.effort,
-    readOnly: args.read_only,
-    sandbox: args.sandbox,
-    agent: args.agent,
-    seat: args.seat
-  };
-}
-function msg(e) {
-  return e instanceof Error ? e.message : String(e);
+  });
+  server.registerTool("clanker_list", {
+    title: "List Clanker jobs",
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }, async () => ok({ clankers: manager.list() }));
 }
 
 // src/index.ts

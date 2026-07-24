@@ -27,22 +27,6 @@
  *               delay, then end_turn — for clanker_wait quiet-mode debounce tests
  *               (the tool_call must not cut a wait short; the plan update must).
  *   <other>  -> emit one agent_message_chunk equal to the prompt, then end_turn.
- *
- * Env vars (seat/resume tests, see test/seat.test.ts and test/acp-client.test.ts):
- *   CLANKER_TEST_NO_SESSION_NEW=1 -> this process instance refuses `session/new` (JSON-RPC
- *               error), so it can ONLY be reached via `session/resume`. A discriminating check:
- *               if acp-client.ts's resume path ever silently fell back to session/new instead
- *               of actually sending session/resume, a test process spawned in this mode would
- *               fail loudly (handshake error) rather than quietly succeeding via a fresh session.
- *   session/resume is always handled (regardless of the above): responds success for any
- *               request carrying a sessionId, echoing null modes/configOptions — the response
- *               intentionally omits `sessionId` (matching the real ACP schema; the caller
- *               already knows it) so a test can also verify the client doesn't depend on it
- *               being present.
- *   CLANKER_TEST_REJECT_RESUME=1 -> this process instance refuses EVERY `session/resume`
- *               (JSON-RPC error), regardless of the id — simulates a backend that can't honor
- *               a resume at all, so a test can prove the failure propagates as a real, reportable
- *               error instead of a silent fresh-session fallback.
  */
 import fs from "node:fs";
 import readline from "node:readline";
@@ -320,38 +304,16 @@ rl.on("line", (line) => {
     case "initialize":
       respond(msg.id, {
         protocolVersion: 1,
-        agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } },
+        agentCapabilities: {},
         agentInfo: { name: "fake-acp-agent" },
       });
       break;
     case "session/new": {
-      if (process.env.CLANKER_TEST_NO_SESSION_NEW === "1") {
-        respondError(msg.id, -32601, "session/new disabled for this test process (resume-only mode)");
-        break;
-      }
       cwd = msg.params?.cwd ?? cwd;
       const sessionId = `sess-${++sessionCounter}`;
       const handshakeDelay = Number(process.env.CLANKER_TEST_HANDSHAKE_DELAY_MS ?? 0);
       if (handshakeDelay > 0) setTimeout(() => respond(msg.id, { sessionId }), handshakeDelay);
       else respond(msg.id, { sessionId });
-      break;
-    }
-    case "session/resume": {
-      const sessionId = msg.params?.sessionId;
-      if (process.env.CLANKER_TEST_REJECT_RESUME === "1") {
-        respondError(msg.id, -32603, `session/resume rejected (test mode) for '${sessionId}'`);
-        break;
-      }
-      // Simulates an agent that rejects resuming a session it never knew
-      // about (real ACP agents do this for expired/unknown ids) — any id
-      // shaped like the ones this process itself mints via session/new.
-      if (!sessionId || !/^sess-\d+$/.test(sessionId)) {
-        respondError(msg.id, -32602, `session/resume: unknown session '${sessionId}'`);
-        break;
-      }
-      cwd = msg.params?.cwd ?? cwd;
-      // Response intentionally omits sessionId, matching schema.ResumeSessionResponse.
-      respond(msg.id, { modes: null, configOptions: null });
       break;
     }
     case "session/prompt": {

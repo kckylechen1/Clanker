@@ -1,7 +1,7 @@
 /**
  * LaneManager — owns lane sessions across their whole lifecycle: spawn +
  * handshake, per-turn prompt loops, plan/status projection, long-poll (clanker_wait),
- * cancel, persistent-session reuse (clanker_prompt), worktree cleanup, and the
+ * cancel, worktree cleanup, and the
  * idle-TTL reaper.
  *
  * The spawn recipe is resolved through an injectable `resolveSpec` so tests can
@@ -49,12 +49,6 @@ export interface DispatchParams extends LaneRequestOptions {
   prompt: string;
   cwd?: string;
   worktree?: string;
-  /**
-   * Persistent seat (see LaneRun.seat doc). Exempts this run from the
-   * idle-TTL reaper's terminal close(); clanker_prompt on a dead-process
-   * seat respawns + session/resumes instead of failing.
-   */
-  seat?: boolean;
 }
 
 export interface WaitResult {
@@ -129,6 +123,7 @@ export class LaneManager {
   private readonly warningsById = new Map<string, string[]>();
   private readonly pendingConnects = new Map<string, AbortController>();
   private readonly turnDrives = new Map<string, Promise<void>>();
+  private readonly closing = new Map<string, Promise<void>>();
   private shuttingDown = false;
   /** CP6: at most one active clanker_wait per id (single-consumer contract). */
   private readonly activeWaits = new Set<string>();
@@ -160,38 +155,35 @@ export class LaneManager {
    * creation) throw here; runtime errors surface through clanker_wait.
    */
   async dispatchStart(params: DispatchParams): Promise<{ id: string; warnings: string[] }> {
-    return this.dispatchStartInternal(params, false);
+    return this.dispatchStartInternal(params);
   }
 
-  /** Dedicated entrypoint that fixes the only supervised GLM write shape. */
-  async dispatchSupervisedGlmWrite(
-    params: Pick<DispatchParams, "prompt" | "cwd" | "worktree" | "seat">,
-  ): Promise<{ id: string; warnings: string[] }> {
-    return this.dispatchStartInternal(
-      { ...params, lane: "opencode", model: "glm", readOnly: false },
-      true,
-    );
-  }
-
-  private async dispatchStartInternal(
-    params: DispatchParams,
-    supervisedGlm: boolean,
-  ): Promise<{ id: string; warnings: string[] }> {
+  private async dispatchStartInternal(params: DispatchParams): Promise<{ id: string; warnings: string[] }> {
     if (this.shuttingDown) throw new Error("Clanker manager is shutting down; refusing a new dispatch");
     if (!LANE_NAMES.includes(params.lane)) {
       throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
+    }
+    const profile = params.profile ?? "worker";
+    if (profile !== "worker" && profile !== "kimi-crew") throw new Error(`unsupported profile '${profile}'`);
+    if (params.lane === "gemini" && profile !== "worker") throw new Error("Clanker: Gemini rejects profile");
+    if (profile === "kimi-crew") {
+      params = { ...params, lane: "opencode", model: "kimi", readOnly: false, profile };
     }
     const blockedReason = hostLaneBlockedReason(this.host, params.lane);
     if (blockedReason) throw new Error(blockedReason);
     if (params.lane === "codex" && params.model?.trim().toLowerCase() === "codex") {
       throw new Error("model='codex' is a lane name, not a Codex model id; omit model to use the configured default");
     }
-    const readOnly = params.readOnly ?? false;
+    const readOnly = params.lane === "gemini" ? true : (params.readOnly ?? false);
+    if (params.lane === "gemini" && !readOnly) {
+      throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
+    }
+    if (params.lane === "gemini" && params.worktree) throw new Error("Clanker: Gemini rejects worktree");
     if (!readOnly && params.lane !== "codex" && !params.model?.trim()) {
       throw new Error(`an explicit model is required for write lane '${params.lane}'`);
     }
-    if (!readOnly && isGlmModel(params.model) && !supervisedGlm) {
-      throw new Error("GLM writes require clanker_dispatch_glm_write_start and Sonnet supervision");
+    if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew") {
+      throw new Error("direct GLM write is prohibited; use profile='kimi-crew'");
     }
     const writeCapableSandbox =
       params.lane === "codex" &&
@@ -232,7 +224,7 @@ export class LaneManager {
       effort: params.effort,
       readOnly,
       sandbox: params.sandbox,
-      agent: params.agent,
+      profile,
     };
     const spec = this.resolveSpec(params.lane, opts, runDir);
     this.warningsById.set(id, spec.warnings);
@@ -246,7 +238,6 @@ export class LaneManager {
       readOnly,
       worktreeBranch: params.worktree,
       worktreePath,
-      seat: params.seat,
       requestOpts: opts,
     });
     this.runs.set(id, run);
@@ -256,105 +247,12 @@ export class LaneManager {
     return { id, warnings: spec.warnings };
   }
 
-  /**
-   * Start a new turn on an existing, still-open session.
-   *
-   * A seat run can lose its live connection without being sessionClosed —
-   * the idle-TTL reaper only kills a seat's subprocess (see reap()), keeping
-   * the run around specifically so this path can respawn + session/resume
-   * instead of failing. Non-seat runs are unaffected: their connection is
-   * only ever missing after a full close() (which also flips sessionClosed),
-   * so they still hit the "not found or already reaped" branch above.
-   */
-  async promptExisting(id: string, prompt: string, correction = false): Promise<{ id: string }> {
-    if (this.shuttingDown) throw new Error("Clanker manager is shutting down; refusing a new prompt");
-    const run = this.runs.get(id);
-    if (!run || run.sessionClosed) {
-      throw new Error(`session '${id}' not found or already reaped; start a new dispatch`);
-    }
-    if (run.turnStatus === "running") {
-      throw new Error(`session '${id}' already has a turn in progress`);
-    }
-    let conn = this.connections.get(id);
-    if (!conn) {
-      if (!run.seat || !run.sessionId) {
-        throw new Error(`session '${id}' has no live connection`);
-      }
-      conn = await this.resumeConnection(run);
-    }
-    const drive = this.runTurn(run, conn, prompt, correction).then((outcome) => this.settleTurn(run, outcome));
-    this.trackDrive(id, drive);
-    return { id };
-  }
-
   private trackDrive(id: string, drive: Promise<void>): void {
     this.turnDrives.set(id, drive);
     void drive.then(
       () => { if (this.turnDrives.get(id) === drive) this.turnDrives.delete(id); },
       () => { if (this.turnDrives.get(id) === drive) this.turnDrives.delete(id); },
     );
-  }
-
-  /**
-   * Respawn a seat's subprocess and reconnect to its known ACP session via
-   * session/resume (see acp-client.ts resumeSession). Throws if the backend
-   * doesn't support session/resume or the spawn/handshake otherwise fails —
-   * that failure surfaces straight to the promptExisting caller, since a
-   * failed resume attempt is a real, reportable error, not a silent fallback.
-   */
-  private async resumeConnection(run: LaneRun): Promise<LaneConnection> {
-    const spec = this.resolveSpec(run.lane, run.requestOpts, run.runDir);
-    const conn = await LaneConnection.connect({
-      spec,
-      cwd: run.cwd,
-      readOnly: run.readOnly,
-      onFileWritten: (p) => run.recordFileWritten(p),
-      handshakeTimeoutMs: this.handshakeTimeoutMs,
-      terminateGraceMs: this.processTerminateGraceMs,
-      resumeSessionId: run.sessionId,
-    });
-    this.connections.set(run.id, conn);
-    run.sessionId = conn.sessionId;
-    this.writeSeatFile(run);
-    return conn;
-  }
-
-  /**
-   * Persist seat metadata to <runDir>/seat.json. Never deleted by close() —
-   * the file is the durable record a caller can use to know what to resume,
-   * even past a terminal close (clanker_close / a genuine turn failure).
-   * No-op for non-seat runs.
-   */
-  private writeSeatFile(run: LaneRun): void {
-    if (!run.seat) return;
-    const payload = {
-      id: run.id,
-      lane: run.lane,
-      cwd: run.cwd,
-      worktree: run.worktreePath,
-      sessionId: run.sessionId,
-      model: run.requestOpts.model,
-      agent: run.requestOpts.agent,
-      updatedAt: new Date().toISOString(),
-    };
-    try {
-      fs.writeFileSync(path.join(run.runDir, "seat.json"), JSON.stringify(payload, null, 2));
-    } catch (err) {
-      console.error(`[clanker] failed to write seat.json for '${run.id}': ${errMessage(err)}`);
-    }
-  }
-
-  /** Resolve a runTurn() outcome into terminal failTurn+close, when it failed. Never retries (only the fresh-dispatch path in attemptInitialTurn does). */
-  private async settleTurn(run: LaneRun, outcome: TurnOutcome): Promise<void> {
-    if (run.cancellationRequested) { run.cancelTurn(); return; }
-    if (outcome.ok) return;
-    const failureClass = classifyTurnFailure({
-      message: outcome.message,
-      turnsCount: run.turnsCount,
-      toolCalls: run.toolCalls(),
-    });
-    run.failTurn(outcome.message, failureClass);
-    await this.close(run.id);
   }
 
   private async driveNewSession(run: LaneRun, spec: SpawnSpec, prompt: string): Promise<void> {
@@ -368,12 +266,13 @@ export class LaneManager {
    * retries here — retrying an identical request against a backend that just
    * rejected its shape wastes a turn and hides the real signal (2026-07-13
    * incident: exactly that class was hand-retried 3 times before anyone
-   * noticed). Retry scope is intentionally limited to a fresh dispatch's
-   * first turn — clanker_prompt (session continuation) never retries.
+   * noticed). Retry scope is intentionally limited to the job's first turn.
    */
   private async attemptInitialTurn(run: LaneRun, spec: SpawnSpec, prompt: string, attempt: number): Promise<void> {
     if (run.cancellationRequested || this.shuttingDown) {
       if (!run.cancellationRequested) run.requestCancellation();
+      await this.computeTouched(run);
+      await this.close(run.id);
       run.cancelTurn();
       return;
     }
@@ -393,8 +292,9 @@ export class LaneManager {
     } catch (e) {
       if (run.cancellationRequested || this.shuttingDown) {
         if (!run.cancellationRequested) run.requestCancellation();
-        run.cancelTurn();
+        await this.computeTouched(run);
         await this.close(run.id);
+        run.cancelTurn();
         return;
       }
       const message = errMessage(e);
@@ -402,6 +302,8 @@ export class LaneManager {
         await this.retryAfterBackoff(run, message, attempt + 1);
         return this.attemptInitialTurn(run, spec, prompt, attempt + 1);
       }
+      await this.computeTouched(run);
+      await this.close(run.id);
       run.failTurn(message);
       return;
     } finally {
@@ -409,21 +311,28 @@ export class LaneManager {
     }
     if (run.cancellationRequested || this.shuttingDown) {
       if (!run.cancellationRequested) run.requestCancellation();
-      run.cancelTurn();
       try {
         await conn.closeAndWait();
-      } finally {
-        await this.close(run.id);
+      } catch (err) {
+        console.error(
+          `[clanker] subprocess shutdown failed for '${run.id}': ${errMessage(err)}`,
+        );
       }
+      await this.computeTouched(run);
+      await this.close(run.id);
+      run.cancelTurn();
       return;
     }
     this.connections.set(run.id, conn);
     run.sessionId = conn.sessionId;
     run.observeConfigOptions(conn.session.newSessionResponse.configOptions);
-    this.writeSeatFile(run);
 
     const outcome = await this.runTurn(run, conn, prompt);
-    if (run.cancellationRequested) { run.cancelTurn(); return; }
+    if (run.cancellationRequested) {
+      await this.close(run.id);
+      run.cancelTurn();
+      return;
+    }
     if (run.isTerminalTurn()) return;
     if (outcome.ok) return;
 
@@ -436,12 +345,13 @@ export class LaneManager {
       // Kill the half-dead process/connection (NOT run.close() — that would
       // also reap the worktree, which the retry needs to reuse) so the retry
       // spawns a clean process against the backend.
-      this.killConnection(run.id);
+      await this.killConnection(run.id);
       await this.retryAfterBackoff(run, outcome.message, attempt + 1);
       return this.attemptInitialTurn(run, spec, prompt, attempt + 1);
     }
-    run.failTurn(outcome.message, failureClass);
+    await this.computeTouched(run);
     await this.close(run.id);
+    run.failTurn(outcome.message, failureClass);
   }
 
   private async retryAfterBackoff(run: LaneRun, message: string, nextAttempt: number): Promise<void> {
@@ -521,25 +431,38 @@ export class LaneManager {
   }
 
   /** Kill a run's live connection/process without touching worktree state (used by the capacity-retry respawn path; run.close() is the terminal, worktree-reaping teardown). */
-  private killConnection(runId: string): void {
+  private async killConnection(runId: string): Promise<void> {
     const conn = this.connections.get(runId);
     if (conn) {
-      conn.close();
-      this.connections.delete(runId);
+      try {
+        await conn.closeAndWait();
+      } catch (err) {
+        console.error(
+          `[clanker] subprocess shutdown failed for '${runId}': ${errMessage(err)}`,
+        );
+      } finally {
+        if (this.connections.get(runId) === conn) this.connections.delete(runId);
+      }
     }
   }
 
   private async finalizeTurn(run: LaneRun, stopReason: string): Promise<void> {
     if (run.isTerminalTurn()) return;
     // Compute git-detected changes for this turn's cwd (union with ACP signals).
+    // Gemini has no ACP write surface and its workspace is mechanically
+    // read-only; a post-turn `git status` there would only report changes that
+    // already existed before reconnaissance and falsely attribute them to the
+    // scout. Its truthful touched set therefore comes solely from ACP write
+    // signals (none are exposed by the Gemini sidecar).
     let gitTouched: string[] = [];
     try {
-      if (await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
+      if (run.lane !== "gemini" && await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
     } catch {
       /* non-fatal: fall back to ACP-derived signals only */
     }
     const touched = dedupe([...gitTouched, ...run.toolTouchedFiles()]);
     run.setFinalTouched(touched);
+    await this.close(run.id);
     if (stopReason === "cancelled") {
       run.cancelTurn();
     } else {
@@ -580,19 +503,6 @@ export class LaneManager {
       return this.buildWaitResult(run);
     } finally {
       this.activeWaits.delete(id);
-    }
-  }
-
-  /** Blocking convenience: start + loop wait until the first turn is terminal. */
-  async dispatchBlocking(
-    params: DispatchParams,
-    onProgress?: (r: WaitResult) => void,
-  ): Promise<WaitResult> {
-    const { id } = await this.dispatchStart(params);
-    for (;;) {
-      const r = await this.wait(id, MAX_WAIT_MS);
-      onProgress?.(r);
-      if (r.status !== "running") return r;
     }
   }
 
@@ -686,76 +596,85 @@ export class LaneManager {
       if (run.turnStatus === "running") {
         run.markForcedKill();
         await this.computeTouched(run);
+        await this.close(id);
         run.cancelTurn();
-        try {
-          await conn.closeAndWait();
-        } finally {
-          this.connections.delete(id);
-          await this.close(id);
-        }
       }
     }
     if (run.turnStatus === "running") {
       await this.computeTouched(run);
-      run.cancelTurn();
       await this.close(id);
+      run.cancelTurn();
     }
     return { id, status: run.turnStatus };
   }
 
   private async computeTouched(run: LaneRun): Promise<void> {
     let gitTouched: string[] = [];
-    try { if (await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd); } catch {}
+    try { if (run.lane !== "gemini" && await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd); } catch {}
     run.setFinalTouched(dedupe([...gitTouched, ...run.toolTouchedFiles()]));
   }
 
   /** Close a session: dispose ACP session, kill subprocess, clean worktree. */
   async close(id: string): Promise<void> {
+    const existing = this.closing.get(id);
+    if (existing) return existing;
+    const operation = this.closeRun(id);
+    this.closing.set(id, operation);
+    try {
+      await operation;
+    } finally {
+      if (this.closing.get(id) === operation) this.closing.delete(id);
+    }
+  }
+
+  private async closeRun(id: string): Promise<void> {
     const run = this.runs.get(id);
     if (!run || run.sessionClosed) return;
     const conn = this.connections.get(id);
-    conn?.close();
-    this.connections.delete(id);
-    if (run.worktreePath && run.worktreeBranch) {
+    let processStopped = true;
+    if (conn) {
       try {
-        const removed = await removeIfClean(run.worktreePath, this.baseRepo);
-        if (!removed) run.worktreeRetained = run.worktreePath;
+        await conn.closeAndWait();
       } catch (err) {
-        // Never let cleanup failure vanish silently — this is a stdio MCP
-        // server, so diagnostics can only go to stderr (stdout is the wire
-        // protocol). Control flow is unchanged: still retain, never rethrow.
+        processStopped = false;
         console.error(
-          `[clanker] worktree cleanup failed for '${run.worktreePath}': ${errMessage(err)}`,
+          `[clanker] subprocess shutdown failed for '${id}': ${errMessage(err)}`,
         );
-        run.worktreeRetained = run.worktreePath;
+      } finally {
+        if (this.connections.get(id) === conn) this.connections.delete(id);
       }
     }
-    run.markClosed();
+    if (run.worktreePath && run.worktreeBranch) {
+      if (!processStopped) {
+        run.worktreeRetained = run.worktreePath;
+      } else {
+        try {
+          const removed = await removeIfClean(run.worktreePath, this.baseRepo);
+          if (!removed) run.worktreeRetained = run.worktreePath;
+        } catch (err) {
+          // Never let cleanup failure vanish silently — this is a stdio MCP
+          // server, so diagnostics can only go to stderr (stdout is the wire
+          // protocol). Control flow is unchanged: still retain, never rethrow.
+          console.error(
+            `[clanker] worktree cleanup failed for '${run.worktreePath}': ${errMessage(err)}`,
+          );
+          run.worktreeRetained = run.worktreePath;
+        }
+      }
+    }
+    await run.markClosed();
   }
 
   /**
    * Reap idle sessions past TTL. Exposed for tests.
    *
-   * Seat runs get a soft reap: only the subprocess is killed (process death),
-   * never the session/worktree (session death) — `sessionClosed` stays false
-   * so clanker_prompt can respawn + session/resume later (promptExisting).
-   * Non-seat runs are unaffected: full close() as before.
+   * Completed jobs are closed after the idle TTL.
    */
   async reap(): Promise<string[]> {
     const reaped: string[] = [];
     for (const run of [...this.runs.values()]) {
       if (run.sessionClosed) continue;
       if (run.turnStatus !== "running" && run.idleMs() > this.sessionTtlMs) {
-        if (run.seat) {
-          // Only soft-reap once: after the first pass connections.has(id) is
-          // false, so subsequent reaper ticks skip a dead seat silently
-          // instead of re-reporting it every tick.
-          if (this.connections.has(run.id)) {
-            this.killConnection(run.id);
-            reaped.push(run.id);
-          }
-          continue;
-        }
         await this.close(run.id);
         reaped.push(run.id);
       }
@@ -772,9 +691,7 @@ export class LaneManager {
       if (run.turnStatus === "running") run.requestCancellation();
     }
     for (const controller of this.pendingConnects.values()) controller.abort();
-    for (const id of [...this.connections.keys()]) {
-      this.killConnection(id);
-    }
+    await Promise.all([...this.connections.keys()].map((id) => this.killConnection(id)));
     await Promise.allSettled([...this.turnDrives.values()]);
     // A pending handshake may have crossed into an established connection
     // during the first snapshot; the shutdown flag makes that drive close it

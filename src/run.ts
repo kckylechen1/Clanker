@@ -1,5 +1,5 @@
 /**
- * LaneRun — in-memory state for one persistent lane session across turns.
+ * LaneRun — in-memory state for one Clanker job.
  *
  * Ingests ACP `session/update` events (spec §6): `plan` is the primary signal
  * projected into a checkbox-style status; tool_call/tool_call_update are only
@@ -63,18 +63,6 @@ export class LaneRun {
   readonly readOnly: boolean;
   readonly runDir: string;
   readonly createdAt = Date.now();
-  /**
-   * True for a persistent seat (clanker_dispatch_start seat=true). Seats are
-   * exempt from the idle-TTL reaper's terminal close(): reap() only kills the
-   * subprocess, leaving `sessionClosed` false so clanker_prompt can respawn +
-   * session/resume the same ACP session (see LaneManager.resumeConnection).
-   */
-  readonly seat: boolean;
-  /**
-   * The exact LaneRequestOptions the spec resolver was originally called
-   * with — retained so a seat can be respawned with an identical spec
-   * (model/agent/sandbox/readOnly) after its subprocess dies.
-   */
   readonly requestOpts: LaneRequestOptions;
 
   turnStatus: RunStatus = "running";
@@ -128,7 +116,6 @@ export class LaneRun {
     readOnly: boolean;
     worktreeBranch?: string;
     worktreePath?: string;
-    seat?: boolean;
     requestOpts?: LaneRequestOptions;
   }) {
     this.id = init.id;
@@ -139,7 +126,6 @@ export class LaneRun {
     this.readOnly = init.readOnly;
     this.worktreeBranch = init.worktreeBranch;
     this.worktreePath = init.worktreePath;
-    this.seat = init.seat ?? false;
     this.requestOpts = init.requestOpts ?? {};
   }
 
@@ -224,10 +210,11 @@ export class LaneRun {
     this.markTerminal("cancelled");
   }
 
-  markClosed(): void {
-    this.sessionClosed = true;
+  async markClosed(): Promise<void> {
+    if (this.sessionClosed) return;
     this.writeEvent({ t: "session_closed" });
-    this.closeStreams();
+    await this.closeStreamsAndWait();
+    this.sessionClosed = true;
     this.touch("session_closed");
   }
 
@@ -460,7 +447,7 @@ export class LaneRun {
       observed_model: this.observedModel, requested_effort: this.requestOpts.effort,
       observed_effort: this.observedEffort, lane: this.lane, transport: "acp-stdio",
       backend: this.lane, read_only: this.readOnly, sandbox: this.requestOpts.sandbox,
-      seat: this.seat, created_at: new Date(this.createdAt).toISOString(),
+      created_at: new Date(this.createdAt).toISOString(),
       ...(this.startedAt ? { started_at: new Date(this.startedAt).toISOString() } : {}),
       ...(this.terminalAt ? { terminal_at: new Date(this.terminalAt).toISOString(), duration_ms: this.terminalAt - (this.startedAt ?? this.createdAt) } : {}),
       turns: this.turnsCount, retries: this.retries, corrections: this.corrections,
@@ -540,20 +527,32 @@ export class LaneRun {
   }
 
   private writeEvent(obj: unknown): void {
+    const line = JSON.stringify({ ts: Date.now(), ...(obj as object) }) + "\n";
+    if (this.sessionClosed) {
+      fs.mkdirSync(this.runDir, { recursive: true });
+      fs.appendFileSync(path.join(this.runDir, "events.jsonl"), line);
+      return;
+    }
     if (!this.eventsStream) {
       fs.mkdirSync(this.runDir, { recursive: true });
       this.eventsStream = fs.createWriteStream(path.join(this.runDir, "events.jsonl"), { flags: "a" });
     }
-    this.eventsStream.write(JSON.stringify({ ts: Date.now(), ...(obj as object) }) + "\n");
+    this.eventsStream.write(line);
   }
 
   private logChunk(kind: "thought" | "message", text: string): void {
     if (!text) return;
+    const line = `[${new Date().toISOString()}] ${kind}: ${text}\n`;
+    if (this.sessionClosed) {
+      fs.mkdirSync(this.runDir, { recursive: true });
+      fs.appendFileSync(path.join(this.runDir, "chunks.log"), line);
+      return;
+    }
     if (!this.chunksStream) {
       fs.mkdirSync(this.runDir, { recursive: true });
       this.chunksStream = fs.createWriteStream(path.join(this.runDir, "chunks.log"), { flags: "a" });
     }
-    this.chunksStream.write(`[${new Date().toISOString()}] ${kind}: ${text}\n`);
+    this.chunksStream.write(line);
   }
 
   closeStreams(): void {
@@ -561,6 +560,38 @@ export class LaneRun {
     this.chunksStream?.end();
     this.eventsStream = null;
     this.chunksStream = null;
+  }
+
+  private async closeStreamsAndWait(): Promise<void> {
+    const eventsStream = this.eventsStream;
+    const chunksStream = this.chunksStream;
+    await Promise.all([
+      this.finishStream(eventsStream, "events"),
+      this.finishStream(chunksStream, "chunks"),
+    ]);
+    if (this.eventsStream === eventsStream) this.eventsStream = null;
+    if (this.chunksStream === chunksStream) this.chunksStream = null;
+  }
+
+  private finishStream(stream: fs.WriteStream | null, artifact: string): Promise<void> {
+    if (!stream) return Promise.resolve();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        stream.off("error", onError);
+        resolve();
+      };
+      const onError = (error: Error) => {
+        console.error(
+          `[clanker] ${artifact} stream close failed for '${this.id}': ${error.message}`,
+        );
+        finish();
+      };
+      stream.once("error", onError);
+      stream.end(finish);
+    });
   }
 
   private relToCwd(p: string): string {

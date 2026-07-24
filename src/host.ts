@@ -3,7 +3,7 @@ import { LANE_NAMES, type LaneName } from "./types.js";
 export type ClankerHost = "claude" | "codex" | "standalone";
 
 const HOSTS: readonly ClankerHost[] = ["claude", "codex", "standalone"];
-const CODEX_LANES = ["opencode", "grok"] as const;
+const CODEX_LANES = ["opencode", "grok", "gemini"] as const;
 
 export function parseHostArgs(args: readonly string[]): ClankerHost {
   let host: ClankerHost | undefined;

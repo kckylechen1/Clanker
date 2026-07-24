@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LaneManager } from "../src/manager.js";
-import { fakeResolver } from "./helpers.js";
+import { fakeResolver, until } from "./helpers.js";
 
 function git(cwd: string, args: string[]): void {
   execFileSync("git", args, {
@@ -66,19 +66,22 @@ test("close() surfaces worktree cleanup failures to stderr and still marks workt
   try {
     const { id } = await m.dispatchStart({
       lane: "codex",
-      prompt: "close-diag",
+      prompt: "STALL close-diag",
       readOnly: false,
       worktree: branch,
     });
 
-    // Let the turn finish so close() below is a clean session teardown, not a
-    // mid-turn abort.
+    // Wait until the live turn is established. One-shot completion now closes
+    // immediately, so the cleanup failure must be injected while the job is
+    // still running.
     const deadline = Date.now() + 5000;
     let status = m.status(id);
-    while (status.status === "running" && Date.now() < deadline) {
+    while (status.tool_calls === 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 50));
       status = m.status(id);
     }
+    assert.equal(status.status, "running", "fixture must still be in flight");
+    assert.ok(status.tool_calls > 0, "fixture must establish the ACP turn");
 
     const worktreePath = status.worktree;
     assert.ok(worktreePath, "worktree path recorded on the run");
@@ -89,7 +92,7 @@ test("close() surfaces worktree cleanup failures to stderr and still marks workt
     // returning a clean/dirty verdict, so removeIfClean() throws.
     fs.rmSync(worktreePath!, { recursive: true, force: true });
 
-    await m.close(id); // must not throw
+    await m.close(id); // must not throw; closing the connection also ends the turn
 
     assert.ok(
       stderrLines.some((l) => l.includes(worktreePath!)),
@@ -100,10 +103,43 @@ test("close() surfaces worktree cleanup failures to stderr and still marks workt
       `expected the stderr diagnostic to describe a failure, got: ${JSON.stringify(stderrLines)}`,
     );
 
+    await until(() => m.status(id).status === "error", 5_000);
     const result = await m.wait(id, 100);
+    assert.equal(result.status, "error", "closing the in-flight fixture terminates its turn");
     assert.equal(result.worktree_retained, worktreePath, "worktreeRetained still set despite the cleanup error");
   } finally {
     console.error = originalConsoleError;
+    await m.shutdown();
+  }
+});
+
+test("concurrent close calls share one subprocess and worktree teardown", async () => {
+  const base = makeBaseRepo();
+  const branch = `close-once-${Math.random().toString(36).slice(2, 8)}`;
+  const m = new LaneManager({
+    resolveSpec: fakeResolver,
+    disableReaper: true,
+    baseRepo: base,
+  });
+
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "codex",
+      prompt: "STALL close-once",
+      readOnly: false,
+      worktree: branch,
+    });
+    await until(() => m.status(id).tool_calls > 0, 5_000);
+    const worktreePath = m.status(id).worktree;
+    assert.ok(worktreePath && fs.existsSync(worktreePath), "managed worktree must exist");
+
+    await Promise.all([m.close(id), m.close(id)]);
+    await until(() => m.status(id).status === "error", 5_000);
+
+    const result = await m.wait(id, 100);
+    assert.equal(result.worktree_retained, undefined, "clean worktree was removed, not falsely retained");
+    assert.equal(fs.existsSync(worktreePath!), false, "worktree teardown ran exactly once");
+  } finally {
     await m.shutdown();
   }
 });
