@@ -108,19 +108,45 @@ test("OpenCode crew pins Kimi and delegates orchestration to the installed profi
   assert.deepEqual(spec.args, ["acp"]);
 });
 
-test("OpenCode authentication remains owned by OpenCode", () => {
-  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-glm-auth-"));
+// ---- vault-exec wiring: GLM's bare API key never touches the ambient env -
+// Restored verbatim from 0.2.5 (26e9c9f test/units.test.ts:117-140). 69988a3
+// replaced these two with their inverse ("spawns OpenCode directly") when it
+// deleted wrapWithVaultExec one day after that wiring was merged (9cc0733);
+// #19 reverses that deletion, so the assertion goes back to the stricter form.
+
+test("GLM's opencode spawn is wrapped in tachi vault exec, original command intact after --", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-glm-vault-"));
   const spec = buildSpawnSpec("opencode", { model: "glm" }, runDir);
-  assert.equal(spec.command, "opencode");
-  assert.deepEqual(spec.args, ["acp"]);
-  assert.ok(spec.env.OPENCODE_CONFIG_CONTENT);
+  assert.equal(spec.command, "tachi");
+  assert.equal(spec.args[0], "vault");
+  assert.equal(spec.args[1], "exec");
+  assert.equal(spec.args[2], "--keychain");
+  assert.equal(spec.args[3], "--require");
+  assert.equal(spec.args[4], "ZHIPUAI_API_KEY");
+  assert.equal(spec.args[5], "--");
+  // Everything the un-wrapped opencode lane would have spawned (command +
+  // args) survives intact after the `--` separator, byte-for-byte.
+  assert.deepEqual(spec.args.slice(6), ["opencode", "acp"]);
+  // env (OPENCODE_CONFIG/_CONTENT etc.) is untouched by the wrap — `tachi vault
+  // exec` inherits it and injects only the vaulted var into the child.
+  assert.ok(spec.env.OPENCODE_CONFIG_CONTENT, "opencode config env survives the wrap");
 });
 
-test("GLM full model id also spawns OpenCode directly", () => {
+test("GLM full model id (not just the 'glm' shortname) also triggers the vault wrap", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-glm-full-"));
   const spec = buildSpawnSpec("opencode", { model: "zhipuai-coding-plan/glm-5.2" }, runDir);
-  assert.equal(spec.command, "opencode");
-  assert.deepEqual(spec.args, ["acp"]);
+  assert.equal(spec.command, "tachi");
+  assert.deepEqual(spec.args.slice(0, 6), ["vault", "exec", "--keychain", "--require", "ZHIPUAI_API_KEY", "--"]);
+});
+
+// A read-only GLM dispatch carries the same bare API key as a write one, and
+// the profile that starts it (oc-review) declares no secrets. The wrap must
+// therefore stay keyed on the MODEL, not on the profile's declaration.
+test("read-only GLM is wrapped too, even from a profile that declares no secrets", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-glm-ro-"));
+  const spec = buildSpawnSpec("opencode", { model: "glm", readOnly: true, secrets: [] }, runDir);
+  assert.equal(spec.command, "tachi");
+  assert.deepEqual(spec.args.slice(0, 6), ["vault", "exec", "--keychain", "--require", "ZHIPUAI_API_KEY", "--"]);
 });
 
 test("OpenCode model aliases all use the same direct ACP spawn", () => {

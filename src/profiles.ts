@@ -20,7 +20,7 @@
  * write isolation, cross-repo worktree cut, writeCapableSandbox). This registry
  * narrows the entrance; it does not restate or replace those gates.
  */
-import { TURN_TIMEOUT_MS } from "./constants.js";
+import { isGlmModel, TURN_TIMEOUT_MS } from "./constants.js";
 import type { CodexSandboxMode, LaneName } from "./types.js";
 import { LANE_NAMES } from "./types.js";
 
@@ -365,6 +365,15 @@ export function resolveProfileDispatch(
         throw new Error(`profile '${profile.id}' requires an explicit model id`);
       }
       model = input.model.trim();
+      // 0.2.5's writer relay rejected the GLM alias and its full id before the
+      // manager ever saw them (tools.ts clanker_dispatch_write_start), so the
+      // caller got a routing answer rather than a policy error. The manager's
+      // own gate stays authoritative underneath.
+      if (!profile.readOnly && profile.supervision !== "sonnet" && isGlmModel(model)) {
+        throw new Error(
+          `profile '${profile.id}' cannot run a GLM write; GLM writes are supervised and belong to profile 'oc-glm-write'`,
+        );
+      }
       break;
   }
 

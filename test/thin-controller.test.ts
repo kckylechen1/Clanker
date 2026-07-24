@@ -6,6 +6,7 @@ import test from "node:test";
 import { z } from "zod";
 import { buildSpawnSpec } from "../src/backends.js";
 import { LaneManager } from "../src/manager.js";
+import { DISPATCH_PROFILES } from "../src/profiles.js";
 import { registerTools } from "../src/tools.js";
 import { choosePermissionOption, resolveContainedReadPath, resolveContainedWritePath } from "../src/acp-client.js";
 import { fakeSpec, until } from "./helpers.js";
@@ -16,9 +17,24 @@ function captureTools(manager: LaneManager) {
   return tools;
 }
 
-test("public inventory is exactly five unified job tools", () => {
+test("public inventory is five lifecycle tools plus one generated tool per profile", () => {
   const manager = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true });
-  assert.deepEqual([...captureTools(manager).keys()], ["clanker_start", "clanker_wait", "clanker_status", "clanker_cancel", "clanker_list"]);
+  assert.deepEqual([...captureTools(manager).keys()], [
+    "clanker_start",
+    ...DISPATCH_PROFILES.map((p) => `clanker_start_${p.id}`),
+    "clanker_wait", "clanker_status", "clanker_cancel", "clanker_list",
+  ]);
+});
+
+test("host=codex sees neither its own lane nor the supervised-GLM profile", () => {
+  const manager = new LaneManager({ host: "codex", resolveSpec: () => fakeSpec(), disableReaper: true });
+  const names = [...captureTools(manager).keys()];
+  // 0.2.x parity: clanker_dispatch_glm_write_start was registered only when
+  // host !== "codex", because the supervised shape needs the Sonnet seat.
+  assert.equal(names.includes("clanker_start_oc-glm-write"), false);
+  assert.equal(names.includes("clanker_start_codex-review"), false, "self-dispatch lane is not offered at all");
+  assert.equal(names.includes("clanker_start_codex-write"), false);
+  assert.equal(names.includes("clanker_start_oc-review"), true);
 });
 
 test("a completed one-shot job closes its ACP session before publishing done", async () => {
@@ -37,13 +53,13 @@ test("a completed one-shot job closes its ACP session before publishing done", a
   }
 });
 
-test("clanker_start exposes the unified schema and only approved profiles", () => {
+test("clanker_start exposes the profile schema and only registered profiles", () => {
   const manager = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true });
   const shape = captureTools(manager).get("clanker_start")!.config.inputSchema;
   const schema = z.object(shape);
-  assert.equal(schema.safeParse({ lane: "codex", prompt: "read" }).success, true);
-  assert.equal(schema.safeParse({ lane: "codex", prompt: "read", profile: "unsafe" }).success, false);
-  assert.deepEqual(Object.keys(shape), ["lane", "prompt", "cwd", "worktree", "model", "effort", "read_only", "sandbox", "profile"]);
+  assert.equal(schema.safeParse({ profile: "codex-review", prompt: "read" }).success, true);
+  assert.equal(schema.safeParse({ profile: "unsafe", prompt: "read" }).success, false);
+  assert.deepEqual(Object.keys(shape), ["profile", "prompt", "cwd", "worktree", "model", "effort"]);
 });
 
 test("manager centralizes host, Gemini, write isolation, model, and GLM gates", async () => {
