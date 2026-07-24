@@ -90,6 +90,27 @@ test("Gemini backend is read-only, defaults model, and passes effort through sid
   );
 });
 
+test("Gemini spec forwards only an explicit CLANKER_GEMINI_PRINT_TIMEOUT override, never a hardcoded default", { skip: !workspaceSandboxAvailable }, () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-gemini-spec-timeout-"));
+  const original = process.env.CLANKER_GEMINI_PRINT_TIMEOUT;
+  try {
+    delete process.env.CLANKER_GEMINI_PRINT_TIMEOUT;
+    // The default must live solely in gemini-acp.ts's own fallback; the
+    // production spawn path (buildSpawnSpec -> acp-client's env spread)
+    // must not shadow it with a second hardcoded default, or the sidecar
+    // never sees the var "unset" and its default becomes dead code.
+    const spec = buildSpawnSpec("gemini", { readOnly: true }, runDir);
+    assert.equal("CLANKER_GEMINI_PRINT_TIMEOUT" in spec.env, false);
+
+    process.env.CLANKER_GEMINI_PRINT_TIMEOUT = "20m";
+    const overridden = buildSpawnSpec("gemini", { readOnly: true }, runDir);
+    assert.equal(overridden.env.CLANKER_GEMINI_PRINT_TIMEOUT, "20m");
+  } finally {
+    if (original === undefined) delete process.env.CLANKER_GEMINI_PRINT_TIMEOUT;
+    else process.env.CLANKER_GEMINI_PRINT_TIMEOUT = original;
+  }
+});
+
 test("Gemini ACP sidecar projects stdout and forces plan, sandbox, print, and timeout", { skip: !workspaceSandboxAvailable }, async () => {
   const capture = path.join(os.tmpdir(), `clanker-agy-args-${process.pid}`);
   const output = await prompt(sidecarSpec(
@@ -110,10 +131,17 @@ echo grounded-result`),
   const args = fs.readFileSync(capture, "utf8");
   assert.match(args, /--mode\nplan\n/);
   assert.match(args, /--sandbox\n/);
-  assert.match(args, /--print-timeout\n3m\n/);
+  assert.match(args, /--print-timeout\n10m\n/);
   assert.match(args, /--print\n/);
   assert.match(args, /conclusions, source URLs or repository evidence, uncertainties, and the recommended next lane/);
   assert.match(args, /Do not modify workspace files or run destructive commands/);
+});
+
+test("Gemini ACP sidecar honors CLANKER_GEMINI_PRINT_TIMEOUT override over the 10m default", { skip: !workspaceSandboxAvailable }, async () => {
+  const capture = path.join(os.tmpdir(), `clanker-agy-timeout-override-${process.pid}`);
+  await prompt(sidecarSpec(fakeAgy("echo grounded-result"), capture, { CLANKER_GEMINI_PRINT_TIMEOUT: "20m" }));
+  const args = fs.readFileSync(capture, "utf8");
+  assert.match(args, /--print-timeout\n20m\n/);
 });
 
 test("Gemini ACP sidecar fails loudly on nonzero and empty output", { skip: !workspaceSandboxAvailable }, async () => {
@@ -121,6 +149,20 @@ test("Gemini ACP sidecar fails loudly on nonzero and empty output", { skip: !wor
     const capture = path.join(os.tmpdir(), `clanker-agy-fail-${process.pid}-${Math.random()}`);
     await assert.rejects(prompt(sidecarSpec(fakeAgy(body), capture)), expected);
   }
+});
+
+test("Gemini ACP sidecar classifies a print-timeout hit distinctly from a backend crash", { skip: !workspaceSandboxAvailable }, async () => {
+  const capture = path.join(os.tmpdir(), `clanker-agy-timeout-classify-${process.pid}`);
+  // agy exits 1 with this exact stderr phrase when its own --print-timeout
+  // ceiling elapses; the wrapping error must not read as a generic crash.
+  await assert.rejects(
+    prompt(sidecarSpec(fakeAgy("echo 'timeout waiting for response' >&2; exit 1"), capture)),
+    /print-timeout/,
+  );
+  await assert.rejects(
+    prompt(sidecarSpec(fakeAgy("echo 'timeout waiting for response' >&2; exit 1"), capture)),
+    (error: Error) => !/Clanker: Gemini agy failed \(exit/.test(error.message),
+  );
 });
 
 test("Gemini ACP sidecar denies writes beneath the inspected workspace on macOS", { skip: !workspaceSandboxAvailable }, async () => {
