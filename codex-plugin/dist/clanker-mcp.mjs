@@ -31561,7 +31561,9 @@ function buildSpawnSpec(lane, opts, runDir) {
       }
       env.CLANKER_AGY_PATH = process.env.CLANKER_AGY_PATH ?? resolveSystemAgyPath();
       env.CLANKER_GEMINI_MODEL = model;
-      env.CLANKER_GEMINI_PRINT_TIMEOUT = process.env.CLANKER_GEMINI_PRINT_TIMEOUT ?? "3m";
+      if (process.env.CLANKER_GEMINI_PRINT_TIMEOUT) {
+        env.CLANKER_GEMINI_PRINT_TIMEOUT = process.env.CLANKER_GEMINI_PRINT_TIMEOUT;
+      }
       if (effort) env.CLANKER_GEMINI_EFFORT = effort;
       return { command: process.execPath, args: [resolveGeminiAcpEntry()], env, warnings };
     }

@@ -285,7 +285,14 @@ export function buildSpawnSpec(
       }
       env.CLANKER_AGY_PATH = process.env.CLANKER_AGY_PATH ?? resolveSystemAgyPath();
       env.CLANKER_GEMINI_MODEL = model;
-      env.CLANKER_GEMINI_PRINT_TIMEOUT = process.env.CLANKER_GEMINI_PRINT_TIMEOUT ?? "3m";
+      // Only forward an explicit operator override. The default lives
+      // solely in gemini-acp.ts's `|| "10m"` fallback — do not shadow it
+      // with a second hardcoded default here, or the sidecar never sees
+      // its env var "unset" and its own default becomes dead code on this
+      // (the real dispatch) path. See issue #13.
+      if (process.env.CLANKER_GEMINI_PRINT_TIMEOUT) {
+        env.CLANKER_GEMINI_PRINT_TIMEOUT = process.env.CLANKER_GEMINI_PRINT_TIMEOUT;
+      }
       if (effort) env.CLANKER_GEMINI_EFFORT = effort;
       return { command: process.execPath, args: [resolveGeminiAcpEntry()], env, warnings };
     }
