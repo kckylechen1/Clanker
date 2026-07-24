@@ -15,3 +15,5 @@ codex-plugin/dist/*
 .test-tmp/
 .DS_Store
 *.log
+*.db-shm
+*.db-wal
