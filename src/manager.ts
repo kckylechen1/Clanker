@@ -239,6 +239,7 @@ export class LaneManager {
       worktreeBranch: params.worktree,
       worktreePath,
       requestOpts: opts,
+      initialPrompt: params.prompt,
     });
     this.runs.set(id, run);
 

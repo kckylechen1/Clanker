@@ -3226,8 +3226,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path7) {
-      let input = path7;
+    function removeDotSegments(path8) {
+      let input = path8;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3479,8 +3479,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path7, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path7 && path7 !== "/" ? path7 : void 0;
+        const [path8, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path8 && path8 !== "/" ? path8 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -6873,12 +6873,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs6, exportName) {
+    function addFormats(ajv, list, fs7, exportName) {
       var _a;
       var _b;
       (_a = (_b = ajv.opts.code).formats) !== null && _a !== void 0 ? _a : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs6[f]);
+        ajv.addFormat(f, fs7[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -7364,8 +7364,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path7, errorMaps, issueData } = params;
-  const fullPath = [...path7, ...issueData.path || []];
+  const { data, path: path8, errorMaps, issueData } = params;
+  const fullPath = [...path8, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7481,11 +7481,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path7, key) {
+  constructor(parent, value, path8, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path7;
+    this._path = path8;
     this._key = key;
   }
   get path() {
@@ -11367,10 +11367,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path7) {
-  if (!path7)
+function getElementAtPath(obj, path8) {
+  if (!path8)
     return obj;
-  return path7.reduce((acc, key) => acc?.[key], obj);
+  return path8.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11690,11 +11690,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path7, issues) {
+function prefixIssues(path8, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path7);
+    iss.path.unshift(path8);
     return iss;
   });
 }
@@ -11831,7 +11831,7 @@ function treeifyError(error40, _mapper) {
     return issue2.message;
   };
   const result = { errors: [] };
-  const processError = (error41, path7 = []) => {
+  const processError = (error41, path8 = []) => {
     var _a, _b;
     for (const issue2 of error41.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
@@ -11841,7 +11841,7 @@ function treeifyError(error40, _mapper) {
       } else if (issue2.code === "invalid_element") {
         processError({ issues: issue2.issues }, issue2.path);
       } else {
-        const fullpath = [...path7, ...issue2.path];
+        const fullpath = [...path8, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -11871,9 +11871,9 @@ function treeifyError(error40, _mapper) {
   processError(error40);
   return result;
 }
-function toDotPath(path7) {
+function toDotPath(path8) {
   const segs = [];
-  for (const seg of path7) {
+  for (const seg of path8) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -27788,8 +27788,8 @@ function envInt(name, fallback) {
 
 // src/manager.ts
 import crypto from "node:crypto";
-import fs5 from "node:fs";
-import path6 from "node:path";
+import fs6 from "node:fs";
+import path7 from "node:path";
 
 // src/acp-client.ts
 import { spawn } from "node:child_process";
@@ -31647,8 +31647,61 @@ function isCapacityTransient(message) {
 }
 
 // src/run.ts
+import fs4 from "node:fs";
+import path5 from "node:path";
+
+// src/ledger.ts
 import fs3 from "node:fs";
+import os3 from "node:os";
 import path4 from "node:path";
+var LEDGER_DIR = process.env.CLANKER_LEDGER_DIR ?? path4.join(os3.homedir(), ".agents", "dispatch-ledger");
+var LEDGER_PATH = path4.join(LEDGER_DIR, "ledger.jsonl");
+var HOOK_ERRORS_PATH = path4.join(LEDGER_DIR, "hook_errors.log");
+var PROMPT_HEAD_CHAR_BUDGET = 200;
+var ERROR_CLASS_CHAR_BUDGET = 200;
+var DEFAULT_AGENT_PROFILE = "worker";
+function buildLedgerRow(input) {
+  const profile = input.agentProfile ?? DEFAULT_AGENT_PROFILE;
+  const agentType = profile !== DEFAULT_AGENT_PROFILE ? `${input.lane}:${profile}` : input.lane;
+  const isError = input.turnStatus === "error";
+  return {
+    ts: (/* @__PURE__ */ new Date()).toISOString(),
+    session: null,
+    repo: input.cwd,
+    tool: "ClankerMCP",
+    agent_type: agentType,
+    model: input.model ?? null,
+    label: input.id,
+    prompt_head: input.initialPrompt.slice(0, PROMPT_HEAD_CHAR_BUDGET),
+    outcome: isError ? "blocked" : null,
+    review: null,
+    refix_rounds: null,
+    error_class: isError && input.error ? input.error.slice(0, ERROR_CLASS_CHAR_BUDGET) : null,
+    lesson_ref: null
+  };
+}
+function appendLedgerRow(input) {
+  try {
+    fs3.mkdirSync(LEDGER_DIR, { recursive: true });
+    fs3.appendFileSync(LEDGER_PATH, JSON.stringify(buildLedgerRow(input)) + "\n");
+  } catch (error40) {
+    logHookError(input.id, error40);
+  }
+}
+function logHookError(runId, error40) {
+  try {
+    fs3.mkdirSync(LEDGER_DIR, { recursive: true });
+    const message = error40 instanceof Error ? error40.stack ?? error40.message : String(error40);
+    fs3.appendFileSync(
+      HOOK_ERRORS_PATH,
+      `[${(/* @__PURE__ */ new Date()).toISOString()}] native-ledger-writer append failed for run '${runId}': ${message}
+`
+    );
+  } catch {
+  }
+}
+
+// src/run.ts
 var EMPTY_PLAN = {
   entries: [],
   completed: 0,
@@ -31668,6 +31721,14 @@ var LaneRun = class {
   runDir;
   createdAt = Date.now();
   requestOpts;
+  /**
+   * The dispatch's original (first-turn) prompt — retained verbatim so the
+   * native ledger writer (ledger.ts) can derive `prompt_head` at close()
+   * time, when the LaneManager call site no longer has the prompt in scope.
+   * Deliberately never overwritten by a later clanker_prompt continuation:
+   * the ledger row describes the dispatch's lifetime, not its latest turn.
+   */
+  initialPrompt;
   turnStatus = "running";
   turnsCount = 0;
   sessionClosed = false;
@@ -31716,6 +31777,7 @@ var LaneRun = class {
     this.worktreeBranch = init.worktreeBranch;
     this.worktreePath = init.worktreePath;
     this.requestOpts = init.requestOpts ?? {};
+    this.initialPrompt = init.initialPrompt ?? "";
   }
   // ---- lifecycle ----------------------------------------------------------
   beginTurn(prompt, correction = false) {
@@ -31749,6 +31811,7 @@ var LaneRun = class {
     this.writeEvent({ t: "turn_done", turn: this.turnsCount, stopReason: "end_turn" });
     this.touch("turn_done");
     this.markTerminal("done");
+    this.writeLedgerRowOnce();
   }
   /**
    * @param failureClass optional classification tag (e.g. CLANKER-INFRA-FAILURE)
@@ -31766,6 +31829,7 @@ var LaneRun = class {
     this.writeEvent({ t: "turn_error", turn: this.turnsCount, message, failureClass });
     this.touch("turn_error");
     this.markTerminal("error");
+    this.writeLedgerRowOnce();
   }
   /**
    * Record a non-terminal capacity-transient retry (see failure-classifier.ts
@@ -31791,6 +31855,7 @@ var LaneRun = class {
     this.writeEvent({ t: "turn_cancelled", turn: this.turnsCount });
     this.touch("turn_cancelled");
     this.markTerminal("cancelled");
+    this.writeLedgerRowOnce();
   }
   async markClosed() {
     if (this.sessionClosed) return;
@@ -32035,15 +32100,52 @@ var LaneRun = class {
     this.stopReason ??= reason;
     this.persistTelemetry();
   }
+  /**
+   * Native dispatch-ledger row: called exactly once from the tail of
+   * completeTurn()/failTurn()/cancelTurn() — the true single choke point a
+   * run's lifetime passes through exactly once, guarded by the very same
+   * `isTerminalTurn()` check already at the top of all three (per-run state,
+   * not a module-level set): whichever of the three fires first flips
+   * `turnStatus` off "running", so any other terminal-transition call for
+   * this run (including a later one of these same three methods, should that
+   * ever happen) short-circuits before doing anything, this row included.
+   *
+   * Deliberately NOT wired from LaneManager's close()/closeRun(): this
+   * refactor's one-shot job controller calls `close()` *before* the
+   * corresponding completeTurn()/failTurn()/cancelTurn() at every one of its
+   * call sites (worktree/session teardown first, status flip second — see
+   * manager.ts), so at closeRun() time `run.turnStatus` is still "running"
+   * and `run.error` is still unset. That ordering is exercised concretely by
+   * manager-close-diagnostics.test.ts's direct `m.close(id)` calls on a still-
+   * running turn: closeRun() runs (and, per its own `sessionClosed` dedup,
+   * ends up being the ONLY invocation that ever executes) strictly before the
+   * turn's own failTurn() call discovers the mid-turn exit and sets the real
+   * error. Reading the terminal fields from here instead — after they're
+   * genuinely final — avoids depending on manager.ts's close-vs-status-flip
+   * ordering entirely. See ledger.ts for why this write exists at all
+   * (MCP-direct dispatches bypass the harness PostToolUse hook).
+   */
+  writeLedgerRowOnce() {
+    appendLedgerRow({
+      id: this.id,
+      lane: this.lane,
+      cwd: this.cwd,
+      agentProfile: this.requestOpts.profile,
+      model: this.telemetry().resolved_model ?? null,
+      initialPrompt: this.initialPrompt,
+      turnStatus: this.turnStatus,
+      error: this.error
+    });
+  }
   persistTelemetry() {
-    const target = path4.join(this.runDir, "telemetry.json");
+    const target = path5.join(this.runDir, "telemetry.json");
     const tmp = `${target}.${process.pid}.tmp`;
     try {
-      fs3.writeFileSync(tmp, JSON.stringify(this.telemetry(), null, 2));
-      fs3.renameSync(tmp, target);
+      fs4.writeFileSync(tmp, JSON.stringify(this.telemetry(), null, 2));
+      fs4.renameSync(tmp, target);
     } catch (error40) {
       try {
-        fs3.rmSync(tmp, { force: true });
+        fs4.rmSync(tmp, { force: true });
       } catch {
       }
       console.error(`[clanker] telemetry persistence failed for run '${this.id}' at '${target}': ${error40 instanceof Error ? error40.message : String(error40)}`);
@@ -32098,13 +32200,13 @@ var LaneRun = class {
   writeEvent(obj) {
     const line = JSON.stringify({ ts: Date.now(), ...obj }) + "\n";
     if (this.sessionClosed) {
-      fs3.mkdirSync(this.runDir, { recursive: true });
-      fs3.appendFileSync(path4.join(this.runDir, "events.jsonl"), line);
+      fs4.mkdirSync(this.runDir, { recursive: true });
+      fs4.appendFileSync(path5.join(this.runDir, "events.jsonl"), line);
       return;
     }
     if (!this.eventsStream) {
-      fs3.mkdirSync(this.runDir, { recursive: true });
-      this.eventsStream = fs3.createWriteStream(path4.join(this.runDir, "events.jsonl"), { flags: "a" });
+      fs4.mkdirSync(this.runDir, { recursive: true });
+      this.eventsStream = fs4.createWriteStream(path5.join(this.runDir, "events.jsonl"), { flags: "a" });
     }
     this.eventsStream.write(line);
   }
@@ -32113,13 +32215,13 @@ var LaneRun = class {
     const line = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${kind}: ${text}
 `;
     if (this.sessionClosed) {
-      fs3.mkdirSync(this.runDir, { recursive: true });
-      fs3.appendFileSync(path4.join(this.runDir, "chunks.log"), line);
+      fs4.mkdirSync(this.runDir, { recursive: true });
+      fs4.appendFileSync(path5.join(this.runDir, "chunks.log"), line);
       return;
     }
     if (!this.chunksStream) {
-      fs3.mkdirSync(this.runDir, { recursive: true });
-      this.chunksStream = fs3.createWriteStream(path4.join(this.runDir, "chunks.log"), { flags: "a" });
+      fs4.mkdirSync(this.runDir, { recursive: true });
+      this.chunksStream = fs4.createWriteStream(path5.join(this.runDir, "chunks.log"), { flags: "a" });
     }
     this.chunksStream.write(line);
   }
@@ -32161,7 +32263,7 @@ var LaneRun = class {
   }
   relToCwd(p) {
     try {
-      const rel = path4.relative(this.cwd, p);
+      const rel = path5.relative(this.cwd, p);
       return rel && !rel.startsWith("..") ? rel : p;
     } catch {
       return p;
@@ -32208,8 +32310,8 @@ function hostLaneBlockedReason(host, lane) {
 
 // src/worktree.ts
 import { execFile } from "node:child_process";
-import fs4 from "node:fs";
-import path5 from "node:path";
+import fs5 from "node:fs";
+import path6 from "node:path";
 import { promisify } from "node:util";
 var exec = promisify(execFile);
 async function git(cwd, args) {
@@ -32218,7 +32320,7 @@ async function git(cwd, args) {
 }
 function deriveWorktreePath(branch) {
   const safe = branch.replace(/[^A-Za-z0-9._-]/g, "-");
-  return path5.join(WORKTREES_ROOT, safe);
+  return path6.join(WORKTREES_ROOT, safe);
 }
 async function isGitWorkTree(cwd) {
   try {
@@ -32230,10 +32332,10 @@ async function isGitWorkTree(cwd) {
 }
 async function createWorktree(branch, baseRepo = BASE_REPO) {
   const wtPath = deriveWorktreePath(branch);
-  if (fs4.existsSync(wtPath)) {
+  if (fs5.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
-  fs4.mkdirSync(WORKTREES_ROOT, { recursive: true });
+  fs5.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(baseRepo, ["worktree", "add", wtPath, "-b", branch, "origin/main"]);
   return wtPath;
 }
@@ -32349,17 +32451,17 @@ var LaneManager = class {
       );
     }
     if (requiresIsolation && params.cwd) {
-      const resolved = path6.resolve(params.cwd);
-      const base = path6.resolve(this.baseRepo);
-      if (resolved === base || resolved.startsWith(base + path6.sep)) {
+      const resolved = path7.resolve(params.cwd);
+      const base = path7.resolve(this.baseRepo);
+      if (resolved === base || resolved.startsWith(base + path7.sep)) {
         throw new Error(
           `write dispatch cwd '${resolved}' is inside the primary checkout '${base}'; writes must be isolated to a worktree`
         );
       }
     }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
-    const runDir = path6.join(RUNS_ROOT, id);
-    fs5.mkdirSync(runDir, { recursive: true });
+    const runDir = path7.join(RUNS_ROOT, id);
+    fs6.mkdirSync(runDir, { recursive: true });
     let cwd = params.cwd ?? this.baseRepo;
     let worktreePath;
     if (params.worktree) {
@@ -32384,7 +32486,8 @@ var LaneManager = class {
       readOnly,
       worktreeBranch: params.worktree,
       worktreePath,
-      requestOpts: opts
+      requestOpts: opts,
+      initialPrompt: params.prompt
     });
     this.runs.set(id, run);
     const drive = this.driveNewSession(run, spec, params.prompt);

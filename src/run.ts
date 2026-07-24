@@ -18,6 +18,7 @@ import type {
   ToolCallLocation,
 } from "@agentclientprotocol/sdk";
 import { DIGEST_CHAR_BUDGET, FINAL_MESSAGE_CHAR_BUDGET, resolveOcModel } from "./constants.js";
+import { appendLedgerRow } from "./ledger.js";
 import type {
   LaneName,
   LaneRequestOptions,
@@ -64,6 +65,14 @@ export class LaneRun {
   readonly runDir: string;
   readonly createdAt = Date.now();
   readonly requestOpts: LaneRequestOptions;
+  /**
+   * The dispatch's original (first-turn) prompt — retained verbatim so the
+   * native ledger writer (ledger.ts) can derive `prompt_head` at close()
+   * time, when the LaneManager call site no longer has the prompt in scope.
+   * Deliberately never overwritten by a later clanker_prompt continuation:
+   * the ledger row describes the dispatch's lifetime, not its latest turn.
+   */
+  readonly initialPrompt: string;
 
   turnStatus: RunStatus = "running";
   turnsCount = 0;
@@ -117,6 +126,7 @@ export class LaneRun {
     worktreeBranch?: string;
     worktreePath?: string;
     requestOpts?: LaneRequestOptions;
+    initialPrompt?: string;
   }) {
     this.id = init.id;
     this.lane = init.lane;
@@ -127,6 +137,7 @@ export class LaneRun {
     this.worktreeBranch = init.worktreeBranch;
     this.worktreePath = init.worktreePath;
     this.requestOpts = init.requestOpts ?? {};
+    this.initialPrompt = init.initialPrompt ?? "";
   }
 
   // ---- lifecycle ----------------------------------------------------------
@@ -163,6 +174,7 @@ export class LaneRun {
     this.writeEvent({ t: "turn_done", turn: this.turnsCount, stopReason: "end_turn" });
     this.touch("turn_done");
     this.markTerminal("done");
+    this.writeLedgerRowOnce();
   }
 
   /**
@@ -181,6 +193,7 @@ export class LaneRun {
     this.writeEvent({ t: "turn_error", turn: this.turnsCount, message, failureClass });
     this.touch("turn_error");
     this.markTerminal("error");
+    this.writeLedgerRowOnce();
   }
 
   /**
@@ -208,6 +221,7 @@ export class LaneRun {
     this.writeEvent({ t: "turn_cancelled", turn: this.turnsCount });
     this.touch("turn_cancelled");
     this.markTerminal("cancelled");
+    this.writeLedgerRowOnce();
   }
 
   async markClosed(): Promise<void> {
@@ -459,6 +473,44 @@ export class LaneRun {
     };
   }
   private markTerminal(reason: string): void { this.terminalAt = Date.now(); this.stopReason ??= reason; this.persistTelemetry(); }
+
+  /**
+   * Native dispatch-ledger row: called exactly once from the tail of
+   * completeTurn()/failTurn()/cancelTurn() — the true single choke point a
+   * run's lifetime passes through exactly once, guarded by the very same
+   * `isTerminalTurn()` check already at the top of all three (per-run state,
+   * not a module-level set): whichever of the three fires first flips
+   * `turnStatus` off "running", so any other terminal-transition call for
+   * this run (including a later one of these same three methods, should that
+   * ever happen) short-circuits before doing anything, this row included.
+   *
+   * Deliberately NOT wired from LaneManager's close()/closeRun(): this
+   * refactor's one-shot job controller calls `close()` *before* the
+   * corresponding completeTurn()/failTurn()/cancelTurn() at every one of its
+   * call sites (worktree/session teardown first, status flip second — see
+   * manager.ts), so at closeRun() time `run.turnStatus` is still "running"
+   * and `run.error` is still unset. That ordering is exercised concretely by
+   * manager-close-diagnostics.test.ts's direct `m.close(id)` calls on a still-
+   * running turn: closeRun() runs (and, per its own `sessionClosed` dedup,
+   * ends up being the ONLY invocation that ever executes) strictly before the
+   * turn's own failTurn() call discovers the mid-turn exit and sets the real
+   * error. Reading the terminal fields from here instead — after they're
+   * genuinely final — avoids depending on manager.ts's close-vs-status-flip
+   * ordering entirely. See ledger.ts for why this write exists at all
+   * (MCP-direct dispatches bypass the harness PostToolUse hook).
+   */
+  private writeLedgerRowOnce(): void {
+    appendLedgerRow({
+      id: this.id,
+      lane: this.lane,
+      cwd: this.cwd,
+      agentProfile: this.requestOpts.profile,
+      model: this.telemetry().resolved_model ?? null,
+      initialPrompt: this.initialPrompt,
+      turnStatus: this.turnStatus,
+      error: this.error,
+    });
+  }
   private persistTelemetry(): void {
     const target = path.join(this.runDir, "telemetry.json");
     const tmp = `${target}.${process.pid}.tmp`;
