@@ -110,10 +110,17 @@ echo grounded-result`),
   const args = fs.readFileSync(capture, "utf8");
   assert.match(args, /--mode\nplan\n/);
   assert.match(args, /--sandbox\n/);
-  assert.match(args, /--print-timeout\n3m\n/);
+  assert.match(args, /--print-timeout\n10m\n/);
   assert.match(args, /--print\n/);
   assert.match(args, /conclusions, source URLs or repository evidence, uncertainties, and the recommended next lane/);
   assert.match(args, /Do not modify workspace files or run destructive commands/);
+});
+
+test("Gemini ACP sidecar honors CLANKER_GEMINI_PRINT_TIMEOUT override over the 10m default", { skip: !workspaceSandboxAvailable }, async () => {
+  const capture = path.join(os.tmpdir(), `clanker-agy-timeout-override-${process.pid}`);
+  await prompt(sidecarSpec(fakeAgy("echo grounded-result"), capture, { CLANKER_GEMINI_PRINT_TIMEOUT: "20m" }));
+  const args = fs.readFileSync(capture, "utf8");
+  assert.match(args, /--print-timeout\n20m\n/);
 });
 
 test("Gemini ACP sidecar fails loudly on nonzero and empty output", { skip: !workspaceSandboxAvailable }, async () => {
@@ -121,6 +128,20 @@ test("Gemini ACP sidecar fails loudly on nonzero and empty output", { skip: !wor
     const capture = path.join(os.tmpdir(), `clanker-agy-fail-${process.pid}-${Math.random()}`);
     await assert.rejects(prompt(sidecarSpec(fakeAgy(body), capture)), expected);
   }
+});
+
+test("Gemini ACP sidecar classifies a print-timeout hit distinctly from a backend crash", { skip: !workspaceSandboxAvailable }, async () => {
+  const capture = path.join(os.tmpdir(), `clanker-agy-timeout-classify-${process.pid}`);
+  // agy exits 1 with this exact stderr phrase when its own --print-timeout
+  // ceiling elapses; the wrapping error must not read as a generic crash.
+  await assert.rejects(
+    prompt(sidecarSpec(fakeAgy("echo 'timeout waiting for response' >&2; exit 1"), capture)),
+    /print-timeout/,
+  );
+  await assert.rejects(
+    prompt(sidecarSpec(fakeAgy("echo 'timeout waiting for response' >&2; exit 1"), capture)),
+    (error: Error) => !/Clanker: Gemini agy failed \(exit/.test(error.message),
+  );
 });
 
 test("Gemini ACP sidecar denies writes beneath the inspected workspace on macOS", { skip: !workspaceSandboxAvailable }, async () => {

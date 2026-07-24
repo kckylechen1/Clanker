@@ -38,7 +38,12 @@ function runAgy(sessionId: string, session: Session, prompt: string): Promise<st
   ];
   const effort = process.env.CLANKER_GEMINI_EFFORT?.trim();
   if (effort) args.push("--effort", effort);
-  args.push("--print-timeout", process.env.CLANKER_GEMINI_PRINT_TIMEOUT || "3m", "--print", `${ROLE_PREFIX}\n\nTask:\n${prompt}`);
+  // Read-only recon turns observed at 178s-338s in practice; a 3m ceiling
+  // killed real work and the resulting failure was indistinguishable from a
+  // genuine backend crash (see close handler below). 10m gives real recon
+  // headroom while CLANKER_GEMINI_PRINT_TIMEOUT remains the escape hatch.
+  const printTimeout = process.env.CLANKER_GEMINI_PRINT_TIMEOUT || "10m";
+  args.push("--print-timeout", printTimeout, "--print", `${ROLE_PREFIX}\n\nTask:\n${prompt}`);
 
   const agyPath = process.env.CLANKER_AGY_PATH || "agy";
   const invocation = workspaceReadOnlyInvocation(agyPath, args, session.cwd);
@@ -47,6 +52,7 @@ function runAgy(sessionId: string, session: Session, prompt: string): Promise<st
   delete agyEnv.GOOGLE_API_KEY;
   delete agyEnv.GOOGLE_APPLICATION_CREDENTIALS;
 
+  const turnStartedAt = Date.now();
   return new Promise((resolve, reject) => {
     const child = spawn(invocation.command, invocation.args, {
       cwd: session.cwd,
@@ -71,7 +77,21 @@ function runAgy(sessionId: string, session: Session, prompt: string): Promise<st
       }
       const output = stdout.trim();
       if (code !== 0) {
-        reject(new Error(`Clanker: Gemini agy failed (${signal ? `signal ${signal}` : `exit ${code}`}): ${stderr.trim() || "no stderr"}`));
+        const trimmedStderr = stderr.trim();
+        // agy exits nonzero with this exact phrase when ITS OWN
+        // --print-timeout ceiling elapses — that is a task-duration ceiling,
+        // not a genuine backend crash, and the two must not be conflated in
+        // the surfaced error (a prior mis-diagnosis read a print-timeout as
+        // "the lane is dead").
+        if (/timeout waiting for response/i.test(trimmedStderr)) {
+          const elapsedSeconds = Math.round((Date.now() - turnStartedAt) / 1000);
+          reject(new Error(
+            `Clanker: Gemini hit the print-timeout (limit ${printTimeout}, elapsed ~${elapsedSeconds}s) — ` +
+            `task exceeded the configured print-timeout ceiling, this is not a backend crash: ${trimmedStderr}`,
+          ));
+        } else {
+          reject(new Error(`Clanker: Gemini agy failed (${signal ? `signal ${signal}` : `exit ${code}`}): ${trimmedStderr || "no stderr"}`));
+        }
       } else if (!output) {
         reject(new Error(`Clanker: Gemini agy returned empty output${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
       } else resolve(output);

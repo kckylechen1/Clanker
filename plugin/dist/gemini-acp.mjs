@@ -14532,7 +14532,8 @@ function runAgy(sessionId, session, prompt) {
   ];
   const effort = process.env.CLANKER_GEMINI_EFFORT?.trim();
   if (effort) args.push("--effort", effort);
-  args.push("--print-timeout", process.env.CLANKER_GEMINI_PRINT_TIMEOUT || "3m", "--print", `${ROLE_PREFIX}
+  const printTimeout = process.env.CLANKER_GEMINI_PRINT_TIMEOUT || "10m";
+  args.push("--print-timeout", printTimeout, "--print", `${ROLE_PREFIX}
 
 Task:
 ${prompt}`);
@@ -14542,6 +14543,7 @@ ${prompt}`);
   delete agyEnv.GEMINI_API_KEY;
   delete agyEnv.GOOGLE_API_KEY;
   delete agyEnv.GOOGLE_APPLICATION_CREDENTIALS;
+  const turnStartedAt = Date.now();
   return new Promise((resolve, reject) => {
     const child = spawn(invocation.command, invocation.args, {
       cwd: session.cwd,
@@ -14573,7 +14575,15 @@ ${prompt}`);
       }
       const output = stdout.trim();
       if (code !== 0) {
-        reject(new Error(`Clanker: Gemini agy failed (${signal ? `signal ${signal}` : `exit ${code}`}): ${stderr.trim() || "no stderr"}`));
+        const trimmedStderr = stderr.trim();
+        if (/timeout waiting for response/i.test(trimmedStderr)) {
+          const elapsedSeconds = Math.round((Date.now() - turnStartedAt) / 1e3);
+          reject(new Error(
+            `Clanker: Gemini hit the print-timeout (limit ${printTimeout}, elapsed ~${elapsedSeconds}s) \u2014 task exceeded the configured print-timeout ceiling, this is not a backend crash: ${trimmedStderr}`
+          ));
+        } else {
+          reject(new Error(`Clanker: Gemini agy failed (${signal ? `signal ${signal}` : `exit ${code}`}): ${trimmedStderr || "no stderr"}`));
+        }
       } else if (!output) {
         reject(new Error(`Clanker: Gemini agy returned empty output${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
       } else resolve(output);
