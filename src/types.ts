@@ -47,6 +47,16 @@ export interface LaneRequestOptions {
   sandbox?: CodexSandboxMode;
   /** Fixed Clanker-controlled OpenCode profile. */
   profile?: "worker" | "kimi-crew";
+  /**
+   * Vault-sourced env vars the dispatch profile declares (profiles.ts
+   * `secrets`). Non-empty routes the spawn through `tachi vault exec
+   * --keychain --require <vars> --` so the secret is materialized from the OS
+   * keychain into the child at spawn time. Unioned with the model-derived
+   * requirement in backends.ts, which stays authoritative on its own: a GLM
+   * spawn is wrapped because it is GLM, not because a profile remembered to
+   * say so.
+   */
+  secrets?: readonly string[];
 }
 
 /** Plan projection derived from ACP `plan` events. */
@@ -91,7 +101,10 @@ export interface RunTelemetry {
   requested_model?: string; resolved_model?: string | null; observed_model?: string | null;
   requested_effort?: string; observed_effort?: string | null;
   lane: LaneName; transport: "acp-stdio"; backend: string; read_only: boolean;
-  sandbox?: CodexSandboxMode; created_at: string; started_at?: string;
+  sandbox?: CodexSandboxMode;
+  /** Hard per-turn ceiling actually in force for this run (per-profile, see profiles.ts). */
+  turn_timeout_ms?: number;
+  created_at: string; started_at?: string;
   terminal_at?: string; duration_ms?: number; turns: number; retries: number; corrections: number;
   continuation_turns: number; cancellation_requested: boolean; forced_kill: boolean;
   tool_calls: number; stop_reason?: string; terminal_reason?: string;

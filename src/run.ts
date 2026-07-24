@@ -79,6 +79,12 @@ export class LaneRun {
    * the ledger row describes the dispatch's lifetime, not its latest turn.
    */
   readonly initialPrompt: string;
+  /**
+   * Hard per-turn ceiling declared by this run's dispatch profile
+   * (profiles.ts). Undefined for dispatches that named no profile — the manager
+   * then falls back to the global CLANKER_TURN_TIMEOUT_MS.
+   */
+  readonly turnTimeoutMs?: number;
 
   turnStatus: RunStatus = "running";
   turnsCount = 0;
@@ -134,6 +140,8 @@ export class LaneRun {
     targetRepo?: string;
     requestOpts?: LaneRequestOptions;
     initialPrompt?: string;
+    /** Per-profile hard turn ceiling (profiles.ts); undefined falls back to the global default. */
+    turnTimeoutMs?: number;
   }) {
     this.id = init.id;
     this.lane = init.lane;
@@ -146,6 +154,7 @@ export class LaneRun {
     this.targetRepo = init.targetRepo;
     this.requestOpts = init.requestOpts ?? {};
     this.initialPrompt = init.initialPrompt ?? "";
+    this.turnTimeoutMs = init.turnTimeoutMs;
   }
 
   // ---- lifecycle ----------------------------------------------------------
@@ -469,6 +478,7 @@ export class LaneRun {
       observed_model: this.observedModel, requested_effort: this.requestOpts.effort,
       observed_effort: this.observedEffort, lane: this.lane, transport: "acp-stdio",
       backend: this.lane, read_only: this.readOnly, sandbox: this.requestOpts.sandbox,
+      ...(this.turnTimeoutMs !== undefined ? { turn_timeout_ms: this.turnTimeoutMs } : {}),
       created_at: new Date(this.createdAt).toISOString(),
       ...(this.startedAt ? { started_at: new Date(this.startedAt).toISOString() } : {}),
       ...(this.terminalAt ? { terminal_at: new Date(this.terminalAt).toISOString(), duration_ms: this.terminalAt - (this.startedAt ?? this.createdAt) } : {}),

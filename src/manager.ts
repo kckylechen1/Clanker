@@ -56,6 +56,18 @@ export interface DispatchParams extends LaneRequestOptions {
   prompt: string;
   cwd?: string;
   worktree?: string;
+  /**
+   * Supervision welded by the dispatch profile (profiles.ts). "sonnet" is the
+   * supervised-GLM shape: it is the ONLY thing that unlocks a GLM write, and it
+   * is not reachable from any tool input schema — only a registry row can set
+   * it. Restores 0.2.5's `supervisedGlm` internal flag, which existed for the
+   * same reason (a caller must not be able to claim supervision).
+   */
+  supervision?: "none" | "sonnet";
+  /** Per-profile hard turn ceiling; falls back to the global TURN_TIMEOUT_MS. */
+  turnTimeoutMs?: number;
+  /** Profile id, for diagnostics only — routing is already resolved by this point. */
+  profileId?: string;
 }
 
 export interface WaitResult {
@@ -122,6 +134,12 @@ export class LaneManager {
   private readonly stallThresholdMs: number;
   private readonly sessionTtlMs: number;
   private readonly turnTimeoutMs: number;
+  /**
+   * Explicit constructor override. Set only by an operator/test; when set it
+   * wins over a profile's declared ceiling, so an 80ms test ceiling is not
+   * silently replaced by a profile's 45 minutes.
+   */
+  private readonly turnTimeoutOverrideMs?: number;
   private readonly handshakeTimeoutMs: number;
   private readonly baseRepo: string;
   private readonly capacityRetryBackoffMs: number;
@@ -143,6 +161,7 @@ export class LaneManager {
     this.stallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
     this.sessionTtlMs = opts.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
     this.turnTimeoutMs = opts.turnTimeoutMs ?? TURN_TIMEOUT_MS;
+    this.turnTimeoutOverrideMs = opts.turnTimeoutMs;
     this.handshakeTimeoutMs = opts.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
     this.baseRepo = opts.baseRepo ?? BASE_REPO;
     this.capacityRetryBackoffMs = opts.capacityRetryBackoffMs ?? CAPACITY_RETRY_BACKOFF_MS;
@@ -189,8 +208,18 @@ export class LaneManager {
     if (!readOnly && params.lane !== "codex" && !params.model?.trim()) {
       throw new Error(`an explicit model is required for write lane '${params.lane}'`);
     }
-    if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew") {
-      throw new Error("direct GLM write is prohibited; use profile='kimi-crew'");
+    // GLM writes are supervised-only. 0.2.5 expressed this as "GLM writes
+    // require clanker_dispatch_glm_write_start and Sonnet supervision" and
+    // unlocked it with an internal `supervisedGlm` flag no caller could set;
+    // `supervision === "sonnet"` (welded by the oc-glm-write registry row, not
+    // reachable from any tool schema) is that same key. The kimi-crew escape
+    // stays because 0.3.x callers were told to use it, but it is NOT the GLM
+    // path: kimi-crew welds model=kimi and runs a different model entirely.
+    if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew" && params.supervision !== "sonnet") {
+      throw new Error(
+        "direct GLM write is prohibited; use profile='kimi-crew' for the OpenCode crew, " +
+          "or the supervised 'oc-glm-write' dispatch profile for a GLM write under Sonnet supervision",
+      );
     }
     const writeCapableSandbox =
       params.lane === "codex" &&
@@ -247,6 +276,7 @@ export class LaneManager {
       readOnly,
       sandbox: params.sandbox,
       profile,
+      secrets: params.secrets,
     };
     const spec = this.resolveSpec(params.lane, opts, runDir);
     this.warningsById.set(id, spec.warnings);
@@ -263,6 +293,7 @@ export class LaneManager {
       targetRepo: worktreePath ? targetRepo : undefined,
       requestOpts: opts,
       initialPrompt: params.prompt,
+      turnTimeoutMs: params.turnTimeoutMs,
     });
     this.runs.set(id, run);
 
@@ -403,7 +434,11 @@ export class LaneManager {
     promptPromise.catch(() => {
       /* rejection surfaced via the race / awaited below */
     });
-    const turnTimer = createTimeout(this.turnTimeoutMs);
+    // Precedence: explicit constructor override (operator/test) > the profile's
+    // declared ceiling > the global default. Without the override tier a test's
+    // 80ms ceiling would be overwritten by a profile's 45 minutes.
+    const turnTimeoutMs = this.turnTimeoutOverrideMs ?? run.turnTimeoutMs ?? this.turnTimeoutMs;
+    const turnTimer = createTimeout(turnTimeoutMs);
     try {
       for (;;) {
         const nextP = conn.session.nextUpdate();
@@ -419,7 +454,7 @@ export class LaneManager {
         ]);
         if (outcome.kind === "timeout") {
           throw new Error(
-            `turn exceeded CLANKER_TURN_TIMEOUT_MS (${this.turnTimeoutMs}ms) with no completion; killing the Clanker`,
+            `turn exceeded CLANKER_TURN_TIMEOUT_MS (${turnTimeoutMs}ms) with no completion; killing the Clanker`,
           );
         }
         if (outcome.kind === "exit" || outcome.kind === "closed") {
