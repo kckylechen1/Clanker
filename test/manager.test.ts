@@ -496,7 +496,10 @@ test("manager requires explicit external write models and rejects unsupervised G
   }
 });
 
-test("CP2: write dispatch with cwd inside the base checkout is rejected", async () => {
+test("CP2/#12: write dispatch whose cwd is not inside a git work tree is rejected loudly", async () => {
+  // os.tmpdir() is not a git repo. Pre-#12 the manager silently cut the worktree
+  // from the HOST baseRepo and ran the worker there; now it must refuse rather
+  // than land a cross-repo write on an unrelated checkout.
   const m = makeManager(); // baseRepo = os.tmpdir()
   try {
     await assert.rejects(
@@ -508,10 +511,52 @@ test("CP2: write dispatch with cwd inside the base checkout is rejected", async 
           worktree: "some-branch",
           cwd: os.tmpdir(),
         }),
-      /inside the primary checkout/,
+      /not inside a git work tree/,
     );
   } finally {
     await m.shutdown();
+  }
+});
+
+test("#12: write dispatch cuts its worktree from the cwd's repo, not the host baseRepo", async () => {
+  // Two independent repos: the host baseRepo the server launched from, and a
+  // SECOND repo the dispatch targets via cwd. Pre-fix, the worktree was always
+  // cut from the host — so the worker's cwd was a worktree of the wrong repo,
+  // and the target repo's primary checkout was the one that got polluted.
+  const host = makeCrewBaseRepo();
+  const target = makeCrewBaseRepo();
+  const targetOrigin = execFileSync("git", ["-C", target.base, "config", "--get", "remote.origin.url"])
+    .toString()
+    .trim();
+  const hostOrigin = execFileSync("git", ["-C", host.base, "config", "--get", "remote.origin.url"])
+    .toString()
+    .trim();
+  const m = new LaneManager({ resolveSpec: fakeResolver, disableReaper: true, baseRepo: host.base });
+  const branch = `clanker/xrepo-${Date.now()}`;
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "codex",
+      prompt: "isolate me",
+      readOnly: false,
+      worktree: branch,
+      cwd: target.base,
+    });
+    const wt = m.status(id).worktree;
+    assert.ok(wt, "a worktree path was created");
+    // (a) the created worktree belongs to the SECOND (target) repo.
+    const wtOrigin = execFileSync("git", ["-C", wt!, "config", "--get", "remote.origin.url"])
+      .toString()
+      .trim();
+    assert.equal(wtOrigin, targetOrigin, "worktree cut from the target repo");
+    assert.notEqual(wtOrigin, hostOrigin, "worktree NOT cut from the host baseRepo");
+    // (b) the target repo's primary checkout stays clean.
+    const dirty = execFileSync("git", ["-C", target.base, "status", "--porcelain"]).toString();
+    assert.equal(dirty, "", "target repo primary checkout stays clean");
+    await waitTerminal(m, id);
+  } finally {
+    await m.shutdown();
+    fs.rmSync(host.root, { recursive: true, force: true });
+    fs.rmSync(target.root, { recursive: true, force: true });
   }
 });
 

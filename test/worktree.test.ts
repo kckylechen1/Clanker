@@ -36,6 +36,16 @@ function makeBaseRepo(): string {
   return base;
 }
 
+/** Build a repo with a commit but NO remote (base ref must fall back to HEAD). */
+function makeNoRemoteRepo(): string {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-wt-noremote-"));
+  git(repo, ["init", "-b", "main", repo]);
+  fs.writeFileSync(path.join(repo, "README.md"), "local-only\n");
+  git(repo, ["add", "."]);
+  git(repo, ["commit", "-m", "init"]);
+  return repo;
+}
+
 test("worktree lifecycle: create from origin/main, detect changes, remove when clean", async () => {
   const base = makeBaseRepo();
   const branch = `lane-test-${Math.random().toString(36).slice(2, 8)}`;
@@ -56,4 +66,31 @@ test("worktree lifecycle: create from origin/main, detect changes, remove when c
   fs.rmSync(path.join(wtPath, "new-file.txt"));
   assert.equal(await removeIfClean(wtPath, base), true, "clean worktree removed");
   assert.equal(fs.existsSync(wtPath), false, "removed worktree gone");
+});
+
+test("#12: createWorktree cuts a no-remote repo from local HEAD (not hardcoded origin/main)", async () => {
+  // Pre-fix, the base ref was hardcoded to origin/main, so a repo with no remote
+  // (e.g. DispatchLedger) could not be worktree'd at all — `git worktree add`
+  // failed on the missing origin/main ref. The per-repo base-ref resolution must
+  // fall back to the repo's local HEAD.
+  const repo = makeNoRemoteRepo();
+  const branch = `lane-noremote-${Math.random().toString(36).slice(2, 8)}`;
+
+  const wtPath = await createWorktree(branch, repo);
+  assert.ok(fs.existsSync(wtPath), "worktree dir created from a no-remote repo");
+  assert.equal(await isGitWorkTree(wtPath), true);
+  assert.deepEqual(await changedFiles(wtPath), [], "fresh no-remote worktree is clean");
+  // The worktree's HEAD matches the source repo's HEAD (cut from local HEAD).
+  const repoHead = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"]).toString().trim();
+  const wtHead = execFileSync("git", ["-C", wtPath, "rev-parse", "HEAD"]).toString().trim();
+  assert.equal(wtHead, repoHead, "worktree cut from the repo's local HEAD");
+
+  // A no-remote worktree branch has no upstream, so removeIfClean cannot prove
+  // it holds nothing unshipped and conservatively RETAINS it (the doctrine's
+  // "retain when uncertain" — a branch ref with no remote to compare against).
+  assert.equal(await removeIfClean(wtPath, repo), false, "no-remote worktree retained (no upstream to compare)");
+  assert.ok(fs.existsSync(wtPath), "retained no-remote worktree still exists");
+  // Cleanup runs against the SOURCE repo (targetRepo), never a hardcoded host.
+  execFileSync("git", ["-C", repo, "worktree", "remove", "--force", wtPath]);
+  fs.rmSync(repo, { recursive: true, force: true });
 });

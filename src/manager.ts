@@ -42,7 +42,14 @@ import type {
 } from "./types.js";
 import { LANE_NAMES } from "./types.js";
 import { hostLaneBlockedReason, type ClankerHost } from "./host.js";
-import { changedFiles, createWorktree, isGitWorkTree, removeIfClean } from "./worktree.js";
+import {
+  changedFiles,
+  createWorktree,
+  deriveWorktreePath,
+  isGitWorkTree,
+  removeIfClean,
+  resolveTargetRepo,
+} from "./worktree.js";
 
 export interface DispatchParams extends LaneRequestOptions {
   lane: LaneName;
@@ -198,14 +205,19 @@ export class LaneManager {
         "write-capable dispatch must run in an isolated worktree: pass `worktree` (a branch name). Strict reads may run in-place.",
       );
     }
-    if (requiresIsolation && params.cwd) {
-      const resolved = path.resolve(params.cwd);
-      const base = path.resolve(this.baseRepo);
-      if (resolved === base || resolved.startsWith(base + path.sep)) {
-        throw new Error(
-          `write dispatch cwd '${resolved}' is inside the primary checkout '${base}'; writes must be isolated to a worktree`,
-        );
-      }
+
+    // #12: the worktree must be cut from the repo the dispatch *targets*
+    // (resolved from params.cwd via `git rev-parse --show-toplevel`), NOT the
+    // host checkout the MCP server was launched from. Cutting from the host is
+    // what silently polluted an unrelated primary checkout: the worker was told
+    // its cwd was a worktree of the wrong repo, couldn't find the target repo's
+    // files there, and fell back to absolute paths into the target's primary
+    // checkout. When an isolating dispatch carries a cwd, resolve its repo and
+    // fail LOUDLY if that cwd is not inside a git work tree (resolveTargetRepo);
+    // only when no cwd is given do we fall back to the host baseRepo.
+    let targetRepo = path.resolve(this.baseRepo);
+    if (requiresIsolation && params.worktree && params.cwd) {
+      targetRepo = await resolveTargetRepo(params.cwd);
     }
 
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
@@ -215,7 +227,13 @@ export class LaneManager {
     let cwd = params.cwd ?? this.baseRepo;
     let worktreePath: string | undefined;
     if (params.worktree) {
-      worktreePath = await createWorktree(params.worktree, this.baseRepo);
+      // CP2 (target-aware isolation invariant): the isolated worktree must never
+      // BE — or contain, or sit inside — the target repo's primary checkout.
+      // deriveWorktreePath keeps it under WORKTREES_ROOT; this guard rejects a
+      // misconfiguration (WORKTREES_ROOT set inside the repo) that would put
+      // writes back on the very checkout the isolation exists to protect.
+      assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree), targetRepo);
+      worktreePath = await createWorktree(params.worktree, targetRepo);
       cwd = worktreePath;
     }
 
@@ -238,6 +256,7 @@ export class LaneManager {
       readOnly,
       worktreeBranch: params.worktree,
       worktreePath,
+      targetRepo: worktreePath ? targetRepo : undefined,
       requestOpts: opts,
       initialPrompt: params.prompt,
     });
@@ -650,7 +669,7 @@ export class LaneManager {
         run.worktreeRetained = run.worktreePath;
       } else {
         try {
-          const removed = await removeIfClean(run.worktreePath, this.baseRepo);
+          const removed = await removeIfClean(run.worktreePath, run.targetRepo ?? this.baseRepo);
           if (!removed) run.worktreeRetained = run.worktreePath;
         } catch (err) {
           // Never let cleanup failure vanish silently — this is a stdio MCP
@@ -706,6 +725,26 @@ export class LaneManager {
 
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Enforce the target-aware isolation invariant (#12): the worktree a write
+ * dispatch runs in must be a distinct path from the target repo's primary
+ * checkout — never equal to it, inside it, or containing it. Under normal
+ * config (WORKTREES_ROOT under ~/.cache) this always holds; the guard exists to
+ * reject a misconfiguration that would route writes back onto the checkout the
+ * isolation is meant to protect.
+ */
+function assertWorktreeOutsideRepo(worktreePath: string, targetRepo: string): void {
+  const wt = path.resolve(worktreePath);
+  const repo = path.resolve(targetRepo);
+  if (wt === repo || wt.startsWith(repo + path.sep) || repo.startsWith(wt + path.sep)) {
+    throw new Error(
+      `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; ` +
+        `refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT ` +
+        `outside the repo)`,
+    );
+  }
 }
 
 /** Append the human-readable infra-failure advisory to an error message when classified. */
