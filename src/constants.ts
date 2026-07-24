@@ -65,8 +65,12 @@ export const WORKTREES_ROOT =
   path.join(os.homedir(), ".cache", "clanker", "worktrees");
 
 /**
- * Base git repository from which worktrees are cut. Defaults to the directory
- * Claude Code launched the server from. Cut always happens from origin/main.
+ * Host git repository the MCP server was launched from. Defaults to the
+ * directory Claude Code started it in. This is only the FALLBACK cut point for
+ * a worktree dispatch that carries no cwd — a dispatch with a cwd is cut from
+ * the repo that cwd belongs to instead (#12, see manager.ts / worktree.ts). The
+ * base ref is resolved per target repo (origin/HEAD → origin/main →
+ * origin/master → local HEAD), not hardcoded to origin/main.
  */
 export const BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 

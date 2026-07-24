@@ -61,6 +61,12 @@ export class LaneRun {
   readonly cwd: string;
   readonly worktreeBranch?: string;
   readonly worktreePath?: string;
+  /**
+   * The repo the worktree was cut from (resolved from the dispatch cwd, #12).
+   * Cleanup (`git worktree remove`) must run against THIS repo, not the host
+   * baseRepo, or it silently no-ops on the wrong repo and leaks the worktree.
+   */
+  readonly targetRepo?: string;
   readonly readOnly: boolean;
   readonly runDir: string;
   readonly createdAt = Date.now();
@@ -125,6 +131,7 @@ export class LaneRun {
     readOnly: boolean;
     worktreeBranch?: string;
     worktreePath?: string;
+    targetRepo?: string;
     requestOpts?: LaneRequestOptions;
     initialPrompt?: string;
   }) {
@@ -136,6 +143,7 @@ export class LaneRun {
     this.readOnly = init.readOnly;
     this.worktreeBranch = init.worktreeBranch;
     this.worktreePath = init.worktreePath;
+    this.targetRepo = init.targetRepo;
     this.requestOpts = init.requestOpts ?? {};
     this.initialPrompt = init.initialPrompt ?? "";
   }

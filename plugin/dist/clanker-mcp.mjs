@@ -31719,6 +31719,12 @@ var LaneRun = class {
   cwd;
   worktreeBranch;
   worktreePath;
+  /**
+   * The repo the worktree was cut from (resolved from the dispatch cwd, #12).
+   * Cleanup (`git worktree remove`) must run against THIS repo, not the host
+   * baseRepo, or it silently no-ops on the wrong repo and leaks the worktree.
+   */
+  targetRepo;
   readOnly;
   runDir;
   createdAt = Date.now();
@@ -31778,6 +31784,7 @@ var LaneRun = class {
     this.readOnly = init.readOnly;
     this.worktreeBranch = init.worktreeBranch;
     this.worktreePath = init.worktreePath;
+    this.targetRepo = init.targetRepo;
     this.requestOpts = init.requestOpts ?? {};
     this.initialPrompt = init.initialPrompt ?? "";
   }
@@ -32332,13 +32339,46 @@ async function isGitWorkTree(cwd) {
     return false;
   }
 }
-async function createWorktree(branch, baseRepo = BASE_REPO) {
+async function resolveTargetRepo(cwd) {
+  try {
+    const top = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
+    if (top) return top;
+  } catch {
+  }
+  throw new Error(
+    `cwd '${cwd}' is not inside a git work tree; a write dispatch cannot be isolated into a worktree cut from a non-repo directory (refusing to silently fall back to the host checkout \u2014 see issue #12)`
+  );
+}
+async function resolveBaseRef(targetRepo) {
+  try {
+    const head = (await git(targetRepo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).trim();
+    if (head) return head;
+  } catch {
+  }
+  for (const ref of ["refs/remotes/origin/main", "refs/remotes/origin/master"]) {
+    try {
+      await git(targetRepo, ["rev-parse", "--verify", "--quiet", ref]);
+      return ref.replace("refs/remotes/", "");
+    } catch {
+    }
+  }
+  try {
+    const head = (await git(targetRepo, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
+    if (head) return head;
+  } catch {
+  }
+  throw new Error(
+    `target repo '${targetRepo}' has no origin/HEAD, origin/main, origin/master, or local HEAD commit to cut a worktree from (a repo with zero commits cannot be worktree'd)`
+  );
+}
+async function createWorktree(branch, targetRepo = BASE_REPO) {
   const wtPath = deriveWorktreePath(branch);
   if (fs5.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
+  const baseRef = await resolveBaseRef(targetRepo);
   fs5.mkdirSync(WORKTREES_ROOT, { recursive: true });
-  await git(baseRepo, ["worktree", "add", wtPath, "-b", branch, "origin/main"]);
+  await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
   return wtPath;
 }
 async function changedFiles(cwd) {
@@ -32352,19 +32392,19 @@ async function changedFiles(cwd) {
   }
   return files;
 }
-async function removeIfClean(worktreePath, baseRepo = BASE_REPO) {
+async function removeIfClean(worktreePath, targetRepo = BASE_REPO) {
   const changes = await changedFiles(worktreePath);
   if (changes.length > 0) return false;
   try {
-    const ahead = (await git(worktreePath, ["rev-list", "--count", "origin/main..HEAD"])).trim();
+    const ahead = (await git(worktreePath, ["rev-list", "--count", "@{upstream}..HEAD"])).trim();
     if (ahead !== "0") return false;
   } catch {
     return false;
   }
   try {
-    await git(baseRepo, ["worktree", "remove", worktreePath]);
+    await git(targetRepo, ["worktree", "remove", worktreePath]);
   } catch {
-    await git(baseRepo, ["worktree", "remove", "--force", worktreePath]);
+    await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
   }
   return true;
 }
@@ -32452,14 +32492,9 @@ var LaneManager = class {
         "write-capable dispatch must run in an isolated worktree: pass `worktree` (a branch name). Strict reads may run in-place."
       );
     }
-    if (requiresIsolation && params.cwd) {
-      const resolved = path7.resolve(params.cwd);
-      const base = path7.resolve(this.baseRepo);
-      if (resolved === base || resolved.startsWith(base + path7.sep)) {
-        throw new Error(
-          `write dispatch cwd '${resolved}' is inside the primary checkout '${base}'; writes must be isolated to a worktree`
-        );
-      }
+    let targetRepo = path7.resolve(this.baseRepo);
+    if (params.worktree && params.cwd) {
+      targetRepo = await resolveTargetRepo(params.cwd);
     }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
     const runDir = path7.join(RUNS_ROOT, id);
@@ -32467,7 +32502,8 @@ var LaneManager = class {
     let cwd = params.cwd ?? this.baseRepo;
     let worktreePath;
     if (params.worktree) {
-      worktreePath = await createWorktree(params.worktree, this.baseRepo);
+      assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree), targetRepo);
+      worktreePath = await createWorktree(params.worktree, targetRepo);
       cwd = worktreePath;
     }
     const opts = {
@@ -32488,6 +32524,7 @@ var LaneManager = class {
       readOnly,
       worktreeBranch: params.worktree,
       worktreePath,
+      targetRepo: worktreePath ? targetRepo : void 0,
       requestOpts: opts,
       initialPrompt: params.prompt
     });
@@ -32868,7 +32905,7 @@ var LaneManager = class {
         run.worktreeRetained = run.worktreePath;
       } else {
         try {
-          const removed = await removeIfClean(run.worktreePath, this.baseRepo);
+          const removed = await removeIfClean(run.worktreePath, run.targetRepo ?? this.baseRepo);
           if (!removed) run.worktreeRetained = run.worktreePath;
         } catch (err) {
           console.error(
@@ -32914,6 +32951,30 @@ var LaneManager = class {
 };
 function errMessage(e) {
   return e instanceof Error ? e.message : String(e);
+}
+function realpathBestEffort(p) {
+  let cur = path7.resolve(p);
+  const tail = [];
+  for (; ; ) {
+    try {
+      const real = fs6.realpathSync(cur);
+      return tail.length ? path7.join(real, ...tail) : real;
+    } catch {
+      const parent = path7.dirname(cur);
+      if (parent === cur) return path7.resolve(p);
+      tail.unshift(path7.basename(cur));
+      cur = parent;
+    }
+  }
+}
+function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
+  const wt = realpathBestEffort(worktreePath);
+  const repo = realpathBestEffort(targetRepo);
+  if (wt === repo || wt.startsWith(repo + path7.sep) || repo.startsWith(wt + path7.sep)) {
+    throw new Error(
+      `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT outside the repo)`
+    );
+  }
 }
 function annotatedError(message, failureClass) {
   if (failureClass === INFRA_FAILURE_TAG) {
