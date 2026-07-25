@@ -159,7 +159,8 @@ export interface ContractViolation {
 }
 
 /** Result payload attached once a run reaches a terminal state. */
-export interface RunFinal {  final_message: string;
+export interface RunFinal {
+  final_message: string;
   touched_files: string[];
   plan_final: PlanState;
   /** Present when the run terminated abnormally. */
