@@ -28,8 +28,12 @@ jobs:
         run: |
           set -o pipefail
           LOG="$(mktemp)"
+          # GitHub runs bash with -e; a non-zero npm test exit would kill the
+          # script at the pipe and skip the summary/annotations below.
+          set +e
           npm test 2>&1 | tee "$LOG"
           rc=${PIPESTATUS[0]}
+          set -e
 
           # node:test summary lines look like "ℹ tests 51" (or "# tests 51" on TAP output).
           get_count() {
