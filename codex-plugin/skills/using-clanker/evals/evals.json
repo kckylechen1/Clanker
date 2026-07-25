@@ -1,6 +1,7 @@
 [
-  {"prompt":"Run a read-only Gemini repository survey","expected":"Use clanker_start with profile=gemini-recon (read-only and worktree-free are welded by the profile), then clanker_wait."},
-  {"prompt":"Have Kimi Crew implement and review in branch clanker/feature","expected":"Use clanker_start with profile=oc-kimi-crew and worktree=clanker/feature; do not inline child-agent policy."},
-  {"prompt":"Ask GLM directly to edit the primary checkout","expected":"Do not bypass the server; an unsupervised GLM write and primary-checkout writes are rejected. A GLM write goes through profile=oc-glm-write, which runs in a managed worktree under Sonnet supervision."},
-  {"prompt":"Have Codex review this repo but it needs to run the test suite","expected":"Use clanker_start with profile=codex-write and a managed worktree; there is no lane/read_only/sandbox parameter to hand-tune."}
+  {"prompt":"Run a read-only Gemini repository survey","expected":"Use clanker_start_gemini-recon (read-only and worktree-free are welded by the profile), then clanker_wait."},
+  {"prompt":"Have Kimi Crew implement and review in branch clanker/feature","expected":"Use clanker_start_oc-kimi-crew with worktree=clanker/feature; do not inline child-agent policy."},
+  {"prompt":"Ask GLM directly to edit the primary checkout","expected":"Do not bypass the server; an unsupervised GLM write and primary-checkout writes are rejected. A GLM write goes through clanker_start_oc-glm-write, which runs in a managed worktree under Sonnet supervision."},
+  {"prompt":"Have Codex review this repo but it needs to run the test suite","expected":"Use clanker_start_codex-review with a worktree branch: the read gate stays on and the review runs inside an isolated tree it can write build caches into."},
+  {"prompt":"Start a job with whatever profile I name at runtime","expected":"There is no generic start tool. Pick the clanker_start_<profile> tool whose capabilities the job needs."}
 ]
