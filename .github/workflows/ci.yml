@@ -8,7 +8,13 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      # One platform red must never cancel the other's job — both always run
+      # to completion and report independently.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -44,12 +50,18 @@ jobs:
           pass=$(get_count pass)
           fail=$(get_count fail)
           cancelled=$(get_count cancelled)
+          skipped=$(get_count skipped)
 
           echo "---- test summary ----"
           echo "tests:     ${tests:-unknown}"
           echo "pass:      ${pass:-unknown}"
           echo "fail:      ${fail:-unknown}"
           echo "cancelled: ${cancelled:-unknown}"
+          # skipped is intentionally informational only: platform-conditional
+          # skips (e.g. macOS-only Gemini ACP tests on ubuntu) are legitimate.
+          # cancelled = accidentally never ran -> gate; skipped = deliberately
+          # not run -> must be visible, must not fail the build.
+          echo "skipped:   ${skipped:-unknown}"
 
           if [ -z "$tests" ]; then
             echo "::error::Could not parse node:test summary — the runner did not report how many tests ran."
