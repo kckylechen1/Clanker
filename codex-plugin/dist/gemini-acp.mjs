@@ -14521,6 +14521,27 @@ var RESEARCH_ROLE_PREFIX = [
 function rolePrefix() {
   return process.env.CLANKER_GEMINI_ROLE?.trim() === "gemini-research" ? RESEARCH_ROLE_PREFIX : RECON_ROLE_PREFIX;
 }
+var DEFAULT_GEMINI_MODEL = "gemini-3.6-flash-high";
+function activeModel() {
+  return process.env.CLANKER_GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+}
+function activeEffort() {
+  return process.env.CLANKER_GEMINI_EFFORT?.trim() || void 0;
+}
+function sessionConfigOptions() {
+  const effort = activeEffort();
+  const asSelect = (id, name, category, value) => ({
+    id,
+    name,
+    category,
+    type: "select",
+    currentValue: value,
+    options: [{ value, name: value }]
+  });
+  const options = [asSelect("model", "Model", "model", activeModel())];
+  if (effort) options.push(asSelect("thought_level", "Reasoning effort", "thought_level", effort));
+  return options;
+}
 var sessions = /* @__PURE__ */ new Map();
 var TurnCancelled = class extends Error {
 };
@@ -14536,10 +14557,12 @@ function runAgy(sessionId, session, prompt) {
     "--mode",
     "plan",
     "--sandbox",
+    // Same accessors session/new reports from: argv and telemetry must never be
+    // two independent computations of "what model is this".
     "--model",
-    process.env.CLANKER_GEMINI_MODEL || "gemini-3.6-flash-high"
+    activeModel()
   ];
-  const effort = process.env.CLANKER_GEMINI_EFFORT?.trim();
+  const effort = activeEffort();
   if (effort) args.push("--effort", effort);
   const printTimeout = process.env.CLANKER_GEMINI_PRINT_TIMEOUT || "10m";
   args.push("--print-timeout", printTimeout, "--print", `${rolePrefix()}
@@ -14700,7 +14723,7 @@ agent({ name: "clanker-gemini" }).onRequest("initialize", () => ({
 })).onRequest("authenticate", () => ({})).onRequest("session/new", (ctx) => {
   const sessionId = `gemini-${crypto.randomUUID()}`;
   sessions.set(sessionId, { cwd: ctx.params.cwd, cancellationRequested: false });
-  return { sessionId };
+  return { sessionId, configOptions: sessionConfigOptions() };
 }).onRequest("session/prompt", async (ctx) => {
   const session = sessions.get(ctx.params.sessionId);
   if (!session) throw RequestError.internalError(void 0, `unknown Clanker: Gemini session '${ctx.params.sessionId}'`);

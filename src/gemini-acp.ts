@@ -8,6 +8,7 @@ import {
   agent as createAgent,
   ndJsonStream,
   type ContentBlock,
+  type SessionConfigOption,
 } from "@agentclientprotocol/sdk";
 
 const RECON_ROLE_PREFIX = [
@@ -34,6 +35,50 @@ function rolePrefix(): string {
   return process.env.CLANKER_GEMINI_ROLE?.trim() === "gemini-research" ? RESEARCH_ROLE_PREFIX : RECON_ROLE_PREFIX;
 }
 
+/** The default agy runs on when nothing overrides it. See backends.ts for the load-bearing copy. */
+const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash-high";
+
+/**
+ * The single source of truth for what this turn actually runs on. `runAgy`
+ * builds argv from it and `session/new` reports it, so telemetry can never
+ * disagree with the process that was spawned.
+ */
+function activeModel(): string {
+  return process.env.CLANKER_GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+}
+
+function activeEffort(): string | undefined {
+  return process.env.CLANKER_GEMINI_EFFORT?.trim() || undefined;
+}
+
+/**
+ * ACP `configOptions` is how run.ts learns what a lane is really running:
+ * `observeConfigOptions` maps `category: "model"` to `observed_model` and
+ * `category: "thought_level"` to `observed_effort`. A lane that reports
+ * nothing leaves both `null` — which is exactly how an opencode dispatch once
+ * ran on a substituted model while its telemetry claimed the requested one and
+ * nobody could tell. Gemini had that same blind spot: agy is spawned as an
+ * opaque `--print` child, so if the sidecar stays silent there is no other
+ * place the truth could come from.
+ */
+function sessionConfigOptions(): SessionConfigOption[] {
+  const effort = activeEffort();
+  // A one-value select: agy takes its model from argv, so there is nothing for
+  // a caller to choose here — the option exists to *state* what this turn runs
+  // on, which is the reading run.ts turns into `observed_model`.
+  const asSelect = (id: string, name: string, category: "model" | "thought_level", value: string): SessionConfigOption => ({
+    id,
+    name,
+    category,
+    type: "select",
+    currentValue: value,
+    options: [{ value, name: value }],
+  });
+  const options = [asSelect("model", "Model", "model", activeModel())];
+  if (effort) options.push(asSelect("thought_level", "Reasoning effort", "thought_level", effort));
+  return options;
+}
+
 type Session = { cwd: string; active?: ChildProcess; cancellationRequested: boolean };
 const sessions = new Map<string, Session>();
 
@@ -51,9 +96,11 @@ function runAgy(sessionId: string, session: Session, prompt: string): Promise<st
   const args = [
     "--mode", "plan",
     "--sandbox",
-    "--model", process.env.CLANKER_GEMINI_MODEL || "gemini-3.6-flash-high",
+    // Same accessors session/new reports from: argv and telemetry must never be
+    // two independent computations of "what model is this".
+    "--model", activeModel(),
   ];
-  const effort = process.env.CLANKER_GEMINI_EFFORT?.trim();
+  const effort = activeEffort();
   if (effort) args.push("--effort", effort);
   // Read-only recon turns observed at 178s-338s in practice; a 3m ceiling
   // killed real work and the resulting failure was indistinguishable from a
@@ -232,7 +279,7 @@ createAgent({ name: "clanker-gemini" })
   .onRequest("session/new", (ctx) => {
     const sessionId = `gemini-${crypto.randomUUID()}`;
     sessions.set(sessionId, { cwd: ctx.params.cwd, cancellationRequested: false });
-    return { sessionId };
+    return { sessionId, configOptions: sessionConfigOptions() };
   })
   .onRequest("session/prompt", async (ctx) => {
     const session = sessions.get(ctx.params.sessionId);
