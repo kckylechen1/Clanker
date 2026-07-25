@@ -32,6 +32,25 @@ import type { ClankerHost } from "./host.js";
 
 export type SessionState = "working" | "idle" | "stalled" | "closed";
 
+/**
+ * Name of the terminal-judgment artifact written into every run directory.
+ *
+ * Before it existed, a run directory held only `events.jsonl` (raw event
+ * stream), `chunks.log` (thought/message fragments) and `telemetry.json`:
+ * nothing a human or a relay seat could be pointed at and told "read the
+ * verdict here". The verdict was reachable only as the `final_message` field of
+ * one `clanker_wait` response, i.e. only through a language model that had to
+ * carry it in prose — and a model asked to reproduce prose verbatim produces
+ * prose instead (2026-07-25: a relay fabricated an entire review, and a second
+ * one, after a "verbatim" clause was added, still blended real verdict with
+ * invented detail). Turning the deliverable into a FILE PATH is the structural
+ * fix: the seat hands over a path, the dispatcher reads the bytes.
+ */
+export const RESULT_FILE = "result.md";
+
+/** Marker that opens the verbatim final-message section of `result.md`. */
+export const RESULT_FINAL_MESSAGE_HEADING = "## final_message";
+
 interface DigestEntry {
   seq: number;
   text: string;
@@ -79,6 +98,12 @@ export class LaneRun {
    * the ledger row describes the dispatch's lifetime, not its latest turn.
    */
   readonly initialPrompt: string;
+  /**
+   * Hard per-turn ceiling declared by this run's dispatch profile
+   * (profiles.ts). Undefined for dispatches that named no profile — the manager
+   * then falls back to the global CLANKER_TURN_TIMEOUT_MS.
+   */
+  readonly turnTimeoutMs?: number;
 
   turnStatus: RunStatus = "running";
   turnsCount = 0;
@@ -134,6 +159,8 @@ export class LaneRun {
     targetRepo?: string;
     requestOpts?: LaneRequestOptions;
     initialPrompt?: string;
+    /** Per-profile hard turn ceiling (profiles.ts); undefined falls back to the global default. */
+    turnTimeoutMs?: number;
   }) {
     this.id = init.id;
     this.lane = init.lane;
@@ -146,6 +173,7 @@ export class LaneRun {
     this.targetRepo = init.targetRepo;
     this.requestOpts = init.requestOpts ?? {};
     this.initialPrompt = init.initialPrompt ?? "";
+    this.turnTimeoutMs = init.turnTimeoutMs;
   }
 
   // ---- lifecycle ----------------------------------------------------------
@@ -182,6 +210,7 @@ export class LaneRun {
     this.writeEvent({ t: "turn_done", turn: this.turnsCount, stopReason: "end_turn" });
     this.touch("turn_done");
     this.markTerminal("done");
+    this.writeResultFileOnce();
     this.writeLedgerRowOnce();
   }
 
@@ -201,6 +230,7 @@ export class LaneRun {
     this.writeEvent({ t: "turn_error", turn: this.turnsCount, message, failureClass });
     this.touch("turn_error");
     this.markTerminal("error");
+    this.writeResultFileOnce();
     this.writeLedgerRowOnce();
   }
 
@@ -229,6 +259,7 @@ export class LaneRun {
     this.writeEvent({ t: "turn_cancelled", turn: this.turnsCount });
     this.touch("turn_cancelled");
     this.markTerminal("cancelled");
+    this.writeResultFileOnce();
     this.writeLedgerRowOnce();
   }
 
@@ -469,6 +500,7 @@ export class LaneRun {
       observed_model: this.observedModel, requested_effort: this.requestOpts.effort,
       observed_effort: this.observedEffort, lane: this.lane, transport: "acp-stdio",
       backend: this.lane, read_only: this.readOnly, sandbox: this.requestOpts.sandbox,
+      ...(this.turnTimeoutMs !== undefined ? { turn_timeout_ms: this.turnTimeoutMs } : {}),
       created_at: new Date(this.createdAt).toISOString(),
       ...(this.startedAt ? { started_at: new Date(this.startedAt).toISOString() } : {}),
       ...(this.terminalAt ? { terminal_at: new Date(this.terminalAt).toISOString(), duration_ms: this.terminalAt - (this.startedAt ?? this.createdAt) } : {}),
@@ -507,6 +539,74 @@ export class LaneRun {
    * ordering entirely. See ledger.ts for why this write exists at all
    * (MCP-direct dispatches bypass the harness PostToolUse hook).
    */
+  /** Absolute path of this run's terminal-judgment artifact (see RESULT_FILE). */
+  resultPath(): string {
+    return path.join(this.runDir, RESULT_FILE);
+  }
+
+  /**
+   * Size in bytes of an already-written `result.md`, or 0 when it is missing or
+   * empty. Callers use it to answer the only question a relay seat can honestly
+   * answer about the verdict: "is there a file to read?" — never "what does it
+   * say?".
+   */
+  resultBytes(): number {
+    try {
+      return fs.statSync(this.resultPath()).size;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Write `<runDir>/result.md` exactly once, from the same three terminal tails
+   * as writeLedgerRowOnce() and guarded by the same per-run `isTerminalTurn()`
+   * check at the top of completeTurn()/failTurn()/cancelTurn(): whichever fires
+   * first flips `turnStatus` off "running", so every later terminal transition
+   * short-circuits before reaching here.
+   *
+   * The final message is written UNTRUNCATED, unlike `finalMessage()` (capped at
+   * FINAL_MESSAGE_CHAR_BUDGET for the wire). That asymmetry is the point: the
+   * budget exists to keep a tool response small, and a verdict clipped at 20k
+   * characters is exactly the kind of loss the reader must not be handed
+   * silently. The file is the lossless artifact; the wire field is the preview.
+   *
+   * Fail-silent by design, like the ledger row: a diagnostics artifact must
+   * never fail or delay terminal handling of a real dispatch. Written via
+   * tmp+rename so a reader never observes a half-written verdict.
+   */
+  private writeResultFileOnce(): void {
+    const target = this.resultPath();
+    const tmp = `${target}.${process.pid}.tmp`;
+    const lines = [
+      `# clanker run ${this.id}`,
+      "",
+      `- status: ${this.turnStatus}`,
+      `- lane: ${this.lane}`,
+      `- run_dir: ${this.runDir}`,
+      `- cwd: ${this.cwd}`,
+      ...(this.worktreeRetained ? [`- worktree_retained: ${this.worktreeRetained}`] : []),
+      "",
+    ];
+    if (this.error) {
+      lines.push("## error", "", this.error, "");
+      if (this.failureClass) lines.push(`failure_class: ${this.failureClass}`, "");
+    }
+    // Last section, deliberately: a reader (or `tail`) that stops early still
+    // ends on the verdict itself rather than on metadata.
+    lines.push(RESULT_FINAL_MESSAGE_HEADING, "", this.lastFinalMessage, "");
+    try {
+      fs.mkdirSync(this.runDir, { recursive: true });
+      fs.writeFileSync(tmp, lines.join("\n"));
+      fs.renameSync(tmp, target);
+    } catch (error) {
+      try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort cleanup */ }
+      console.error(
+        `[clanker] result file write failed for run '${this.id}' at '${target}': ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   private writeLedgerRowOnce(): void {
     appendLedgerRow({
       id: this.id,

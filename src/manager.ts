@@ -31,6 +31,7 @@ import {
   INFRA_FAILURE_TAG,
   isCapacityTransient,
 } from "./failure-classifier.js";
+import { resolveProfileDispatch, type ProfileDispatchInput } from "./profiles.js";
 import { LaneRun } from "./run.js";
 import type {
   LaneName,
@@ -51,12 +52,43 @@ import {
   resolveTargetRepo,
 } from "./worktree.js";
 
-export interface DispatchParams extends LaneRequestOptions {
+/**
+ * Caller-supplied dispatch parameters. `secrets` is deliberately omitted from
+ * LaneRequestOptions here: it is minted from a registry row, not received, so
+ * declaring it would be a type-level invitation to forge it.
+ */
+export interface DispatchParams extends Omit<LaneRequestOptions, "secrets"> {
   lane: LaneName;
   prompt: string;
   cwd?: string;
   worktree?: string;
 }
+
+/**
+ * Capabilities that a caller must NOT be able to claim, minted only from a
+ * registry row and carried to the private dispatch path as a separate
+ * argument — never as a field of the caller-supplied params object.
+ *
+ * This is 0.2.5's shape restored (26e9c9f src/manager.ts:162-179): there,
+ * `supervisedGlm` was a positional parameter of the private
+ * dispatchStartInternal and the public `dispatchStart()` always passed
+ * `false`, so no caller could hand in supervision. Making it a field of
+ * DispatchParams instead — as the first #19 revision did — let any in-process
+ * caller self-report `supervision: "sonnet"` and walk straight through the GLM
+ * gate (reproduced by cold review on 4a8a718).
+ */
+interface MintedCapabilities {
+  supervision: "none" | "sonnet";
+  /** Per-profile hard turn ceiling; undefined falls back to the global TURN_TIMEOUT_MS. */
+  turnTimeoutMs?: number;
+  /** Vault-sourced env vars the profile declares. */
+  secrets?: readonly string[];
+  /** Profile id, for diagnostics. */
+  profileId?: string;
+}
+
+/** Nothing a caller supplies can mint a capability. */
+const NO_CAPABILITIES: MintedCapabilities = { supervision: "none" };
 
 export interface WaitResult {
   id: string;
@@ -66,8 +98,21 @@ export interface WaitResult {
   plan_summary: string;
   last_event_age_ms: number;
   suspected_stall: boolean;
+  /** Absolute run directory — handed to the caller so a seat never has to construct or guess a path. */
+  run_dir: string;
   warnings?: string[];
   // present when status is terminal
+  /**
+   * Absolute path of the terminal-judgment artifact (`result.md`), present ONLY
+   * when that file exists and is non-empty. Its absence on a terminal run is
+   * the machine-checkable signal a relay seat needs in order to say "I did not
+   * get a verdict" instead of composing one (see plugin/agents/*.md,
+   * `CLANKER-NO-RESULT:`); a seat holding only start+wait tools cannot stat a
+   * file itself, so the server answers that question for it.
+   */
+  result_path?: string;
+  /** Size of `result.md` in bytes; omitted whenever `result_path` is. */
+  result_bytes?: number;
   final_message?: string;
   touched_files?: string[];
   plan_final?: RunFinal["plan_final"];
@@ -122,6 +167,12 @@ export class LaneManager {
   private readonly stallThresholdMs: number;
   private readonly sessionTtlMs: number;
   private readonly turnTimeoutMs: number;
+  /**
+   * Explicit constructor override. Set only by an operator/test; when set it
+   * wins over a profile's declared ceiling, so an 80ms test ceiling is not
+   * silently replaced by a profile's 45 minutes.
+   */
+  private readonly turnTimeoutOverrideMs?: number;
   private readonly handshakeTimeoutMs: number;
   private readonly baseRepo: string;
   private readonly capacityRetryBackoffMs: number;
@@ -143,6 +194,7 @@ export class LaneManager {
     this.stallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
     this.sessionTtlMs = opts.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
     this.turnTimeoutMs = opts.turnTimeoutMs ?? TURN_TIMEOUT_MS;
+    this.turnTimeoutOverrideMs = opts.turnTimeoutMs;
     this.handshakeTimeoutMs = opts.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
     this.baseRepo = opts.baseRepo ?? BASE_REPO;
     this.capacityRetryBackoffMs = opts.capacityRetryBackoffMs ?? CAPACITY_RETRY_BACKOFF_MS;
@@ -160,12 +212,51 @@ export class LaneManager {
   /**
    * Start a lane turn without blocking. Setup errors (unknown lane, worktree
    * creation) throw here; runtime errors surface through clanker_wait.
+   *
+   * This entrance mints NO capability: it always enters with
+   * `supervision: "none"`, exactly as 0.2.5's public dispatchStart always
+   * passed `supervisedGlm=false`. Extra properties on `params` are inert —
+   * the private path reads capabilities only from its second argument, so
+   * `dispatchStart({... , supervision: "sonnet"} as any)` cannot unlock
+   * anything.
    */
   async dispatchStart(params: DispatchParams): Promise<{ id: string; warnings: string[] }> {
-    return this.dispatchStartInternal(params);
+    return this.dispatchStartInternal(params, NO_CAPABILITIES);
   }
 
-  private async dispatchStartInternal(params: DispatchParams): Promise<{ id: string; warnings: string[] }> {
+  /**
+   * The dedicated entrance for a registry profile — the only way a supervised
+   * capability is ever minted. The caller names a profile and supplies that
+   * profile's free parameters; lane, write mode, sandbox, secrets and
+   * supervision come from the registry row, which the caller cannot reach.
+   */
+  async dispatchProfile(input: ProfileDispatchInput): Promise<{ id: string; warnings: string[] }> {
+    const resolved = resolveProfileDispatch(input);
+    return this.dispatchStartInternal(
+      {
+        lane: resolved.lane,
+        prompt: resolved.prompt,
+        cwd: resolved.cwd,
+        worktree: resolved.worktree,
+        model: resolved.model,
+        effort: resolved.effort,
+        readOnly: resolved.readOnly,
+        sandbox: resolved.sandbox,
+        profile: resolved.profile,
+      },
+      {
+        supervision: resolved.supervision,
+        turnTimeoutMs: resolved.turnTimeoutMs,
+        secrets: resolved.secrets,
+        profileId: resolved.profileId,
+      },
+    );
+  }
+
+  private async dispatchStartInternal(
+    params: DispatchParams,
+    minted: MintedCapabilities,
+  ): Promise<{ id: string; warnings: string[] }> {
     if (this.shuttingDown) throw new Error("Clanker manager is shutting down; refusing a new dispatch");
     if (!LANE_NAMES.includes(params.lane)) {
       throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
@@ -181,16 +272,31 @@ export class LaneManager {
     if (params.lane === "codex" && params.model?.trim().toLowerCase() === "codex") {
       throw new Error("model='codex' is a lane name, not a Codex model id; omit model to use the configured default");
     }
-    const readOnly = params.lane === "gemini" ? true : (params.readOnly ?? false);
-    if (params.lane === "gemini" && !readOnly) {
+    // Reject an explicit write-capable gemini request BEFORE normalizing, or
+    // the normalization silently downgrades it to read-only and the rejection
+    // below becomes dead code — a refusal that never fires reads to the caller
+    // as "accepted", which is exactly the failure mode a loud gate exists to
+    // prevent. (Found by cold review on 4a8a718.)
+    if (params.lane === "gemini" && params.readOnly === false) {
       throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
     }
+    const readOnly = params.lane === "gemini" ? true : (params.readOnly ?? false);
     if (params.lane === "gemini" && params.worktree) throw new Error("Clanker: Gemini rejects worktree");
     if (!readOnly && params.lane !== "codex" && !params.model?.trim()) {
       throw new Error(`an explicit model is required for write lane '${params.lane}'`);
     }
-    if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew") {
-      throw new Error("direct GLM write is prohibited; use profile='kimi-crew'");
+    // GLM writes are supervised-only. 0.2.5 expressed this as "GLM writes
+    // require clanker_dispatch_glm_write_start and Sonnet supervision" and
+    // unlocked it with an internal `supervisedGlm` flag no caller could set;
+    // `supervision === "sonnet"` (welded by the oc-glm-write registry row, not
+    // reachable from any tool schema) is that same key. The kimi-crew escape
+    // stays because 0.3.x callers were told to use it, but it is NOT the GLM
+    // path: kimi-crew welds model=kimi and runs a different model entirely.
+    if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew" && minted.supervision !== "sonnet") {
+      throw new Error(
+        "direct GLM write is prohibited; use profile='kimi-crew' for the OpenCode crew, " +
+          "or the supervised 'oc-glm-write' dispatch profile for a GLM write under Sonnet supervision",
+      );
     }
     const writeCapableSandbox =
       params.lane === "codex" &&
@@ -247,6 +353,7 @@ export class LaneManager {
       readOnly,
       sandbox: params.sandbox,
       profile,
+      secrets: minted.secrets,
     };
     const spec = this.resolveSpec(params.lane, opts, runDir);
     this.warningsById.set(id, spec.warnings);
@@ -263,6 +370,7 @@ export class LaneManager {
       targetRepo: worktreePath ? targetRepo : undefined,
       requestOpts: opts,
       initialPrompt: params.prompt,
+      turnTimeoutMs: minted.turnTimeoutMs,
     });
     this.runs.set(id, run);
 
@@ -403,7 +511,11 @@ export class LaneManager {
     promptPromise.catch(() => {
       /* rejection surfaced via the race / awaited below */
     });
-    const turnTimer = createTimeout(this.turnTimeoutMs);
+    // Precedence: explicit constructor override (operator/test) > the profile's
+    // declared ceiling > the global default. Without the override tier a test's
+    // 80ms ceiling would be overwritten by a profile's 45 minutes.
+    const turnTimeoutMs = this.turnTimeoutOverrideMs ?? run.turnTimeoutMs ?? this.turnTimeoutMs;
+    const turnTimer = createTimeout(turnTimeoutMs);
     try {
       for (;;) {
         const nextP = conn.session.nextUpdate();
@@ -419,7 +531,7 @@ export class LaneManager {
         ]);
         if (outcome.kind === "timeout") {
           throw new Error(
-            `turn exceeded CLANKER_TURN_TIMEOUT_MS (${this.turnTimeoutMs}ms) with no completion; killing the Clanker`,
+            `turn exceeded CLANKER_TURN_TIMEOUT_MS (${turnTimeoutMs}ms) with no completion; killing the Clanker`,
           );
         }
         if (outcome.kind === "exit" || outcome.kind === "closed") {
@@ -540,10 +652,16 @@ export class LaneManager {
       plan_summary: run.planSummary(),
       last_event_age_ms: run.lastEventAgeMs(),
       suspected_stall: run.suspectedStall(this.stallThresholdMs),
+      run_dir: run.runDir,
     };
     const warnings = this.warningsById.get(run.id);
     if (warnings && warnings.length) result.warnings = warnings;
     if (run.isTerminalTurn()) {
+      const resultBytes = run.resultBytes();
+      if (resultBytes > 0) {
+        result.result_path = run.resultPath();
+        result.result_bytes = resultBytes;
+      }
       result.final_message = run.finalMessage();
       result.touched_files = run.finalTouched();
       result.plan_final = run.planState();
@@ -570,6 +688,8 @@ export class LaneManager {
       last_event_age_ms: run.lastEventAgeMs(),
       suspected_stall: run.suspectedStall(this.stallThresholdMs),
       cwd: run.cwd,
+      run_dir: run.runDir,
+      ...(run.resultBytes() > 0 ? { result_path: run.resultPath() } : {}),
       ...(run.worktreePath ? { worktree: run.worktreePath } : {}),
       telemetry: run.telemetry(),
     };

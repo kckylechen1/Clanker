@@ -96,7 +96,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveOcModel } from "./constants.js";
+import { isGlmModel, resolveOcModel } from "./constants.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "./types.js";
 
 const nodeRequire = createRequire(import.meta.url);
@@ -200,6 +200,59 @@ const CAPS: Record<LaneName, LaneCapabilities> = {
 };
 
 /**
+ * Per-lane environment variables that must come from the vault (OS keychain),
+ * never the ambient process environment, and therefore force the spawned
+ * command through `tachi vault exec` (see wrapWithVaultExec below).
+ * codex, grok and gemini authenticate via their own OAuth login state —
+ * Clanker never holds a long-lived secret for them, so all three declare an
+ * empty list. opencode is model-dependent (most models it serves are also
+ * OAuth-backed through opencode's own credential store); only the GLM lane
+ * authenticates with a bare API key, so its requiredEnv is resolved
+ * per-request in opencodeRequiredEnv rather than declared statically here.
+ */
+const REQUIRED_ENV: Record<Exclude<LaneName, "opencode">, string[]> = {
+  codex: [],
+  grok: [],
+  gemini: [],
+};
+
+/** GLM is the only opencode-served model that needs a vault-sourced secret. */
+function opencodeRequiredEnv(model: string | undefined): string[] {
+  return isGlmModel(model) ? ["ZHIPUAI_API_KEY"] : [];
+}
+
+/**
+ * Union of the lane/model-derived requirement and whatever the dispatch
+ * profile declared (LaneRequestOptions.secrets). The model-derived rule is
+ * authoritative on its own: a GLM spawn is wrapped because it is GLM, not
+ * because some profile remembered to list the key — so a read-only GLM
+ * dispatch through a profile that declares no secrets is still wrapped.
+ */
+function requiredEnvFor(lane: LaneName, opts: LaneRequestOptions): string[] {
+  const base = lane === "opencode" ? opencodeRequiredEnv(opts.model) : REQUIRED_ENV[lane];
+  return [...new Set([...base, ...(opts.secrets ?? [])])];
+}
+
+/**
+ * Rewrite a spawn command to run under `tachi vault exec --keychain
+ * --require <vars> -- <original command> <original args>` when the lane
+ * declares required env vars, so the secret is materialized from the OS
+ * keychain into the child's environment at spawn time instead of living in
+ * Clanker's (or the ambient shell's) own environment. `tachi` resolves via
+ * PATH, same as every other lane binary here. An empty requiredEnv list is
+ * a no-op — the returned spec is unchanged, so every existing OAuth lane's
+ * spawn command stays byte-for-byte identical to before this wiring.
+ */
+function wrapWithVaultExec(spec: SpawnSpec, requiredEnv: string[]): SpawnSpec {
+  if (requiredEnv.length === 0) return spec;
+  return {
+    ...spec,
+    command: "tachi",
+    args: ["vault", "exec", "--keychain", "--require", requiredEnv.join(","), "--", spec.command, ...spec.args],
+  };
+}
+
+/**
  * Maps the public `sandbox` option (CodexSandboxMode, mirroring codex-acp's
  * own sandboxMode labels) onto codex-acp's INITIAL_AGENT_MODE id. See the
  * file header for the codex-acp 1.1.2 source verification.
@@ -294,7 +347,10 @@ export function buildSpawnSpec(
         env.CLANKER_GEMINI_PRINT_TIMEOUT = process.env.CLANKER_GEMINI_PRINT_TIMEOUT;
       }
       if (effort) env.CLANKER_GEMINI_EFFORT = effort;
-      return { command: process.execPath, args: [resolveGeminiAcpEntry()], env, warnings };
+      return wrapWithVaultExec(
+        { command: process.execPath, args: [resolveGeminiAcpEntry()], env, warnings },
+        requiredEnvFor(lane, opts),
+      );
     }
 
     case "grok": {
@@ -316,7 +372,7 @@ export function buildSpawnSpec(
       ];
       if (opts.effort) args.push("--reasoning-effort", opts.effort);
       args.push("stdio");
-      return { command: "grok", args, env, warnings };
+      return wrapWithVaultExec({ command: "grok", args, env, warnings }, requiredEnvFor(lane, opts));
     }
 
     case "opencode": {
@@ -353,7 +409,7 @@ export function buildSpawnSpec(
         env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
         env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
       }
-      return { command: "opencode", args, env, warnings };
+      return wrapWithVaultExec({ command: "opencode", args, env, warnings }, requiredEnvFor(lane, opts));
     }
 
     case "codex": {
@@ -380,7 +436,10 @@ export function buildSpawnSpec(
       // header), so its own bundled @openai/codex copy was never
       // downloaded — CODEX_PATH is load-bearing, not an optional override.
       env.CODEX_PATH = resolveSystemCodexPath();
-      return { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings };
+      return wrapWithVaultExec(
+        { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings },
+        requiredEnvFor(lane, opts),
+      );
     }
   }
 }

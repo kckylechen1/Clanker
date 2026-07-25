@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# Amp orb setup — runs once on a fresh orb (see ampcode.com/manual/orbs).
+# Provisions the toolchain the Clanker cloud build/test/review seat needs.
+# Keep it fast and idempotent.
+#
+# Clanker is a pure Node/TypeScript project: everything it builds and tests
+# comes from package-lock.json. The only system-level requirement is Node, but
+# the floor is **24**, not package.json's nominal `engines.node: ">=20"`:
+#
+#   * TypeScript 7 ships an extensionless `node_modules/.bin/tsc` entry that
+#     Node 20.9 refuses to load (ERR_UNKNOWN_FILE_EXTENSION), so `npm run
+#     typecheck`/`build` die on a stock orb image even though 20.9 passes a
+#     `major >= 20` check;
+#   * `npm test` under Node 20.9 and 22 cancels 21 cases from the
+#     capacity-retry suite onward. Only Node 24 finishes with zero cancelled.
+#
+# Measured on a clean Amp orb, 2026-07-25. A gate that admits a runtime which
+# then silently cancels a sixth of the suite is worse than no gate: it reports
+# a broken toolchain as passing tests.
+#
+# THE HARD PART IS HANDING NODE 24 TO THE NEXT COMMAND, NOT TO THIS ONE.
+# The previous revision installed 24, printed `setup: node v24.18.0 / setup:
+# ready`, and the very next independent command still got v20.9.0 — a child
+# shell's PATH dies with the child, and appending to `.profile`/`.bashrc` does
+# nothing for the non-login, non-interactive shells an orb actually runs
+# commands in (bash reads neither file). Two consequences, both load-bearing:
+#
+#   1. Node 24 is PUBLISHED into the directory the stale node already came
+#      from. That directory is on later commands' PATH by proof: it is where
+#      their v20.9.0 was resolved. Nothing here depends on shell startup files.
+#   2. Setup then VERIFIES from a fresh `env -i` shell carrying the PATH this
+#      script was entered with — the closest available reproduction of a later
+#      independent command — and exits non-zero when that shell still sees a
+#      node below the floor. A setup that cannot prove the next command gets 24
+#      must fail loudly instead of printing "ready".
+#
+# `--verify-node-only` runs step 2 alone and provisions nothing; it is how
+# test/orb-setup-contract.test.ts exercises the gate against a stale PATH.
+set -euo pipefail
+
+# Captured BEFORE any PATH manipulation: this is what later commands inherit.
+ORIGINAL_PATH="${PATH}"
+AMBIENT_NODE="$(command -v node 2>/dev/null || true)"
+
+REQUIRED_NODE_MAJOR=24
+
+major_of() { printf '%s' "${1:-0}" | cut -d. -f1; }
+
+# What a LATER, INDEPENDENT command gets: a fresh non-login, non-interactive
+# shell with the environment this script was entered with. `env -i` keeps an
+# exported PATH from this script's own process from faking a pass.
+verify_node_for_later_commands() {
+  local probe resolved version
+  probe="$(env -i HOME="${HOME}" PATH="${ORIGINAL_PATH}" bash -c \
+    'command -v node && node -p "process.versions.node"' 2>/dev/null || true)"
+  resolved="$(printf '%s\n' "${probe}" | sed -n 1p)"
+  version="$(printf '%s\n' "${probe}" | sed -n 2p)"
+
+  if [ -z "${version}" ]; then
+    echo "setup: FAILED — a fresh shell on this orb's own PATH finds no usable node." >&2
+    echo "setup: PATH was: ${ORIGINAL_PATH}" >&2
+    return 1
+  fi
+  if [ "$(major_of "${version}")" -lt "${REQUIRED_NODE_MAJOR}" ] 2>/dev/null; then
+    echo "setup: FAILED — the next command on this orb would get node v${version} (${resolved})," >&2
+    echo "setup: below the required >=${REQUIRED_NODE_MAJOR}. On that runtime 'npm run typecheck' cannot load" >&2
+    echo "setup: TypeScript 7's tsc and 'npm test' cancels 21 cases, which reads as passing tests." >&2
+    echo "setup: Fix the base image (ship node >=${REQUIRED_NODE_MAJOR}), or make ${resolved%/*} writable so" >&2
+    echo "setup: setup can publish node ${REQUIRED_NODE_MAJOR} there. Refusing to report a broken toolchain as ready." >&2
+    return 1
+  fi
+  echo "setup: later commands get node v${version} from ${resolved}"
+}
+
+if [ "${1:-}" = "--verify-node-only" ]; then
+  verify_node_for_later_commands
+  exit $?
+fi
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
+
+# ---------------------------------------------------------------------------
+# Node >= 24 — install only when the base image ships nothing usable, then make
+# it the node LATER commands resolve.
+# ---------------------------------------------------------------------------
+ambient_version=""
+if [ -n "${AMBIENT_NODE}" ]; then
+  ambient_version="$("${AMBIENT_NODE}" -p 'process.versions.node' 2>/dev/null || true)"
+fi
+
+if [ -n "${ambient_version}" ] && [ "$(major_of "${ambient_version}")" -ge "${REQUIRED_NODE_MAJOR}" ] 2>/dev/null; then
+  echo "setup: base image ships node v${ambient_version}; nothing to install"
+else
+  if [ -n "${ambient_version}" ]; then
+    echo "setup: node v${ambient_version} is older than the required >=${REQUIRED_NODE_MAJOR}; installing a newer one" >&2
+  else
+    echo "setup: no node on PATH; installing node ${REQUIRED_NODE_MAJOR}" >&2
+  fi
+
+  export NVM_DIR="${HOME}/.nvm"
+  if [ ! -s "${NVM_DIR}/nvm.sh" ]; then
+    curl -sSfL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+  fi
+  # shellcheck disable=SC1091
+  . "${NVM_DIR}/nvm.sh"
+  nvm install "${REQUIRED_NODE_MAJOR}"
+  nvm alias default "${REQUIRED_NODE_MAJOR}"
+  nvm use "${REQUIRED_NODE_MAJOR}"
+
+  # `nvm which` prints the real interpreter path. nvm has no
+  # `versions/node/current` symlink — the previous revision put one on PATH and
+  # it resolved to nothing at all.
+  NODE24_BIN="$(dirname "$(nvm which "${REQUIRED_NODE_MAJOR}")")"
+  if [ ! -x "${NODE24_BIN}/node" ]; then
+    echo "setup: nvm install produced no usable node binary at ${NODE24_BIN}" >&2
+    exit 1
+  fi
+  export PATH="${NODE24_BIN}:${PATH}"
+
+  # Publish into the directory later commands already resolve `node` from. If
+  # there was no node at all, fall back to a bin dir that is on their PATH.
+  publish_dir=""
+  if [ -n "${AMBIENT_NODE}" ] && [ -w "$(dirname "${AMBIENT_NODE}")" ]; then
+    publish_dir="$(dirname "${AMBIENT_NODE}")"
+  else
+    case ":${ORIGINAL_PATH}:" in
+      *":${HOME}/.local/bin:"*)
+        mkdir -p "${HOME}/.local/bin"
+        publish_dir="${HOME}/.local/bin"
+        ;;
+    esac
+  fi
+
+  if [ -n "${publish_dir}" ] && [ "${publish_dir}" != "${NODE24_BIN}" ]; then
+    for bin in node npm npx corepack; do
+      if [ -e "${NODE24_BIN}/${bin}" ]; then
+        ln -sfn "${NODE24_BIN}/${bin}" "${publish_dir}/${bin}"
+      fi
+    done
+    echo "setup: published node ${REQUIRED_NODE_MAJOR} into ${publish_dir} (on later commands' PATH)"
+  else
+    echo "setup: could not publish node ${REQUIRED_NODE_MAJOR} onto later commands' PATH" >&2
+  fi
+fi
+
+# The gate. It runs on every setup, including the "base image is already fine"
+# path, because "this shell has 24" and "the next command has 24" are two
+# different claims and only the second one decides whether the seat works.
+verify_node_for_later_commands
+
+echo "setup: node $(node -v), npm $(npm -v)"
+
+# ---------------------------------------------------------------------------
+# Dependencies — `npm ci` is the reproducible install and is idempotent enough
+# (it wipes and recreates node_modules from the lockfile). Skip when the tree
+# already matches the lockfile so a warm orb is close to a no-op.
+# ---------------------------------------------------------------------------
+stamp=".agents/.setup-npm-ci-stamp"
+lock_hash="$( (shasum -a 256 package-lock.json 2>/dev/null || sha256sum package-lock.json) | awk '{print $1}')"
+if [ -d node_modules ] && [ -f "${stamp}" ] && [ "$(cat "${stamp}")" = "${lock_hash}" ]; then
+  echo "setup: node_modules already matches package-lock.json; skipping npm ci"
+else
+  npm ci
+  printf '%s' "${lock_hash}" >"${stamp}"
+fi
+
+# ---------------------------------------------------------------------------
+# Fail loudly here rather than mid-mission: a broken toolchain must not look
+# like a failing test. (Constitution: a safety refusal must be loud.)
+# ---------------------------------------------------------------------------
+npm run typecheck
+
+echo "setup: ready — 'npm test', 'npm run build', 'npm run typecheck' are available"
