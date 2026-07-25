@@ -21,6 +21,7 @@ import {
   isGlmModel,
   RUNS_ROOT,
   TURN_TIMEOUT_MS,
+  WRITE_DISCIPLINE_PREFIX,
 } from "./constants.js";
 import { buildSpawnSpec } from "./backends.js";
 import { foreignControlRefusal, readForeignRun, scanForeignRuns } from "./foreign.js";
@@ -558,13 +559,13 @@ export class LaneManager {
       worktreeBaseSha,
       doNotTouch: params.doNotTouch,
       requestOpts,
-      initialPrompt: params.prompt,
+      initialPrompt: lanePrompt,
       turnTimeoutMs: minted.turnTimeoutMs,
       supervised: minted.supervision === "sonnet",
     });
     this.runs.set(id, run);
 
-    const drive = this.driveNewSession(run, spec, params.prompt);
+    const drive = this.driveNewSession(run, spec, lanePrompt);
     this.trackDrive(id, drive);
     return { id, warnings: spec.warnings };
   }

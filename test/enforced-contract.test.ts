@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { LaneManager, type WaitResult } from "../src/manager.js";
 import { deriveWorktreePath } from "../src/worktree.js";
+import { WRITE_DISCIPLINE_PREFIX } from "../src/constants.js";
 import { fakeResolver } from "./helpers.js";
 
 /**
@@ -304,6 +305,60 @@ test("doNotTouch: supplied without a worktree is refused, not silently unchecked
         }),
       /doNotTouch was supplied without a worktree/,
     );
+  } finally {
+    await m.shutdown();
+  }
+});
+
+// ---- Feature 3: write-class discipline prefix -----------------------------
+
+test("prefix: a write-class dispatch prompt starts with the discipline prefix, original text verbatim after", async () => {
+  const repo = makeTwoCommitRepo();
+  const m = makeManager(repo.base);
+  const branch = `clanker/prefix-write-${Date.now()}`;
+  const original = "echo-back-this-exact-text";
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "opencode",
+      model: "kimi",
+      prompt: original,
+      readOnly: false,
+      worktree: branch,
+      cwd: repo.base,
+    });
+    const r = await waitTerminal(m, id);
+    assert.equal(r.status, "done");
+    // The fake agent echoes the prompt it received as its final message, so
+    // the terminal message is direct evidence of what the lane was handed.
+    assert.equal(r.final_message, WRITE_DISCIPLINE_PREFIX + "\n\n" + original);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("prefix: a read-only dispatch gets NO prefix", async () => {
+  const repo = makeTwoCommitRepo();
+  const m = makeManager(repo.base);
+  const original = "plain-read-prompt";
+  try {
+    const { id } = await m.dispatchStart({ lane: "codex", prompt: original, readOnly: true, cwd: repo.base });
+    const r = await waitTerminal(m, id);
+    assert.equal(r.status, "done");
+    assert.equal(r.final_message, original);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("prefix: gemini (forced read-only server-side) never gets one", async () => {
+  const repo = makeTwoCommitRepo();
+  const m = makeManager(repo.base);
+  const original = "gemini-scout-prompt";
+  try {
+    const { id } = await m.dispatchStart({ lane: "gemini", prompt: original, cwd: repo.base });
+    const r = await waitTerminal(m, id);
+    assert.equal(r.status, "done");
+    assert.equal(r.final_message, original);
   } finally {
     await m.shutdown();
   }
