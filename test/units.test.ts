@@ -325,21 +325,69 @@ test("codex lane resolves the pinned local codex-acp dependency in source mode, 
 });
 
 test("packaged codex-acp sidecar is self-contained and executable", () => {
+  // Single source of truth for the pinned version is package.json's exact
+  // dependency declaration (see the NOTE above "codex lane resolves the
+  // pinned local codex-acp dependency..."), not a literal hardcoded here —
+  // a hardcoded version goes stale the moment the dependency is bumped,
+  // and that staleness reads as a false regression, not a real one.
+  const pinnedVersion = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8")).dependencies[
+    "@agentclientprotocol/codex-acp"
+  ];
+  assert.ok(
+    /^\d+\.\d+\.\d+$/.test(pinnedVersion),
+    `expected package.json to pin an exact codex-acp version, got: ${pinnedVersion}`,
+  );
   const result = spawnSync(process.execPath, ["plugin/dist/codex-acp.mjs", "--version"], {
     cwd: path.resolve("."),
     encoding: "utf8",
   });
   assert.equal(result.status, 0, result.stderr || "codex-acp sidecar did not execute");
-  assert.match(result.stdout, /^@agentclientprotocol\/codex-acp 1\.1\.4\s*$/);
+  assert.match(
+    result.stdout,
+    new RegExp(`^@agentclientprotocol/codex-acp ${pinnedVersion.replace(/\./g, "\\.")}\\s*$`),
+    `expected the packaged sidecar version to match package.json's pinned dependency (${pinnedVersion}), got: ${result.stdout}`,
+  );
 });
 
-test("codex lane sets CODEX_PATH to a real, executable file — not the bare 'codex' alias name", () => {
+// NOTE (2026-07-25 hardening): under `npm test`, `node_modules/.bin` is on
+// PATH ahead of everything else, and `node_modules/.bin/codex` is a real
+// symlink to `@openai/codex`'s bin (a Clanker devDependency-of-a-dependency,
+// not something the host needs installed). That means the test below
+// structurally always exercises the "found on PATH" branch of
+// resolveSystemCodexPath() and can never observe whether the *host* has
+// codex installed — it verifies "resolves to an absolute, existing file",
+// not "the host has codex". The fallback branch (nothing executable found,
+// return the bare "codex" string) is covered separately below by sealing
+// PATH down to an empty directory.
+
+test("codex lane resolves CODEX_PATH to an absolute, existing file when PATH provides a `codex` executable — not the bare alias name", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-codex-path-"));
   const spec = buildSpawnSpec("codex", {}, runDir);
   assert.ok(spec.env.CODEX_PATH, "CODEX_PATH env is set");
   assert.notEqual(spec.env.CODEX_PATH, "codex", "must resolve past the bare name to an absolute path");
   assert.ok(path.isAbsolute(spec.env.CODEX_PATH), "CODEX_PATH is an absolute path");
   assert.ok(fs.existsSync(spec.env.CODEX_PATH), "CODEX_PATH points at a file that actually exists");
+});
+
+test("codex lane falls back to the bare 'codex' name when PATH has no executable codex on it", () => {
+  // Seal PATH down to a single, freshly created, guaranteed-empty directory
+  // (not a subtractive filter of the real PATH, and not a subprocess with
+  // an inherited shell environment) so this only ever tests
+  // resolveSystemCodexPath()'s own PATH-scanning logic, in-process.
+  const sealedBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-no-codex-bin-"));
+  const savedPath = process.env.PATH;
+  try {
+    process.env.PATH = sealedBinDir;
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-codex-fallback-"));
+    const spec = buildSpawnSpec("codex", {}, runDir);
+    assert.equal(
+      spec.env.CODEX_PATH,
+      "codex",
+      "with nothing executable found on PATH, resolution must fall back to the bare name (leaving the ENOENT to codex-acp), not throw or fabricate a path",
+    );
+  } finally {
+    process.env.PATH = savedPath;
+  }
 });
 
 // ---- CP5: read-only never auto-approves ---------------------------------
