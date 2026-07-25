@@ -31,6 +31,7 @@ test("public tools are the four lifecycle tools plus exactly one generated tool 
     "clanker_start_codex-review",
     "clanker_start_codex-write",
     "clanker_start_gemini-recon",
+    "clanker_start_gemini-research",
     "clanker_start_grok-review",
     "clanker_start_grok-write",
     "clanker_start_oc-glm-write",

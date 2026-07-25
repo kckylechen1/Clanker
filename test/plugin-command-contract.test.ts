@@ -11,6 +11,7 @@ const seatFor: Record<string, string> = {
   "oc-glm-write": "supervisor",
   "oc-kimi-crew": "crew",
   "gemini-recon": "gemini",
+  "gemini-research": "gemini",
   "grok-review": "grok",
   "grok-write": "writer",
 };
@@ -45,7 +46,7 @@ test("every seat holds only its own narrow start tool and no retired API", async
   const expected: Record<string, string[]> = {
     codex: ["clanker_start_codex-review"],
     oc: ["clanker_start_oc-review"],
-    gemini: ["clanker_start_gemini-recon"],
+    gemini: ["clanker_start_gemini-recon", "clanker_start_gemini-research"],
     grok: ["clanker_start_grok-review"],
     crew: ["clanker_start_oc-kimi-crew"],
     writer: ["clanker_start_codex-write", "clanker_start_oc-write", "clanker_start_grok-write"],

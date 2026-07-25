@@ -75,7 +75,7 @@ export const WORKTREES_ROOT =
 export const BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 
 export const SERVER_NAME = "clanker-mcp-server";
-export const SERVER_VERSION = "0.3.2";
+export const SERVER_VERSION = "0.3.3";
 
 /**
  * Single source of truth for opencode model shortnames (mirrors the /oc-dispatch

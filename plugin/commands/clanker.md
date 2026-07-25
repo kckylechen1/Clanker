@@ -10,7 +10,7 @@ Dispatch exactly one `Agent(subagent_type=...)`: the seat that owns the requeste
 |---|---|
 | `codex-review` | `clanker:codex` |
 | `oc-review` | `clanker:oc` |
-| `gemini-recon` | `clanker:gemini` |
+| `gemini-recon` / `gemini-research` | `clanker:gemini` |
 | `grok-review` | `clanker:grok` (dormant: HTTP 402) |
 | `codex-write` / `oc-write` / `grok-write` | `clanker:writer` |
 | `oc-glm-write` | `clanker:supervisor` |

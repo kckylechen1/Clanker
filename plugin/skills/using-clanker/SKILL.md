@@ -19,7 +19,7 @@ A **dispatch profile** is the whole capability combination under one name: lane,
 | `oc-write` | opencode | yes | required | required, non-GLM | n/a |
 | `oc-glm-write` | opencode | yes | required | welded `glm`, Sonnet-supervised | n/a |
 | `oc-kimi-crew` | opencode | yes | required | welded `kimi` | n/a |
-| `gemini-recon` | gemini | no | forbidden | lane default | n/a |
+| `gemini-recon` / `gemini-research` | gemini | no | forbidden | lane default | n/a |
 | `grok-review` / `grok-write` | grok | no / yes | optional / required | lane default / required | n/a (dormant: HTTP 402) |
 
 Pass the profile's free parameters truthfully and do not reproduce routing rules client-side: the manager rejects host self-dispatch, unsafe writes, unsupervised GLM writes, and invalid Gemini requests. A read-only profile whose worktree is optional runs in the working checkout unless you name a branch — name one when the review has to run build or test tooling.

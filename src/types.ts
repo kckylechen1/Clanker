@@ -57,6 +57,12 @@ export interface LaneRequestOptions {
    * say so.
    */
   secrets?: readonly string[];
+  /**
+   * gemini-only role selector: the dispatch profile id that owns this run
+   * (e.g. "gemini-recon" / "gemini-research"). backends.ts forwards it as
+   * CLANKER_GEMINI_ROLE so the shared sidecar picks the profile's role copy.
+   */
+  geminiRole?: string;
 }
 
 /** Plan projection derived from ACP `plan` events. */
