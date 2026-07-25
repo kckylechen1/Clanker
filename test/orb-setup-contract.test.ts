@@ -32,6 +32,29 @@
  * it is given. Nothing between this process and setup's first line can put a
  * node back. That is also a stricter reproduction of an orb's later command
  * than the old form ever was: setup starts with HOME and PATH and nothing else.
+ *
+ * #19-F8d — A SEALED PATH IS NOT ENOUGH: BASH ITSELF CAN RE-OPEN THE DOOR.
+ * `env -i` seals the environment, but the gate's probe (`bash -c ...`) is a
+ * child of a Node.js process, and libuv gives piped stdio a socketpair — so
+ * the probe's stdin is a SOCKET. Bash has a historical remote-shell rule: a
+ * non-interactive bash whose stdin is a network connection decides it was
+ * launched by rshd/sshd and sources ~/.bashrc ANYWAY. On the GitHub macOS
+ * runner the image writes `export PATH="/opt/homebrew/bin:...:$PATH"` into
+ * /Users/runner/.bashrc, so the probe's PATH got the real homebrew node 24
+ * prepended AHEAD of every fabrication — all four F8b cases went red there
+ * while ubuntu (no such .bashrc line) and a developer Mac (different .bashrc)
+ * stayed green. Reproduced locally: hand any bash a socket stdin and a HOME
+ * whose .bashrc prepends a node dir, and `env -i PATH=<sealed> bash -c
+ * 'command -v node'` resolves THAT node.
+ *
+ * Two channels, two seals, both part of the fabricated environment:
+ *   1. PATH entries are never borrowed host directories (a tools dir holds
+ *      one symlink per needed tool, nothing else can ride along), and
+ *   2. the gate is run with stdin from /dev/null (no socket, so the
+ *      remote-shell rule never fires) and HOME pointing at an empty temp
+ *      directory (no ~/.bashrc to source even if some future trigger
+ *      appears). setup's verify path uses HOME only to pass it to the probe,
+ *      so sealing it changes nothing the gate legitimately depends on.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -69,13 +92,15 @@ function fakeNodeDir(version: string): string {
 }
 
 /**
- * A bin directory with exactly the tools the gate itself needs and NO node —
- * the "this image ships no node at all" case. Built by symlink rather than by
- * borrowing /usr/bin, because on a Linux orb /usr/bin may itself hold a node
- * and the case under test would evaporate.
+ * A bin directory with exactly the tools the gate itself needs and NOTHING
+ * else. Built by symlinking tools one by one rather than by borrowing a host
+ * bin directory, because a borrowed directory brings everything else living
+ * in it along — on a Linux orb /usr/bin may itself hold a node, and the case
+ * under test would evaporate. This is the ONLY directory a fabricated PATH
+ * may contain besides a fakeNodeDir.
  */
-function nodelessToolDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-no-node-"));
+function sealedToolDir(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-sealed-tools-"));
   // Everything the gate reaches for by name once it is running: `env -i`, the
   // shell it probes with, and `sed`/`cut` for the version comparison.
   for (const tool of ["bash", "env", "sed", "cut"]) {
@@ -91,34 +116,47 @@ function nodelessToolDir(): string {
  * wipes whatever environment this process was able to hand down — including an
  * orb's re-hydrated NVM PATH — and hands setup exactly `vars`. The executables
  * named here are absolute for the same reason.
+ *
+ * Two more seals against the F8d channel (see the note above): stdin is
+ * /dev/null so the probe's bash never sees a socket and never takes the
+ * remote-shell branch that sources ~/.bashrc, and HOME is an empty temp
+ * directory so there is no ~/.bashrc to source through any future trigger.
  */
 function runGate(vars: Record<string, string>): { status: number | null; stdout: string; stderr: string } {
-  const assignments = Object.entries(vars).map(([name, value]) => `${name}=${value}`);
-  const result = spawnSync("/usr/bin/env", ["-i", ...assignments, BASH, SETUP, "--verify-node-only"], {
-    encoding: "utf8",
-  });
-  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-sealed-home-"));
+  try {
+    const assignments = Object.entries({ ...vars, HOME: home }).map(([name, value]) => `${name}=${value}`);
+    const result = spawnSync("/usr/bin/env", ["-i", ...assignments, BASH, SETUP, "--verify-node-only"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 }
 
 function verifyWithPath(pathValue: string): { status: number | null; stdout: string; stderr: string } {
-  return runGate({ HOME: process.env.HOME ?? os.homedir(), PATH: pathValue });
+  return runGate({ PATH: pathValue });
 }
 
 test("#19-F8b: setup refuses when the next command would get a node below the floor", () => {
   const stale = fakeNodeDir("20.9.0");
+  const tools = sealedToolDir();
   try {
-    const r = verifyWithPath(`${stale}:/usr/bin:/bin`);
+    const r = verifyWithPath(`${stale}:${tools}`);
     assert.notEqual(r.status, 0, "a setup that cannot deliver node 24 to the next command must exit non-zero");
     assert.match(r.stderr, /would get node v20\.9\.0/, "the refusal must name the version the next command really gets");
     assert.match(r.stderr, /cancels 21 cases/, "the refusal must say why a stale runtime is worse than no runtime");
     assert.doesNotMatch(r.stdout, /ready/, "a refusing setup must never print a ready line");
   } finally {
     fs.rmSync(stale, { recursive: true, force: true });
+    fs.rmSync(tools, { recursive: true, force: true });
   }
 });
 
 test("#19-F8b: setup refuses when the next command would find no node at all", () => {
-  const nodeless = nodelessToolDir();
+  const nodeless = sealedToolDir();
   try {
     const r = verifyWithPath(nodeless);
     assert.notEqual(r.status, 0);
@@ -130,8 +168,9 @@ test("#19-F8b: setup refuses when the next command would find no node at all", (
 
 test("#19-F8b: setup passes only when a fresh shell on the orb's own PATH resolves node >= 24", () => {
   const fresh = fakeNodeDir("24.18.0");
+  const tools = sealedToolDir();
   try {
-    const r = verifyWithPath(`${fresh}:/usr/bin:/bin`);
+    const r = verifyWithPath(`${fresh}:${tools}`);
     assert.equal(r.status, 0, `gate rejected a compliant runtime: ${r.stderr}`);
     assert.match(r.stdout, /later commands get node v24\.18\.0/);
     // Load-bearing beyond "it passed": if a real node on the orb had leaked in
@@ -145,6 +184,7 @@ test("#19-F8b: setup passes only when a fresh shell on the orb's own PATH resolv
     );
   } finally {
     fs.rmSync(fresh, { recursive: true, force: true });
+    fs.rmSync(tools, { recursive: true, force: true });
   }
 });
 
@@ -155,10 +195,10 @@ test("#19-F8b: the gate reads the ambient PATH, not the PATH setup builds for it
   // invisible to it.
   const stale = fakeNodeDir("20.9.0");
   const good = fakeNodeDir("24.18.0");
+  const tools = sealedToolDir();
   try {
     const result = runGate({
-      HOME: process.env.HOME ?? os.homedir(),
-      PATH: `${stale}:/usr/bin:/bin`,
+      PATH: `${stale}:${tools}`,
       // "Helpful" leftovers that must not be consulted.
       NODE_PATH: good,
       NVM_BIN: good,
@@ -168,6 +208,7 @@ test("#19-F8b: the gate reads the ambient PATH, not the PATH setup builds for it
   } finally {
     fs.rmSync(stale, { recursive: true, force: true });
     fs.rmSync(good, { recursive: true, force: true });
+    fs.rmSync(tools, { recursive: true, force: true });
   }
 });
 

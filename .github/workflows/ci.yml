@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      # One platform red must never cancel the other's job — both always run
+      # to completion and report independently.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test (fail on failures AND on cancelled tests)
+        shell: bash
+        run: |
+          set -o pipefail
+          LOG="$(mktemp)"
+          # GitHub runs bash with -e; a non-zero npm test exit would kill the
+          # script at the pipe and skip the summary/annotations below.
+          set +e
+          npm test 2>&1 | tee "$LOG"
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          # node:test summary lines look like "ℹ tests 51" (or "# tests 51" on TAP output).
+          # get_count must never fail: under GitHub's `bash -e`, a non-zero
+          # exit inside `var=$(cmd)` aborts the whole script at the assignment
+          # and the guards below become unreachable (grep exits 1 on no match).
+          get_count() {
+            grep -E "^(ℹ|#) $1 " "$LOG" | tail -n 1 | awk '{print $3}' || true
+          }
+
+          tests=$(get_count tests)
+          pass=$(get_count pass)
+          fail=$(get_count fail)
+          cancelled=$(get_count cancelled)
+          skipped=$(get_count skipped)
+
+          echo "---- test summary ----"
+          echo "tests:     ${tests:-unknown}"
+          echo "pass:      ${pass:-unknown}"
+          echo "fail:      ${fail:-unknown}"
+          echo "cancelled: ${cancelled:-unknown}"
+          # skipped is intentionally informational only: platform-conditional
+          # skips (e.g. macOS-only Gemini ACP tests on ubuntu) are legitimate.
+          # cancelled = accidentally never ran -> gate; skipped = deliberately
+          # not run -> must be visible, must not fail the build.
+          echo "skipped:   ${skipped:-unknown}"
+
+          if [ -z "$tests" ]; then
+            echo "::error::Could not parse node:test summary — the runner did not report how many tests ran."
+            exit 1
+          fi
+          if [ "$fail" != "0" ]; then
+            echo "::error::$fail test(s) FAILED."
+            exit 1
+          fi
+          if [ "$cancelled" != "0" ]; then
+            echo "::error::$cancelled test(s) were CANCELLED — a cancelled test never ran; it is not a pass."
+            exit 1
+          fi
+          exit "$rc"
