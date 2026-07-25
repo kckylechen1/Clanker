@@ -27760,7 +27760,7 @@ var RUNS_ROOT = process.env.CLANKER_RUNS_ROOT ?? path.join(os.homedir(), ".cache
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.3.2";
+var SERVER_VERSION = "0.3.3";
 var OC_MODEL_ALIASES = {
   glm: "zhipuai-coding-plan/glm-5.2",
   ds: "deepseek/deepseek-v4-pro",
@@ -31571,7 +31571,7 @@ function buildSpawnSpec(lane, opts, runDir) {
         throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
       }
       requireGeminiWorkspaceSandbox();
-      const model = opts.model?.trim() || "gemini-3.6-flash-medium";
+      const model = opts.model?.trim() || "gemini-3.6-flash-high";
       if (!isGeminiModel(model)) {
         throw new Error(`Clanker: Gemini requires a Gemini model id; received '${model}'`);
       }
@@ -31581,6 +31581,7 @@ function buildSpawnSpec(lane, opts, runDir) {
       }
       env.CLANKER_AGY_PATH = process.env.CLANKER_AGY_PATH ?? resolveSystemAgyPath();
       env.CLANKER_GEMINI_MODEL = model;
+      if (opts.geminiRole) env.CLANKER_GEMINI_ROLE = opts.geminiRole;
       if (process.env.CLANKER_GEMINI_PRINT_TIMEOUT) {
         env.CLANKER_GEMINI_PRINT_TIMEOUT = process.env.CLANKER_GEMINI_PRINT_TIMEOUT;
       }
@@ -31774,6 +31775,20 @@ var DISPATCH_PROFILES = [
     id: "gemini-recon",
     title: "Gemini reconnaissance (read-only, in place)",
     description: "Read-only Gemini survey. The lane is reconnaissance-only server-side and rejects both write mode and worktrees (the only profile whose isolation is forbidden rather than optional \u2014 it is the lane's own rule, not a registry preference); the model defaults to the sidecar's configured Gemini model.",
+    lane: "gemini",
+    model: { kind: "lane-default" },
+    readOnly: true,
+    isolation: "forbidden",
+    secrets: [],
+    turnTimeoutMs: GEMINI_TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "scout",
+    status: "active"
+  },
+  {
+    id: "gemini-research",
+    title: "Gemini online research (read-only, in place)",
+    description: "Read-only Gemini web research entry \u2014 the online-research counterpart to gemini-recon's quick survey. Every conclusion must carry its source URL and anything unsourced is reported as unverified. Same lane rules as gemini-recon: reconnaissance-only server-side, write mode and worktrees rejected; the model defaults to the sidecar's configured Gemini model.",
     lane: "gemini",
     model: { kind: "lane-default" },
     readOnly: true,
@@ -32878,7 +32893,10 @@ var LaneManager = class {
       readOnly,
       sandbox: params.sandbox,
       profile,
-      secrets: minted.secrets
+      secrets: minted.secrets,
+      // Only the profile entrance mints a profileId; direct dispatchStart
+      // callers get no role routing and the sidecar falls back to recon copy.
+      geminiRole: params.lane === "gemini" ? minted.profileId : void 0
     };
     const spec = this.resolveSpec(params.lane, opts, runDir);
     this.warningsById.set(id, spec.warnings);

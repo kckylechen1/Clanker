@@ -328,7 +328,13 @@ export function buildSpawnSpec(
         throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
       }
       requireGeminiWorkspaceSandbox();
-      const model = opts.model?.trim() || "gemini-3.6-flash-medium";
+      // Load-bearing default: the Captain pins Gemini dispatches to the high
+      // tier. gemini-acp.ts carries the same `|| "gemini-3.6-flash-high"`
+      // fallback, but on this (the real dispatch) path line ~340 below always
+      // sets CLANKER_GEMINI_MODEL, so the sidecar's fallback is dead code here
+      // and only fires when the sidecar is run standalone. Keep the two in
+      // sync — same shadowing hazard as #13 documents below.
+      const model = opts.model?.trim() || "gemini-3.6-flash-high";
       if (!isGeminiModel(model)) {
         throw new Error(`Clanker: Gemini requires a Gemini model id; received '${model}'`);
       }
@@ -338,6 +344,10 @@ export function buildSpawnSpec(
       }
       env.CLANKER_AGY_PATH = process.env.CLANKER_AGY_PATH ?? resolveSystemAgyPath();
       env.CLANKER_GEMINI_MODEL = model;
+      // Role copy routing: the gemini lane shares one sidecar across the
+      // gemini-recon / gemini-research profiles; the sidecar selects its
+      // ROLE_PREFIX from this value and falls back to recon when unset.
+      if (opts.geminiRole) env.CLANKER_GEMINI_ROLE = opts.geminiRole;
       // Only forward an explicit operator override. The default lives
       // solely in gemini-acp.ts's `|| "10m"` fallback — do not shadow it
       // with a second hardcoded default here, or the sidecar never sees

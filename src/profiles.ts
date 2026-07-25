@@ -237,6 +237,24 @@ export const DISPATCH_PROFILES: readonly DispatchProfile[] = [
     status: "active",
   },
   {
+    id: "gemini-research",
+    title: "Gemini online research (read-only, in place)",
+    description:
+      "Read-only Gemini web research entry — the online-research counterpart to gemini-recon's quick " +
+      "survey. Every conclusion must carry its source URL and anything unsourced is reported as " +
+      "unverified. Same lane rules as gemini-recon: reconnaissance-only server-side, write mode and " +
+      "worktrees rejected; the model defaults to the sidecar's configured Gemini model.",
+    lane: "gemini",
+    model: { kind: "lane-default" },
+    readOnly: true,
+    isolation: "forbidden",
+    secrets: [],
+    turnTimeoutMs: GEMINI_TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "scout",
+    status: "active",
+  },
+  {
     id: "grok-review",
     title: "Grok cold review (read-only, in place)",
     description:

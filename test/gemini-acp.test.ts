@@ -7,7 +7,7 @@ import path from "node:path";
 import { LaneConnection } from "../src/acp-client.js";
 import { buildSpawnSpec } from "../src/backends.js";
 import { LaneManager } from "../src/manager.js";
-import { fakeResolver } from "./helpers.js";
+import { fakeResolver, fakeSpec } from "./helpers.js";
 
 const workspaceSandboxAvailable = (() => {
   if (process.platform !== "darwin") return false;
@@ -76,7 +76,7 @@ test("Gemini backend is read-only, defaults model, and passes effort through sid
   const spec = buildSpawnSpec("gemini", { readOnly: true, effort: "high" }, runDir);
   assert.equal(spec.command, process.execPath);
   assert.match(spec.args[0], /gemini-acp\.m?js$/);
-  assert.equal(spec.env.CLANKER_GEMINI_MODEL, "gemini-3.6-flash-medium");
+  assert.equal(spec.env.CLANKER_GEMINI_MODEL, "gemini-3.6-flash-high");
   assert.equal(spec.env.CLANKER_GEMINI_EFFORT, "high");
   assert.equal(Object.keys(spec.env).some((key) => /API_KEY/.test(key)), false);
   assert.throws(() => buildSpawnSpec("gemini", { readOnly: false }, runDir), /reconnaissance-only/);
@@ -88,6 +88,52 @@ test("Gemini backend is read-only, defaults model, and passes effort through sid
     () => buildSpawnSpec("gemini", { readOnly: true, effort: "low" }, runDir),
     /effort must be 'medium' or 'high'/,
   );
+});
+
+test("dispatchProfile routes the gemini role from the profile id into the spawn spec", async () => {
+  const seen: (string | undefined)[] = [];
+  const m = new LaneManager({
+    resolveSpec: (_lane, opts, _runDir) => {
+      seen.push(opts.geminiRole);
+      return fakeSpec();
+    },
+    disableReaper: true,
+    baseRepo: os.tmpdir(),
+  });
+  try {
+    const a = await m.dispatchProfile({ profile: "gemini-research", prompt: "research", cwd: os.tmpdir() });
+    const b = await m.dispatchProfile({ profile: "gemini-recon", prompt: "survey", cwd: os.tmpdir() });
+    assert.deepEqual(seen, ["gemini-research", "gemini-recon"]);
+    await waitUntil(() => m.status(a.id).status !== "running" && m.status(b.id).status !== "running", 4_000);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("Gemini spec forwards CLANKER_GEMINI_ROLE only when the dispatch carries one", { skip: !workspaceSandboxAvailable }, () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-gemini-spec-role-"));
+  const plain = buildSpawnSpec("gemini", { readOnly: true }, runDir);
+  assert.equal("CLANKER_GEMINI_ROLE" in plain.env, false);
+  const research = buildSpawnSpec("gemini", { readOnly: true, geminiRole: "gemini-research" }, runDir);
+  assert.equal(research.env.CLANKER_GEMINI_ROLE, "gemini-research");
+});
+
+test("Gemini ACP sidecar picks the research role copy on CLANKER_GEMINI_ROLE=gemini-research, recon otherwise", { skip: !workspaceSandboxAvailable }, async () => {
+  const researchCapture = path.join(os.tmpdir(), `clanker-agy-role-research-${process.pid}`);
+  await prompt(sidecarSpec(fakeAgy("echo grounded-result"), researchCapture, { CLANKER_GEMINI_ROLE: "gemini-research" }));
+  const researchArgs = fs.readFileSync(researchCapture, "utf8");
+  assert.match(researchArgs, /read-only online research lane/);
+  assert.match(researchArgs, /every conclusion must carry its source URL/);
+  assert.match(researchArgs, /Do not modify workspace files or run destructive commands/);
+
+  for (const env of [{}, { CLANKER_GEMINI_ROLE: "gemini-recon" }, { CLANKER_GEMINI_ROLE: "bogus" }] as Record<string, string>[]) {
+    const capture = path.join(os.tmpdir(), `clanker-agy-role-recon-${process.pid}-${Math.random()}`);
+    await prompt(sidecarSpec(fakeAgy("echo grounded-result"), capture, env));
+    const args = fs.readFileSync(capture, "utf8");
+    assert.match(args, /read-only reconnaissance lane/);
+    assert.match(args, /conclusions, source URLs or repository evidence, uncertainties, and the recommended next lane/);
+    assert.match(args, /Do not modify workspace files or run destructive commands/);
+  }
 });
 
 test("Gemini spec forwards only an explicit CLANKER_GEMINI_PRINT_TIMEOUT override, never a hardcoded default", { skip: !workspaceSandboxAvailable }, () => {

@@ -10,12 +10,29 @@ import {
   type ContentBlock,
 } from "@agentclientprotocol/sdk";
 
-const ROLE_PREFIX = [
+const RECON_ROLE_PREFIX = [
   "You are Clanker: Gemini, a read-only reconnaissance lane.",
   "Research, grounded web search, and repository discovery only.",
   "Do not modify workspace files or run destructive commands.",
   "Return concise conclusions, source URLs or repository evidence, uncertainties, and the recommended next lane.",
 ].join(" ");
+
+const RESEARCH_ROLE_PREFIX = [
+  "You are Clanker: Gemini, a read-only online research lane.",
+  "Grounded web research only: every conclusion must carry its source URL; mark anything you could not source as unverified.",
+  "Do not modify workspace files or run destructive commands.",
+  "Return concise conclusions with source URLs, uncertainties, and the recommended next lane.",
+].join(" ");
+
+/**
+ * backends.ts sets CLANKER_GEMINI_ROLE from the dispatch profile id when it
+ * builds the spawn spec, so `gemini-recon` and `gemini-research` share this
+ * sidecar with distinct role copy. Anything unset or unrecognized falls back
+ * to the recon copy — the lane's original, most conservative shape.
+ */
+function rolePrefix(): string {
+  return process.env.CLANKER_GEMINI_ROLE?.trim() === "gemini-research" ? RESEARCH_ROLE_PREFIX : RECON_ROLE_PREFIX;
+}
 
 type Session = { cwd: string; active?: ChildProcess; cancellationRequested: boolean };
 const sessions = new Map<string, Session>();
@@ -34,7 +51,7 @@ function runAgy(sessionId: string, session: Session, prompt: string): Promise<st
   const args = [
     "--mode", "plan",
     "--sandbox",
-    "--model", process.env.CLANKER_GEMINI_MODEL || "gemini-3.6-flash-medium",
+    "--model", process.env.CLANKER_GEMINI_MODEL || "gemini-3.6-flash-high",
   ];
   const effort = process.env.CLANKER_GEMINI_EFFORT?.trim();
   if (effort) args.push("--effort", effort);
@@ -43,7 +60,7 @@ function runAgy(sessionId: string, session: Session, prompt: string): Promise<st
   // genuine backend crash (see close handler below). 10m gives real recon
   // headroom while CLANKER_GEMINI_PRINT_TIMEOUT remains the escape hatch.
   const printTimeout = process.env.CLANKER_GEMINI_PRINT_TIMEOUT || "10m";
-  args.push("--print-timeout", printTimeout, "--print", `${ROLE_PREFIX}\n\nTask:\n${prompt}`);
+  args.push("--print-timeout", printTimeout, "--print", `${rolePrefix()}\n\nTask:\n${prompt}`);
 
   const agyPath = process.env.CLANKER_AGY_PATH || "agy";
   const invocation = workspaceReadOnlyInvocation(agyPath, args, session.cwd);

@@ -354,6 +354,9 @@ export class LaneManager {
       sandbox: params.sandbox,
       profile,
       secrets: minted.secrets,
+      // Only the profile entrance mints a profileId; direct dispatchStart
+      // callers get no role routing and the sidecar falls back to recon copy.
+      geminiRole: params.lane === "gemini" ? minted.profileId : undefined,
     };
     const spec = this.resolveSpec(params.lane, opts, runDir);
     this.warningsById.set(id, spec.warnings);
