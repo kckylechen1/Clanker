@@ -15,6 +15,7 @@ import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { buildSpawnSpec } from "../src/backends.js";
+import { isGlmModel } from "../src/constants.js";
 import type { ClankerHost } from "../src/host.js";
 import { LaneManager } from "../src/manager.js";
 import {
@@ -27,8 +28,8 @@ import {
   type DispatchProfile,
 } from "../src/profiles.js";
 import { profilesForHost, registerTools } from "../src/tools.js";
-import { LANE_NAMES } from "../src/types.js";
-import { fakeSpec, until } from "./helpers.js";
+import { LANE_NAMES, type LaneRequestOptions, type LaneStatusView, type SpawnSpec } from "../src/types.js";
+import { dropMutant, fakeSpec, loadMutantManager, until } from "./helpers.js";
 
 /** A real (origin + clone) base repo, so worktree-cutting dispatches can run. */
 function makeBaseRepo(): { base: string; root: string } {
@@ -422,6 +423,264 @@ test("#19-F6: the parity comparator has teeth — mutating any dimension flips i
     DISPATCH_PROFILES.some((p) => p.supervision === "sonnet" && p.lane !== "codex"),
     "the supervised profile is on a lane host=codex could otherwise drive, so the filter is load-bearing",
   );
+});
+
+// ---- F6b. parity observed at RUNTIME, not read back off the registry -------
+// Cold review's attack on the block above: patch the manager so a read-only
+// dispatch RECEIVES a worktree path but no tree is ever created — all eleven
+// #19-F6 tests stayed green, because they compare registry rows against a table
+// of registry rows. Declaration parity cannot see an implementation that
+// contradicts its own declaration.
+//
+// So these dispatch through the real LaneManager and assert against facts the
+// registry cannot fake: what git says about the worktree, what the real
+// backends.ts spawn recipe carries, what options the backend was actually
+// handed. Every one of them is then re-run against mutant builds (bottom of the
+// block) that break exactly those runtime dimensions while leaving every
+// registry row untouched — each mutant MUST make these assertions throw.
+
+/** What one profile dispatch really did, as opposed to what its row says. */
+interface RuntimeFacts {
+  view: LaneStatusView;
+  /** The options the manager actually handed the backend spec resolver. */
+  opts: LaneRequestOptions;
+  /** What the REAL backends.ts would spawn for those options (gemini excluded, see below). */
+  spec?: SpawnSpec;
+  branch?: string;
+}
+
+/** Absolute, symlink-resolved path, tolerating a path that no longer exists. */
+function real(p: string): string {
+  try { return fs.realpathSync(p); } catch { return path.resolve(p); }
+}
+
+/** Worktree paths git itself has registered for `repo`. */
+function registeredWorktrees(repo: string): string[] {
+  const out = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: repo, stdio: "pipe" }).toString();
+  return out
+    .split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => real(line.slice("worktree ".length).trim()));
+}
+
+/**
+ * Dispatch one profile through a (possibly mutated) LaneManager and assert that
+ * the RUNTIME matches what the registry row declares. Throws on the first
+ * divergence — which is what makes it usable as a mutation oracle.
+ */
+async function assertRuntimeMatchesDeclaration(
+  Manager: typeof LaneManager,
+  base: string,
+  profile: DispatchProfile,
+  extra: Partial<Parameters<LaneManager["dispatchProfile"]>[0]> = {},
+): Promise<RuntimeFacts> {
+  let opts!: LaneRequestOptions;
+  let spec: SpawnSpec | undefined;
+  const m = new Manager({
+    resolveSpec: (lane, o, runDir) => {
+      opts = o;
+      // The REAL spawn recipe for exactly those options. This is what turns
+      // "the row says sandbox=read-only" into "the backend received it".
+      // Gemini is excluded on purpose: buildSpawnSpec refuses to build a gemini
+      // spec off macOS (requireGeminiWorkspaceSandbox), so computing one here
+      // would silently turn a parity test into a platform test.
+      if (lane !== "gemini") spec = buildSpawnSpec(lane, o, runDir);
+      return fakeSpec();
+    },
+    disableReaper: true,
+    baseRepo: base,
+  });
+  const branch = profile.isolation === "forbidden" ? undefined : `clanker/f6b-${profile.id}-${Date.now()}`;
+  try {
+    const { id } = await m.dispatchProfile({
+      profile: profile.id,
+      prompt: `F6b runtime probe for ${profile.id}`,
+      cwd: base,
+      ...(branch ? { worktree: branch } : {}),
+      ...(profile.model.kind === "caller-required" ? { model: "ds" } : {}),
+      ...extra,
+    });
+    const view = m.status(id);
+
+    // (1) the write gate reached both the run and the backend
+    assert.equal(view.telemetry?.read_only, profile.readOnly, `${profile.id}: run read_only diverges from the row`);
+    assert.equal(opts.readOnly, profile.readOnly, `${profile.id}: backend received the wrong read_only`);
+
+    // (2) isolation: a declared worktree must be a real, git-registered tree the
+    //     job is really running in — the exact dimension the cold-review mutant
+    //     falsified while every declaration test stayed green.
+    if (branch === undefined) {
+      assert.equal(view.worktree, undefined, `${profile.id}: isolation=forbidden but a worktree was created`);
+      assert.equal(real(view.cwd), real(base), `${profile.id}: must run in place`);
+    } else {
+      assert.ok(view.worktree, `${profile.id}: named a worktree branch but the run reports none`);
+      const wt = view.worktree!;
+      assert.equal(fs.existsSync(wt), true, `${profile.id}: reported worktree '${wt}' does not exist on disk`);
+      assert.equal(fs.existsSync(path.join(wt, ".git")), true, `${profile.id}: '${wt}' is not a git worktree`);
+      assert.ok(
+        registeredWorktrees(base).includes(real(wt)),
+        `${profile.id}: git has no worktree registered at '${wt}' for the target repo`,
+      );
+      assert.equal(
+        execFileSync("git", ["-C", wt, "rev-parse", "--abbrev-ref", "HEAD"], { stdio: "pipe" }).toString().trim(),
+        branch,
+        `${profile.id}: the worktree is not on the requested branch`,
+      );
+      assert.equal(real(view.cwd), real(wt), `${profile.id}: the job is not actually running inside the worktree`);
+      assert.notEqual(real(view.cwd), real(base), `${profile.id}: the job is running in the primary checkout`);
+    }
+
+    // (3) sandbox: a welded tier must arrive at the backend, not merely be
+    //     declared. For the codex lane it is checked all the way down to the
+    //     env var codex-acp actually reads.
+    if (profile.sandbox === undefined) {
+      assert.equal(opts.sandbox, undefined, `${profile.id}: a sandbox reached a lane that has no sandbox tier`);
+    } else {
+      const expected = profile.sandbox.kind === "welded"
+        ? profile.sandbox.mode
+        : (extra.sandbox ?? profile.sandbox.defaultMode);
+      assert.equal(opts.sandbox, expected, `${profile.id}: backend received sandbox='${opts.sandbox}', row says '${expected}'`);
+      if (profile.lane === "codex") {
+        assert.equal(
+          spec?.env.INITIAL_AGENT_MODE,
+          CODEX_AGENT_MODE[expected],
+          `${profile.id}: codex-acp would run in the wrong agent mode`,
+        );
+      }
+    }
+
+    // (4) credentials + supervision: the vault wrap is a property of the spawn
+    //     command, and a supervised profile is one that a caller-forged dispatch
+    //     cannot reproduce.
+    assert.deepEqual([...(opts.secrets ?? [])], [...profile.secrets], `${profile.id}: declared secrets did not reach the spawn`);
+    if (profile.secrets.length) {
+      // `--require` takes ONE comma-joined argument, and backends.ts unions the
+      // profile's secrets with its own model-derived requirement, so assert
+      // containment rather than an exact list.
+      assert.equal(spec?.command, "tachi", `${profile.id}: the spawn command is not wrapped in tachi vault exec`);
+      assert.deepEqual((spec?.args ?? []).slice(0, 4), ["vault", "exec", "--keychain", "--require"]);
+      const required = (spec?.args[4] ?? "").split(",");
+      for (const secret of profile.secrets) {
+        assert.ok(required.includes(secret), `${profile.id}: '${secret}' is not materialized by the vault wrap`);
+      }
+      assert.equal(spec?.args[5], "--", `${profile.id}: the vault wrap does not hand off to the real command`);
+    }
+    if (profile.supervision === "sonnet") {
+      assert.equal(opts.readOnly, false, `${profile.id}: a supervised profile that is not write-capable proves nothing`);
+      assert.ok(isGlmModel(opts.model), `${profile.id}: supervision must be minted for the GLM write shape`);
+      // The same shape without the minted capability must be refused, or
+      // "supervision reached the spawn" is vacuous.
+      await assert.rejects(
+        () => m.dispatchStart({
+          lane: profile.lane, model: opts.model, prompt: "forge", readOnly: false,
+          cwd: base, worktree: `clanker/f6b-forged-${Date.now()}`,
+          supervision: "sonnet",
+        } as any),
+        /direct GLM write is prohibited/,
+        `${profile.id}: the supervised gate is not actually guarding anything`,
+      );
+    }
+
+    // (5) the per-profile ceiling is the one really in force for this run
+    assert.equal(
+      view.telemetry?.turn_timeout_ms,
+      profileTurnTimeoutMs(profile),
+      `${profile.id}: the declared turn ceiling never reached the run`,
+    );
+
+    await until(() => m.status(id).status !== "running", 4_000);
+    return { view, opts, spec, branch };
+  } finally {
+    await m.shutdown();
+  }
+}
+
+/** codex-acp's INITIAL_AGENT_MODE ids, per CodexSandboxMode (backends.ts SANDBOX_TO_AGENT_MODE). */
+const CODEX_AGENT_MODE: Record<string, string> = {
+  "read-only": "read-only",
+  "workspace-write": "agent",
+  "danger-full-access": "agent-full-access",
+};
+
+test("#19-F6b: every profile's runtime matches its declaration, not just its row", async () => {
+  const repo = makeBaseRepo();
+  try {
+    for (const profile of DISPATCH_PROFILES) {
+      await assertRuntimeMatchesDeclaration(LaneManager, repo.base, profile);
+    }
+  } finally {
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("#19-F6b: a caller-selected sandbox tier really reaches codex-acp", async () => {
+  const repo = makeBaseRepo();
+  try {
+    // The welded case is covered by the loop above; this is the selectable one,
+    // where a manager that dropped the option would still look right on the
+    // read-only/workspace-write pair (both map onto the same default).
+    for (const mode of ["read-only", "workspace-write", "danger-full-access"] as const) {
+      const facts = await assertRuntimeMatchesDeclaration(
+        LaneManager, repo.base, getProfile("codex-write"), { sandbox: mode },
+      );
+      assert.equal(facts.opts.sandbox, mode);
+      assert.equal(facts.spec?.env.INITIAL_AGENT_MODE, CODEX_AGENT_MODE[mode], `sandbox '${mode}' did not reach codex-acp`);
+    }
+  } finally {
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("#19-F6b: the runtime checks have teeth — each broken dimension flips them red", async () => {
+  const repo = makeBaseRepo();
+  const mutants: Array<{ name: string; mutations: Parameters<typeof loadMutantManager>[1]; probe: string; expect: RegExp }> = [
+    {
+      // Cold review's own attack, verbatim in intent: read-only dispatches get a
+      // worktree PATH and no worktree.
+      name: "f6b-declared-worktree-never-created",
+      mutations: [{
+        file: "manager.ts",
+        find: "      worktreePath = await createWorktree(params.worktree, targetRepo);",
+        replace: "      worktreePath = readOnly ? deriveWorktreePath(params.worktree) : await createWorktree(params.worktree, targetRepo);",
+      }],
+      probe: "codex-review",
+      expect: /does not exist on disk/,
+    },
+    {
+      // The welded sandbox is declared but dropped on the way to the backend.
+      name: "f6b-sandbox-dropped-before-backend",
+      mutations: [{ file: "manager.ts", find: "      sandbox: params.sandbox,", replace: "      sandbox: undefined," }],
+      probe: "codex-review",
+      expect: /backend received sandbox='undefined'/,
+    },
+    {
+      // Supervision is declared by the row but never minted into the dispatch.
+      name: "f6b-supervision-never-minted",
+      mutations: [{ file: "manager.ts", find: "        supervision: resolved.supervision,", replace: '        supervision: "none",' }],
+      probe: "oc-glm-write",
+      expect: /direct GLM write is prohibited/,
+    },
+    {
+      // The profile's vault secrets are declared but never reach the spawn.
+      name: "f6b-secrets-never-minted",
+      mutations: [{ file: "manager.ts", find: "      secrets: minted.secrets,", replace: "      secrets: undefined," }],
+      probe: "oc-glm-write",
+      expect: /declared secrets did not reach the spawn/,
+    },
+  ];
+  try {
+    for (const mutant of mutants) {
+      const { LaneManager: Mutated } = await loadMutantManager(mutant.name, mutant.mutations);
+      await assert.rejects(
+        () => assertRuntimeMatchesDeclaration(Mutated, repo.base, getProfile(mutant.probe)),
+        mutant.expect,
+        `mutant '${mutant.name}' left the runtime checks green — they do not observe that dimension`,
+      );
+      dropMutant(mutant.name);
+    }
+  } finally {
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
 });
 
 // ---- F7. coverage proven against the real server ---------------------------
