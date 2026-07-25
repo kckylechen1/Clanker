@@ -54,6 +54,7 @@ jobs:
           fail=$(get_count fail)
           cancelled=$(get_count cancelled)
           skipped=$(get_count skipped)
+          todo=$(get_count todo)
 
           echo "---- test summary ----"
           echo "tests:     ${tests:-unknown}"
@@ -65,6 +66,9 @@ jobs:
           # cancelled = accidentally never ran -> gate; skipped = deliberately
           # not run -> must be visible, must not fail the build.
           echo "skipped:   ${skipped:-unknown}"
+          # todo, like skipped, is informational only: a todo test is a
+          # declared intent, not a failure — visible, never red.
+          echo "todo:      ${todo:-unknown}"
 
           if [ -z "$tests" ]; then
             echo "::error::Could not parse node:test summary — the runner did not report how many tests ran."
