@@ -27760,7 +27760,7 @@ var RUNS_ROOT = process.env.CLANKER_RUNS_ROOT ?? path.join(os.homedir(), ".cache
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.3.0";
+var SERVER_VERSION = "0.3.2";
 var OC_MODEL_ALIASES = {
   glm: "zhipuai-coding-plan/glm-5.2",
   ds: "deepseek/deepseek-v4-pro",
