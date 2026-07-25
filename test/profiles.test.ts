@@ -1,9 +1,10 @@
 /**
  * Discriminating tests for the dispatch-profile registry (#19).
  *
- * Each block below states which implementation mistake it is designed to catch;
- * a test that passes on the pre-#19 implementation, or on a plausible wrong
- * implementation of #19, is not doing any work.
+ * Each block states which implementation mistake it is designed to catch; a
+ * test that passes on the pre-#19 implementation, or on a plausible wrong
+ * implementation of #19, is not doing any work. The v3 blocks (F1-F7) each
+ * reproduce a concrete cold-review finding against 4a8a718.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -12,17 +13,21 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import { buildSpawnSpec } from "../src/backends.js";
+import type { ClankerHost } from "../src/host.js";
 import { LaneManager } from "../src/manager.js";
 import {
   DISPATCH_PROFILES,
   UNREACHABLE_COMBINATIONS,
+  allCombinations,
   getProfile,
   profileTurnTimeoutMs,
-  requiredCombinations,
   resolveProfileDispatch,
+  type DispatchProfile,
 } from "../src/profiles.js";
-import { registerTools } from "../src/tools.js";
+import { profilesForHost, registerTools } from "../src/tools.js";
+import { LANE_NAMES } from "../src/types.js";
 import { fakeSpec, until } from "./helpers.js";
 
 /** A real (origin + clone) base repo, so worktree-cutting dispatches can run. */
@@ -46,7 +51,10 @@ function makeBaseRepo(): { base: string; root: string } {
   return { base, root };
 }
 
-type Registered = { config: { inputSchema: Record<string, unknown>; description?: string }; handler: (args: any) => Promise<any> };
+type Registered = {
+  config: { inputSchema: Record<string, unknown>; description?: string };
+  handler: (args: any) => Promise<any>;
+};
 
 function captureTools(manager: unknown) {
   const tools = new Map<string, Registered>();
@@ -59,70 +67,166 @@ function captureTools(manager: unknown) {
   return tools;
 }
 
-// ---- 1. schema omission ---------------------------------------------------
-// Catches the "add the parameter back and override it in the handler" shape:
-// runtime enforcement would still pass every manager test, but the seat holding
-// the tool could once again ASK for a lane / write mode / sandbox / model.
+/**
+ * A stand-in manager that records every dispatch attempt through BOTH public
+ * entrances, so a test can ask "what could this tool surface actually start?"
+ * without caring which entrance a tool chose.
+ */
+function recordingManager(host: ClankerHost) {
+  const profileDispatches: any[] = [];
+  const rawDispatches: any[] = [];
+  return {
+    host,
+    profileDispatches,
+    rawDispatches,
+    async dispatchProfile(input: any) { profileDispatches.push(input); return { id: "rec", warnings: [] }; },
+    async dispatchStart(params: any) { rawDispatches.push(params); return { id: "rec", warnings: [] }; },
+  };
+}
 
-test("#19-1: no generated start tool exposes lane, read_only or sandbox", () => {
-  const tools = captureTools({});
-  const generated = [...tools.entries()].filter(([name]) => name.startsWith("clanker_start_"));
-  assert.equal(generated.length, DISPATCH_PROFILES.length, "one generated tool per registry row");
-  for (const [name, tool] of generated) {
-    const keys = Object.keys(tool.config.inputSchema);
-    for (const welded of ["lane", "read_only", "sandbox", "profile"]) {
-      assert.equal(keys.includes(welded), false, `${name} must not expose '${welded}'`);
+// ---- F1. the narrow tools are the ONLY entrance ----------------------------
+// Cold review on 4a8a718: with a generic `clanker_start(profile,...)` present,
+// host=codex started oc-glm-write and got a live opencode/glm/write job. This
+// test therefore walks EVERY registered tool instead of asserting one name is
+// absent, and goes red the moment any universal entrance comes back.
+
+test("#19-F1: on host=codex no registered tool can reach a supervised profile", async () => {
+  const supervised = DISPATCH_PROFILES.filter((p) => p.supervision === "sonnet").map((p) => p.id);
+  assert.ok(supervised.length > 0, "the registry must still contain a supervised profile for this test to mean anything");
+
+  const manager = recordingManager("codex");
+  const tools = captureTools(manager);
+
+  // (a) structural: no tool's schema accepts a value that names a supervised
+  //     profile — this is what catches a re-added generic `profile` enum.
+  for (const [name, tool] of tools) {
+    for (const [key, field] of Object.entries(tool.config.inputSchema)) {
+      for (const id of supervised) {
+        assert.equal(
+          (field as z.ZodTypeAny).safeParse(id).success && key === "profile",
+          false,
+          `${name}.${key} accepts the supervised profile id '${id}'`,
+        );
+      }
     }
-    assert.ok(keys.includes("prompt"), `${name} must expose prompt`);
   }
+
+  // (b) behavioral: fire every tool with a kitchen-sink argument bag that tries
+  //     to name the supervised profile through every plausible parameter, then
+  //     assert nothing supervised was ever dispatched.
+  const attack = {
+    profile: supervised[0],
+    prompt: "reach the supervised profile",
+    cwd: os.tmpdir(),
+    worktree: "clanker/attack",
+    model: "glm",
+    sandbox: "danger-full-access",
+    effort: "high",
+    lane: "opencode",
+    read_only: false,
+    supervision: "sonnet",
+  };
+  for (const [, tool] of tools) await tool.handler(attack).catch(() => undefined);
+
+  for (const input of manager.profileDispatches) {
+    const profile = DISPATCH_PROFILES.find((p) => p.id === input.profile);
+    assert.ok(profile, `dispatched an unknown profile '${input.profile}'`);
+    assert.notEqual(profile.supervision, "sonnet", `the tool surface reached supervised profile '${input.profile}'`);
+  }
+  assert.deepEqual(manager.rawDispatches, [], "no tool may reach the raw dispatchStart entrance");
 });
 
-test("#19-1: a generated tool exposes 'model' only where the registry says the caller must name one", () => {
-  const tools = captureTools({});
+test("#19-F1: the surface is exactly the generated narrow tools plus lifecycle tools", () => {
+  const tools = captureTools(recordingManager("standalone"));
+  assert.equal(tools.has("clanker_start"), false, "a universal entrance makes every narrow tool decoration");
+  const generated = [...tools.keys()].filter((n) => n.startsWith("clanker_start_"));
+  assert.deepEqual(generated.sort(), DISPATCH_PROFILES.map((p) => `clanker_start_${p.id}`).sort());
+});
+
+test("#19-F1: no generated start tool exposes lane or read_only, or a welded model/sandbox", () => {
+  const tools = captureTools(recordingManager("standalone"));
   for (const profile of DISPATCH_PROFILES) {
     const keys = Object.keys(tools.get(`clanker_start_${profile.id}`)!.config.inputSchema);
+    for (const welded of ["lane", "read_only", "profile", "supervision", "secrets"]) {
+      assert.equal(keys.includes(welded), false, `clanker_start_${profile.id} must not expose '${welded}'`);
+    }
     assert.equal(
       keys.includes("model"),
       profile.model.kind === "caller-required",
       `clanker_start_${profile.id}: model exposure must match the registry model policy`,
     );
     assert.equal(
+      keys.includes("sandbox"),
+      profile.sandbox?.kind === "caller",
+      `clanker_start_${profile.id}: sandbox exposure must match the registry sandbox policy`,
+    );
+    assert.equal(
       keys.includes("worktree"),
-      profile.isolation === "required",
+      profile.isolation !== "forbidden",
       `clanker_start_${profile.id}: worktree exposure must match the registry isolation policy`,
     );
   }
 });
 
-test("#19-1: welded dimensions reach the manager from the registry, not from the caller", async () => {
-  let received: any;
-  const tools = captureTools({ async dispatchStart(args: any) { received = args; return { id: "x", warnings: [] }; } });
-  await tools.get("clanker_start_codex-review")!.handler({ prompt: "review this" });
-  assert.equal(received.lane, "codex");
-  assert.equal(received.readOnly, true);
-  assert.equal(received.sandbox, "read-only");
+// ---- F2. supervision is unforgeable ----------------------------------------
+// Cold review reproduced PASSED_GATE + a live dispatch by handing
+// `supervision: "sonnet"` to the public dispatchStart. 0.2.5's shape was a
+// private positional flag (26e9c9f src/manager.ts:162-179).
 
-  await tools.get("clanker_start_oc-kimi-crew")!.handler({ prompt: "implement", worktree: "clanker/crew" });
-  assert.equal(received.lane, "opencode");
-  assert.equal(received.model, "kimi");
-  assert.equal(received.readOnly, false);
-  assert.equal(received.profile, "kimi-crew");
+test("#19-F2: a caller cannot self-report supervision to unlock a GLM write", async () => {
+  const repo = makeBaseRepo();
+  const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: repo.base });
+  try {
+    for (const forged of [
+      { supervision: "sonnet" },
+      { supervision: "sonnet", secrets: ["ZHIPUAI_API_KEY"] },
+      { supervision: "sonnet", profileId: "oc-glm-write" },
+    ]) {
+      await assert.rejects(
+        () => m.dispatchStart({
+          lane: "opencode",
+          model: "glm",
+          prompt: "forge supervision",
+          readOnly: false,
+          worktree: `clanker/forged-${Date.now()}`,
+          ...forged,
+        } as any),
+        /direct GLM write is prohibited/,
+        `forged ${JSON.stringify(forged)} must not unlock the GLM gate`,
+      );
+    }
+  } finally {
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
 });
 
-// ---- 2. GLM strict-parent flow --------------------------------------------
-// Red on main twice over: there is no oc-glm-write profile, and manager.ts
-// rejects every GLM write outright ("direct GLM write is prohibited").
-
-test("#19-2: oc-glm-write welds a GLM write with Sonnet supervision", () => {
-  const resolved = resolveProfileDispatch({ profile: "oc-glm-write", prompt: "implement", worktree: "clanker/glm" });
-  assert.equal(resolved.lane, "opencode");
-  assert.equal(resolved.model, "glm");
-  assert.equal(resolved.readOnly, false);
-  assert.equal(resolved.supervision, "sonnet");
-  assert.deepEqual([...resolved.secrets], ["ZHIPUAI_API_KEY"]);
+test("#19-F2: the registry entrance still mints supervision, and it really dispatches", async () => {
+  let capturedOpts: any;
+  const repo = makeBaseRepo();
+  const m = new LaneManager({
+    resolveSpec: (_lane, opts) => { capturedOpts = opts; return fakeSpec(); },
+    disableReaper: true,
+    baseRepo: repo.base,
+  });
+  try {
+    const { id } = await m.dispatchProfile({
+      profile: "oc-glm-write",
+      prompt: "implement",
+      worktree: `clanker/glm-telemetry-${Date.now()}`,
+    });
+    const telemetry = m.status(id).telemetry!;
+    assert.equal(telemetry.read_only, false);
+    assert.equal(telemetry.resolved_model, "zhipuai-coding-plan/glm-5.2");
+    assert.deepEqual([...(capturedOpts.secrets ?? [])], ["ZHIPUAI_API_KEY"]);
+    await until(() => m.status(id).status !== "running", 4_000);
+  } finally {
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
 });
 
-test("#19-2: the oc-glm-write spawn command starts with tachi vault exec --keychain --require ZHIPUAI_API_KEY --", () => {
+test("#19-F2: the oc-glm-write spawn command starts with tachi vault exec --keychain --require ZHIPUAI_API_KEY --", () => {
   const resolved = resolveProfileDispatch({ profile: "oc-glm-write", prompt: "implement", worktree: "clanker/glm" });
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-profile-glm-"));
   const spec = buildSpawnSpec(resolved.lane, {
@@ -140,30 +244,20 @@ test("#19-2: the oc-glm-write spawn command starts with tachi vault exec --keych
   assert.deepEqual(spec.args.slice(6), ["opencode", "acp"]);
 });
 
-test("#19-2: a GLM write actually dispatches, and its telemetry shows the GLM provider in write mode", async () => {
-  let capturedOpts: any;
+// ---- F3. read-only + worktree survives -------------------------------------
+// 0.2.5's read-only schema kept `worktree` optional and the manager really cut
+// the tree; welding isolation to "forbidden" deleted a documented workflow.
+
+test("#19-F3: read-only profiles accept an optional worktree and really run inside it", async () => {
   const repo = makeBaseRepo();
-  const m = new LaneManager({
-    resolveSpec: (_lane, opts) => { capturedOpts = opts; return fakeSpec(); },
-    disableReaper: true,
-    baseRepo: repo.base,
-  });
+  const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: repo.base });
   try {
-    // Only the registry can set supervision; a hand-built dispatch still cannot.
-    await assert.rejects(
-      () => m.dispatchStart({ lane: "opencode", model: "glm", prompt: "w", readOnly: false, worktree: "x" }),
-      /direct GLM write is prohibited/,
-    );
-    const resolved = resolveProfileDispatch({
-      profile: "oc-glm-write",
-      prompt: "implement",
-      worktree: `clanker/glm-telemetry-${Date.now()}`,
-    });
-    const { id } = await m.dispatchStart(resolved);
-    const telemetry = m.status(id).telemetry!;
-    assert.equal(telemetry.read_only, false);
-    assert.equal(telemetry.resolved_model, "zhipuai-coding-plan/glm-5.2");
-    assert.deepEqual([...(capturedOpts.secrets ?? [])], ["ZHIPUAI_API_KEY"]);
+    const branch = `clanker/read-in-tree-${Date.now()}`;
+    const { id } = await m.dispatchProfile({ profile: "codex-review", prompt: "review with tests", worktree: branch });
+    const view = m.status(id);
+    assert.equal(view.telemetry?.read_only, true, "the read gate stays on");
+    assert.ok(view.worktree, "a read-only dispatch that names a worktree must actually get one");
+    assert.notEqual(path.resolve(view.cwd), path.resolve(repo.base), "it must not run in the primary checkout");
     await until(() => m.status(id).status !== "running", 4_000);
   } finally {
     await m.shutdown();
@@ -171,38 +265,242 @@ test("#19-2: a GLM write actually dispatches, and its telemetry shows the GLM pr
   }
 });
 
-// ---- 3. profile coverage ---------------------------------------------------
-// Catches a migration that silently drops a live dispatch shape.
-
-test("#19-3: every reachable lane x write-mode combination has a profile", () => {
-  for (const combo of requiredCombinations()) {
-    const match = DISPATCH_PROFILES.filter((p) => p.lane === combo.lane && p.readOnly === combo.readOnly);
-    assert.ok(
-      match.length > 0,
-      `no profile covers lane=${combo.lane} readOnly=${combo.readOnly}; a live dispatch shape would be unreachable`,
+test("#19-F3: omitting the worktree still runs a read in place, and gemini still refuses one", async () => {
+  const repo = makeBaseRepo();
+  const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: repo.base });
+  try {
+    const { id } = await m.dispatchProfile({ profile: "codex-review", prompt: "review in place" });
+    assert.equal(m.status(id).worktree, undefined);
+    await until(() => m.status(id).status !== "running", 4_000);
+    await assert.rejects(
+      () => m.dispatchProfile({ profile: "gemini-recon", prompt: "survey", worktree: "clanker/nope" }),
+      /runs in place and does not take a worktree/,
     );
-  }
-  // Anything declared unreachable must really be refused by the server.
-  for (const combo of UNREACHABLE_COMBINATIONS) {
-    assert.equal(
-      DISPATCH_PROFILES.some((p) => p.lane === combo.lane && p.readOnly === combo.readOnly),
-      false,
-      `${combo.lane} readOnly=${combo.readOnly} is declared unreachable but a profile offers it`,
-    );
+  } finally {
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
   }
 });
 
-test("#19-3: gemini write really is unreachable, which is why it has no profile", () => {
-  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-gemini-write-"));
-  assert.throws(
-    () => buildSpawnSpec("gemini", { readOnly: false, model: "gemini-3.6-flash-medium" }, runDir),
-    /reconnaissance-only/,
+// ---- F4. caller-selectable sandbox survives --------------------------------
+// 0.2.5's write schema omitted only read_only and kept all three sandbox tiers.
+
+test("#19-F4: codex-write keeps all three sandbox tiers and defaults to workspace-write", () => {
+  const tools = captureTools(recordingManager("standalone"));
+  const schema = tools.get("clanker_start_codex-write")!.config.inputSchema.sandbox as z.ZodTypeAny;
+  for (const mode of ["read-only", "workspace-write", "danger-full-access"] as const) {
+    assert.equal(schema.safeParse(mode).success, true, `sandbox tier '${mode}' must stay selectable`);
+    assert.equal(resolveProfileDispatch({ profile: "codex-write", prompt: "w", worktree: "b", sandbox: mode }).sandbox, mode);
+  }
+  assert.equal(schema.safeParse("nonsense").success, false);
+  assert.equal(
+    resolveProfileDispatch({ profile: "codex-write", prompt: "w", worktree: "b" }).sandbox,
+    "workspace-write",
+    "omitting sandbox keeps 0.2.5's effective default",
   );
 });
 
-// ---- 4. per-profile turn ceiling -------------------------------------------
-// Catches "declared the field but never wired it": the value must reach the
-// run, not just sit in the registry.
+test("#19-F4: a welded sandbox is still not a parameter", () => {
+  const tools = captureTools(recordingManager("standalone"));
+  assert.equal("sandbox" in tools.get("clanker_start_codex-review")!.config.inputSchema, false);
+  assert.throws(
+    () => resolveProfileDispatch({ profile: "codex-review", prompt: "r", sandbox: "danger-full-access" }),
+    /welds sandbox='read-only'/,
+    "the read-only gate must not be reachable around via the native sandbox",
+  );
+});
+
+// ---- F5. grok read-only model policy matches 0.2.5 -------------------------
+// 0.2.5 forced an explicit model only for read-only OPENCODE (26e9c9f
+// src/tools.ts:183-192); grok read fell back to the backend default.
+
+test("#19-F5: grok-review may omit the model and lands on the lane default; oc-review may not", () => {
+  assert.equal(resolveProfileDispatch({ profile: "grok-review", prompt: "review" }).model, undefined);
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-grok-default-"));
+  const spec = buildSpawnSpec("grok", { readOnly: true }, runDir);
+  assert.equal(spec.args[spec.args.indexOf("--model") + 1], "grok-4.5");
+
+  assert.throws(
+    () => resolveProfileDispatch({ profile: "oc-review", prompt: "review" }),
+    /requires an explicit model id/,
+    "opencode is the lane that fails closed without a model",
+  );
+});
+
+// ---- F6. 0.2.5 parity, compared on every dimension -------------------------
+// The first revision compared only lane/model/readOnly, so a registry that
+// changed worktree policy, sandbox policy or host reachability still went
+// green. Every dimension below has a mutation proof underneath it.
+
+/** The 0.2.5 dispatch shapes, field by field, from 26e9c9f. */
+const PARITY_0_2_5 = {
+  // src/tools.ts:129 — omit({read_only, sandbox}); :21-29 keeps worktree optional.
+  readonly_start: { readOnly: true, isolation: "optional", sandboxSelectable: false, weldedSandbox: undefined },
+  // :131-138 — omit({read_only}) only, so all three sandbox tiers stay; worktree required.
+  write_start: { readOnly: false, isolation: "required", sandboxSelectable: true, weldedSandbox: undefined },
+  // :71-76 — omit({model, effort, read_only, sandbox, agent}); worktree required.
+  glm_write_start: {
+    readOnly: false, isolation: "required", sandboxSelectable: false, weldedSandbox: undefined,
+    lane: "opencode", model: "glm", secrets: ["ZHIPUAI_API_KEY"], supervision: "sonnet",
+  },
+} as const;
+
+/** Project a profile onto the 0.2.5 comparison dimensions. */
+function parityShape(profile: DispatchProfile) {
+  return {
+    readOnly: profile.readOnly,
+    isolation: profile.isolation,
+    sandboxSelectable: profile.sandbox?.kind === "caller",
+    weldedSandbox: profile.sandbox?.kind === "welded" ? profile.sandbox.mode : undefined,
+  };
+}
+
+test("#19-F6: read profiles match 0.2.5's readonly shape on worktree and sandbox", () => {
+  for (const id of ["oc-review", "grok-review"]) {
+    assert.deepEqual(parityShape(getProfile(id)), PARITY_0_2_5.readonly_start, `${id} diverges from 0.2.5's readonly shape`);
+  }
+  // codex-review is the one documented divergence: it welds sandbox=read-only
+  // so a caller cannot use the native sandbox to get around read_only.
+  assert.deepEqual(parityShape(getProfile("codex-review")), { ...PARITY_0_2_5.readonly_start, weldedSandbox: "read-only" });
+  // gemini did not exist in 0.2.5; its forbidden isolation is the lane's rule.
+  assert.equal(getProfile("gemini-recon").isolation, "forbidden");
+});
+
+test("#19-F6: write profiles match 0.2.5's write shape on worktree and sandbox", () => {
+  assert.deepEqual(parityShape(getProfile("codex-write")), PARITY_0_2_5.write_start, "codex-write must keep all three sandbox tiers");
+  for (const id of ["oc-write", "grok-write"]) {
+    // opencode/grok have no native sandbox tier, so 0.2.5's selectable sandbox
+    // was a warn-and-ignore no-op on them; absence is behavior-identical.
+    assert.equal(getProfile(id).readOnly, false);
+    assert.equal(getProfile(id).isolation, "required");
+    assert.equal(getProfile(id).sandbox, undefined);
+  }
+});
+
+test("#19-F6: oc-glm-write matches 0.2.5's glm_write shape on every dimension", () => {
+  const glm = getProfile("oc-glm-write");
+  assert.deepEqual({
+    ...parityShape(glm),
+    lane: glm.lane,
+    model: glm.model.kind === "welded" ? glm.model.id : glm.model.kind,
+    secrets: [...glm.secrets],
+    supervision: glm.supervision,
+  }, PARITY_0_2_5.glm_write_start);
+});
+
+test("#19-F6: host reachability matches 0.2.5's per-host tool registration", () => {
+  // 0.2.5: the lane enum was filtered by laneNamesForHost, and the glm write
+  // tool was registered only when host !== "codex" (26e9c9f src/tools.ts:232).
+  const reachable = (host: ClankerHost) =>
+    profilesForHost({ host } as LaneManager).map((p) => `${p.lane}:${p.readOnly ? "read" : "write"}:${p.supervision}`).sort();
+
+  assert.equal(reachable("codex").some((s) => s.startsWith("codex:")), false, "host=codex must not reach its own lane");
+  assert.equal(reachable("codex").some((s) => s.endsWith(":sonnet")), false, "host=codex must not reach the supervised shape");
+  assert.equal(reachable("claude").some((s) => s.endsWith(":sonnet")), true, "host=claude keeps the supervisor");
+  assert.equal(reachable("claude").some((s) => s.startsWith("codex:")), true);
+  assert.deepEqual(reachable("standalone"), reachable("claude"));
+});
+
+test("#19-F6: the parity comparator has teeth — mutating any dimension flips it red", () => {
+  const base = getProfile("codex-write");
+  const mutations: Array<[string, DispatchProfile]> = [
+    ["worktree", { ...base, isolation: "optional" }],
+    ["sandbox", { ...base, sandbox: { kind: "welded", mode: "workspace-write" } }],
+    ["readOnly", { ...base, readOnly: true }],
+  ];
+  for (const [dimension, mutated] of mutations) {
+    assert.notDeepEqual(
+      parityShape(mutated),
+      parityShape(base),
+      `the comparator does not observe the '${dimension}' dimension — it would go green on a real divergence`,
+    );
+  }
+  // Host reachability: the filter is only load-bearing if the supervised
+  // profile sits on a lane host=codex could otherwise drive.
+  assert.equal(profilesForHost({ host: "codex" } as LaneManager).some((p) => p.supervision === "sonnet"), false);
+  assert.ok(
+    DISPATCH_PROFILES.some((p) => p.supervision === "sonnet" && p.lane !== "codex"),
+    "the supervised profile is on a lane host=codex could otherwise drive, so the filter is load-bearing",
+  );
+});
+
+// ---- F7. coverage proven against the real server ---------------------------
+// The first revision subtracted UNREACHABLE_COMBINATIONS from the space and
+// then asserted the remainder — a table agreeing with itself. Now every
+// uncovered combination must be refused by the actual manager/backend.
+
+test("#19-F7: every lane x write-mode either has a profile or is really refused by the server", async () => {
+  const repo = makeBaseRepo();
+  const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: repo.base });
+  try {
+    for (const combo of allCombinations()) {
+      if (DISPATCH_PROFILES.some((p) => p.lane === combo.lane && p.readOnly === combo.readOnly)) continue;
+      // No profile: prove the server itself refuses this shape rather than
+      // trusting the exclusion list the registry ships.
+      await assert.rejects(
+        () => m.dispatchStart({
+          lane: combo.lane,
+          prompt: "probe",
+          readOnly: combo.readOnly,
+          model: combo.lane === "gemini" ? "gemini-3.6-flash-medium" : "ds",
+          worktree: combo.readOnly ? undefined : `clanker/probe-${combo.lane}`,
+        }),
+        /reconnaissance-only|prohibited|rejects/,
+        `lane=${combo.lane} readOnly=${combo.readOnly} has no profile but the server accepts it`,
+      );
+      // …and it must be a documented exclusion, not an accident.
+      assert.ok(
+        UNREACHABLE_COMBINATIONS.some((c) => c.lane === combo.lane && c.readOnly === combo.readOnly),
+        `lane=${combo.lane} readOnly=${combo.readOnly} is uncovered and undocumented`,
+      );
+    }
+  } finally {
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("#19-F7: a write-capable gemini request is refused loudly, not silently downgraded", async () => {
+  const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir() });
+  try {
+    // Pre-fix the manager normalized gemini to readOnly=true BEFORE the write
+    // rejection, so the rejection was dead code: the caller got a running
+    // read-only job while believing it had asked for a write.
+    await assert.rejects(
+      () => m.dispatchStart({ lane: "gemini", prompt: "write please", readOnly: false }),
+      /reconnaissance-only and cannot run write-capable dispatches/,
+    );
+    // An omitted flag still normalizes to read-only, as before.
+    const { id } = await m.dispatchStart({ lane: "gemini", prompt: "survey", cwd: os.tmpdir() });
+    assert.equal(m.status(id).telemetry?.read_only, true);
+    await until(() => m.status(id).status !== "running", 4_000);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("#19-F7: the exclusion list never claims something the server actually allows", async () => {
+  const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir() });
+  try {
+    for (const combo of UNREACHABLE_COMBINATIONS) {
+      await assert.rejects(
+        () => m.dispatchStart({
+          lane: combo.lane,
+          prompt: "probe",
+          readOnly: combo.readOnly,
+          model: "gemini-3.6-flash-medium",
+          worktree: combo.readOnly ? undefined : `clanker/claim-${combo.lane}`,
+        }),
+        /reconnaissance-only|prohibited|rejects/,
+        `'${combo.reason}' is claimed but not enforced`,
+      );
+    }
+  } finally {
+    await m.shutdown();
+  }
+});
+
+// ---- carried over from the first revision ----------------------------------
 
 test("#19-4: two profiles with different turnTimeoutMs take effect differently", async () => {
   const recon = getProfile("gemini-recon");
@@ -211,8 +509,8 @@ test("#19-4: two profiles with different turnTimeoutMs take effect differently",
 
   const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir() });
   try {
-    const a = await m.dispatchStart(resolveProfileDispatch({ profile: "gemini-recon", prompt: "survey", cwd: os.tmpdir() }));
-    const b = await m.dispatchStart(resolveProfileDispatch({ profile: "codex-review", prompt: "review", cwd: os.tmpdir() }));
+    const a = await m.dispatchProfile({ profile: "gemini-recon", prompt: "survey", cwd: os.tmpdir() });
+    const b = await m.dispatchProfile({ profile: "codex-review", prompt: "review", cwd: os.tmpdir() });
     assert.equal(m.status(a.id).telemetry?.turn_timeout_ms, recon.turnTimeoutMs);
     assert.equal(m.status(b.id).telemetry?.turn_timeout_ms, review.turnTimeoutMs);
     await until(() => m.status(a.id).status !== "running" && m.status(b.id).status !== "running", 4_000);
@@ -232,21 +530,12 @@ test("#19-4: a profile ceiling is operator-overridable per profile", () => {
   );
 });
 
-// ---- 5. existing runtime enforcement is untouched ---------------------------
-// The registry narrows the entrance; it must not become a second, weaker copy
-// of the manager's gates.
-
-test("#19-5: profile dispatches still hit the manager's own write-isolation and gemini gates", async () => {
+test("#19-5: profile dispatches still hit the manager's own write-isolation gate", async () => {
   const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir() });
   try {
-    // Bypassing the registry with a hand-built write dispatch is still refused.
     await assert.rejects(
       () => m.dispatchStart({ lane: "codex", prompt: "do work", readOnly: false }),
       /must run in an isolated worktree/,
-    );
-    await assert.rejects(
-      () => m.dispatchStart({ lane: "gemini", prompt: "r", readOnly: false, worktree: "x" }),
-      /reconnaissance-only|rejects worktree/,
     );
   } finally {
     await m.shutdown();
@@ -261,81 +550,27 @@ test("#19-5: the registry never emits a dispatch the manager would have to rejec
       ...(profile.isolation === "required" ? { worktree: `clanker/${profile.id}` } : {}),
       ...(profile.model.kind === "caller-required" ? { model: "ds" } : {}),
     });
-    // Every write-capable profile carries a worktree (manager CP2).
     if (!resolved.readOnly) assert.ok(resolved.worktree, `${profile.id} is write-capable and must carry a worktree`);
     // A codex read-only profile must not weld a write-capable sandbox, or the
-    // manager's writeCapableSandbox rule would demand isolation it forbids.
+    // manager's writeCapableSandbox rule would demand isolation it may not have.
     if (resolved.readOnly && resolved.lane === "codex") {
       assert.equal(resolved.sandbox, "read-only", `${profile.id} would trip writeCapableSandbox`);
     }
-    // Non-codex write lanes must carry an explicit model (manager gate).
     if (!resolved.readOnly && resolved.lane !== "codex") {
       assert.ok(resolved.model?.trim(), `${profile.id} must carry an explicit model`);
     }
-    // Only the gemini lane may be read-only-and-worktree-free by policy.
     if (resolved.lane === "gemini") assert.equal(resolved.readOnly, true);
+    assert.ok(LANE_NAMES.includes(resolved.lane));
   }
-});
-
-// ---- 6. 0.2.5 semantic parity ----------------------------------------------
-// The registry is a better mechanism for the same behavior, not a redesign of
-// it. These pin the three 0.2.5 dispatch shapes field by field.
-
-test("#19-6: 0.2.5 parity — readonly / write / glm_write shapes survive field-for-field", () => {
-  // clanker_dispatch_readonly_start: read_only forced true, sandbox undefined,
-  // model required for opencode, worktree optional-but-unused, lane chosen.
-  for (const id of ["codex-review", "oc-review", "grok-review"]) {
-    const p = getProfile(id);
-    assert.equal(p.readOnly, true, `${id}: 0.2.5 readonly path forced read_only=true`);
-    assert.equal(p.isolation, "forbidden");
-  }
-  assert.equal(getProfile("oc-review").model.kind, "caller-required", "0.2.5 required an explicit opencode model on the read path too");
-
-  // clanker_dispatch_write_start: read_only forced false, worktree required,
-  // model required except on codex, GLM rejected.
-  for (const id of ["codex-write", "oc-write", "grok-write"]) {
-    const p = getProfile(id);
-    assert.equal(p.readOnly, false, `${id}: 0.2.5 write path forced read_only=false`);
-    assert.equal(p.isolation, "required", `${id}: 0.2.5 write path required a managed worktree`);
-  }
-  assert.equal(getProfile("codex-write").model.kind, "lane-default", "0.2.5 made model optional for lane=codex writes");
-  assert.equal(getProfile("oc-write").model.kind, "caller-required");
-  assert.equal(getProfile("grok-write").model.kind, "caller-required");
-  assert.throws(
-    () => resolveProfileDispatch({ profile: "oc-write", prompt: "w", worktree: "b", model: "glm" }),
-    /supervised|prohibited|GLM/i,
-    "0.2.5's writer relay rejected the GLM alias; GLM writes belong to the supervised profile",
-  );
-
-  // clanker_dispatch_glm_write_start: lane/model/read_only all fixed, worktree
-  // required, ZHIPUAI_API_KEY vaulted, Sonnet supervision.
-  const glm = getProfile("oc-glm-write");
-  assert.deepEqual(
-    {
-      lane: glm.lane,
-      model: glm.model,
-      readOnly: glm.readOnly,
-      isolation: glm.isolation,
-      secrets: [...glm.secrets],
-      supervision: glm.supervision,
-    },
-    {
-      lane: "opencode",
-      model: { kind: "welded", id: "glm" },
-      readOnly: false,
-      isolation: "required",
-      secrets: ["ZHIPUAI_API_KEY"],
-      supervision: "sonnet",
-    },
-  );
 });
 
 test("#19-6: every profile description states its welded capabilities and its deadline", () => {
-  const tools = captureTools({});
+  const tools = captureTools(recordingManager("standalone"));
   for (const profile of DISPATCH_PROFILES) {
     const description = tools.get(`clanker_start_${profile.id}`)!.config.description ?? "";
     assert.match(description, new RegExp(`lane=${profile.lane}`));
     assert.match(description, new RegExp(`read_only=${profile.readOnly}`));
+    assert.match(description, new RegExp(`Isolation: ${profile.isolation}`));
     assert.match(description, /Hard turn ceiling: \d+ minutes/);
     if (profile.secrets.length) assert.match(description, /tachi vault exec/);
     if (profile.status === "dormant") assert.match(description, /DORMANT/);

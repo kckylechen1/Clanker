@@ -17,10 +17,9 @@ function captureTools(manager: LaneManager) {
   return tools;
 }
 
-test("public inventory is five lifecycle tools plus one generated tool per profile", () => {
+test("public inventory is one generated tool per profile plus four lifecycle tools", () => {
   const manager = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true });
   assert.deepEqual([...captureTools(manager).keys()], [
-    "clanker_start",
     ...DISPATCH_PROFILES.map((p) => `clanker_start_${p.id}`),
     "clanker_wait", "clanker_status", "clanker_cancel", "clanker_list",
   ]);
@@ -53,13 +52,25 @@ test("a completed one-shot job closes its ACP session before publishing done", a
   }
 });
 
-test("clanker_start exposes the profile schema and only registered profiles", () => {
+test("each generated tool exposes only its own profile's free parameters", () => {
   const manager = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true });
-  const shape = captureTools(manager).get("clanker_start")!.config.inputSchema;
-  const schema = z.object(shape);
-  assert.equal(schema.safeParse({ profile: "codex-review", prompt: "read" }).success, true);
-  assert.equal(schema.safeParse({ profile: "unsafe", prompt: "read" }).success, false);
-  assert.deepEqual(Object.keys(shape), ["profile", "prompt", "cwd", "worktree", "model", "effort"]);
+  const tools = captureTools(manager);
+  // Read-only codex review: prompt/cwd/worktree(optional)/effort — no model
+  // (lane default), no sandbox (welded read-only), no lane, no read_only.
+  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-review")!.config.inputSchema), ["prompt", "cwd", "worktree", "effort"]);
+  // Write codex: adds a caller-selectable sandbox, and worktree is mandatory.
+  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "sandbox", "effort"]);
+  // OpenCode write: model is the caller's, sandbox is not a knob on this lane.
+  assert.deepEqual(Object.keys(tools.get("clanker_start_oc-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "model", "effort"]);
+  // Supervised GLM: everything but prompt/cwd/worktree/effort is welded.
+  assert.deepEqual(Object.keys(tools.get("clanker_start_oc-glm-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "effort"]);
+  // Gemini: the lane forbids worktrees, so the parameter does not exist.
+  assert.deepEqual(Object.keys(tools.get("clanker_start_gemini-recon")!.config.inputSchema), ["prompt", "cwd", "effort"]);
+
+  const codexWrite = z.object(tools.get("clanker_start_codex-write")!.config.inputSchema);
+  assert.equal(codexWrite.safeParse({ prompt: "w", worktree: "b" }).success, true);
+  assert.equal(codexWrite.safeParse({ prompt: "w" }).success, false, "a write tool cannot start without a worktree");
+  assert.equal(codexWrite.safeParse({ prompt: "w", worktree: "b", sandbox: "nonsense" }).success, false);
 });
 
 test("manager centralizes host, Gemini, write isolation, model, and GLM gates", async () => {

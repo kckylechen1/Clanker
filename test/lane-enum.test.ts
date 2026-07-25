@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { LaneManager } from "../src/manager.js";
+import { LaneManager } from "../src/manager.js";
 import { LANE_NAMES } from "../src/types.js";
 import { DISPATCH_PROFILES } from "../src/profiles.js";
 import { laneEnum, registerTools } from "../src/tools.js";
@@ -23,12 +23,11 @@ test("laneEnum accepts exactly the backend registry", () => {
   for (const bad of ["claude", "", "Codex"]) assert.throws(() => laneEnum.parse(bad));
 });
 
-test("public tools are the five lifecycle tools plus exactly one generated tool per profile", () => {
+test("public tools are the four lifecycle tools plus exactly one generated tool per profile", () => {
   const tools = capture({});
   assert.deepEqual([...tools.keys()].sort(), [
     "clanker_cancel",
     "clanker_list",
-    "clanker_start",
     "clanker_start_codex-review",
     "clanker_start_codex-write",
     "clanker_start_gemini-recon",
@@ -48,37 +47,37 @@ test("public tools are the five lifecycle tools plus exactly one generated tool 
   );
 });
 
-test("the generic start schema takes a profile name, not capability parameters", async () => {
-  let received: any;
-  const tools = capture({ async dispatchStart(args: any) { received = args; return { id: "x", warnings: [] }; } });
-  const start = tools.get("clanker_start")!;
-  const shape = start.config.inputSchema as z.ZodRawShape;
-  const schema = z.object(shape);
-  assert.deepEqual(Object.keys(shape), ["profile", "prompt", "cwd", "worktree", "model", "effort"]);
-  for (const forbidden of ["lane", "read_only", "sandbox"]) {
-    assert.equal(forbidden in shape, false, `'${forbidden}' must not be a caller-supplied parameter`);
-  }
-  assert.equal(schema.safeParse({ profile: "oc-kimi-crew", prompt: "work", worktree: "b" }).success, true);
-  assert.equal(schema.safeParse({ profile: "worker", prompt: "work" }).success, false);
-  assert.equal(schema.safeParse({ profile: "supervisor", prompt: "work" }).success, false);
+test("there is no universal entrance — every start tool names exactly one profile", async () => {
+  const received: any[] = [];
+  const tools = capture({ async dispatchProfile(input: any) { received.push(input); return { id: "x", warnings: [] }; } });
+  assert.equal(tools.has("clanker_start"), false, "the generic entrance voids the narrow tools' whole point");
 
-  await start.handler({ profile: "gemini-recon", prompt: "inspect" });
-  assert.deepEqual(received, {
-    lane: "gemini", prompt: "inspect", cwd: undefined, worktree: undefined, model: undefined,
-    effort: undefined, readOnly: true, sandbox: undefined, profile: undefined,
-    secrets: [], supervision: "none", turnTimeoutMs: 660_000, profileId: "gemini-recon",
-  }, "the registry — not the caller — supplies every capability dimension");
+  for (const [name, tool] of tools) {
+    if (!name.startsWith("clanker_start_")) continue;
+    const shape = tool.config.inputSchema as z.ZodRawShape;
+    for (const forbidden of ["lane", "read_only", "profile"]) {
+      assert.equal(forbidden in shape, false, `${name}: '${forbidden}' must not be a caller-supplied parameter`);
+    }
+  }
+
+  // A narrow tool forwards free parameters and names its own profile; the
+  // caller never gets to say which profile a tool starts.
+  await tools.get("clanker_start_gemini-recon")!.handler({ prompt: "inspect", profile: "oc-glm-write" });
+  assert.deepEqual(received, [{
+    profile: "gemini-recon", prompt: "inspect", cwd: undefined,
+    worktree: undefined, model: undefined, sandbox: undefined, effort: undefined,
+  }], "the tool's own registry row — not the caller's argument — decides the profile");
 });
 
-test("the generic start tool refuses a capability the named profile does not grant", async () => {
-  const tools = capture({ async dispatchStart() { throw new Error("must not reach the manager"); } });
-  const start = tools.get("clanker_start")!;
-  // A read-only profile cannot be talked into a worktree, and a write profile
-  // cannot be started without one; both fail before the manager is called.
-  const noWorktree = await start.handler({ profile: "gemini-recon", prompt: "x", worktree: "raw-bypass" });
-  assert.match(JSON.parse(noWorktree.content[0].text).error, /runs in place and does not take a worktree/);
-  const needsWorktree = await start.handler({ profile: "codex-write", prompt: "x" });
-  assert.match(JSON.parse(needsWorktree.content[0].text).error, /requires a managed worktree branch name/);
-  const weldedModel = await start.handler({ profile: "oc-glm-write", prompt: "x", worktree: "b", model: "kimi" });
-  assert.match(JSON.parse(weldedModel.content[0].text).error, /welds model='glm'/);
+test("a narrow start tool refuses a capability its profile does not grant", async () => {
+  const tools = capture(new LaneManager({ disableReaper: true }));
+  const errorOf = async (name: string, args: Record<string, unknown>) =>
+    JSON.parse((await tools.get(name)!.handler(args)).content[0].text).error as string;
+
+  // A read-only lane that forbids worktrees cannot be talked into one; a write
+  // profile cannot start without one; a welded model cannot be overridden.
+  assert.match(await errorOf("clanker_start_gemini-recon", { prompt: "x", worktree: "raw-bypass" }), /runs in place and does not take a worktree/);
+  assert.match(await errorOf("clanker_start_codex-write", { prompt: "x" }), /requires a managed worktree branch name/);
+  assert.match(await errorOf("clanker_start_oc-glm-write", { prompt: "x", worktree: "b", model: "kimi" }), /welds model='glm'/);
+  assert.match(await errorOf("clanker_start_oc-write", { prompt: "x", worktree: "b", model: "glm" }), /GLM writes are supervised/);
 });
