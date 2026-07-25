@@ -97,18 +97,51 @@ export async function resolveBaseRef(targetRepo: string): Promise<string> {
 }
 
 /**
+ * Verify a caller-supplied `base` against `targetRepo` and return the full
+ * commit SHA it resolves to. This is the server-side half of the `base`
+ * dispatch parameter: the dispatcher may NAME the commit a worktree is cut
+ * from, but whether that name means anything is decided here, not by the
+ * worker. A base that does not resolve to a commit is a loud rejection that
+ * quotes the caller's original string verbatim — never a silent fallback to
+ * the repo's default base, which would let a typo'd ref quietly produce a
+ * worktree cut from somewhere the dispatcher did not ask for.
+ */
+export async function resolveBaseCommit(targetRepo: string, base: string): Promise<string> {
+  try {
+    const sha = (await git(targetRepo, ["rev-parse", "--verify", `${base}^{commit}`])).trim();
+    if (sha) return sha;
+  } catch {
+    /* fall through to the loud error */
+  }
+  throw new Error(
+    `dispatch base '${base}' does not resolve to a commit in target repo '${targetRepo}'; ` +
+      `refusing to fall back to the repo's default base (the worktree would be cut from a ` +
+      `commit the dispatcher did not name)`,
+  );
+}
+
+/** Full SHA of `cwd`'s current HEAD commit (the cut point of a fresh worktree). */
+export async function headSha(cwd: string): Promise<string> {
+  return (await git(cwd, ["rev-parse", "--verify", "HEAD"])).trim();
+}
+
+/**
  * Create a worktree for `branch`, cut from `targetRepo`'s resolved base ref
  * (see resolveBaseRef). `targetRepo` is the repo the dispatch targets; it
  * defaults to the host BASE_REPO only for callers with no dispatch cwd.
  *
+ * When `base` is given it wins: the worktree is cut from exactly that ref
+ * (already verified server-side via resolveBaseCommit before this call). When
+ * omitted, the resolveBaseRef chain runs EXACTLY as before (frozen, #12).
+ *
  * @returns the absolute worktree path.
  */
-export async function createWorktree(branch: string, targetRepo = BASE_REPO): Promise<string> {
+export async function createWorktree(branch: string, targetRepo = BASE_REPO, base?: string): Promise<string> {
   const wtPath = deriveWorktreePath(branch);
   if (fs.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
-  const baseRef = await resolveBaseRef(targetRepo);
+  const baseRef = base ?? (await resolveBaseRef(targetRepo));
   fs.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
   return wtPath;

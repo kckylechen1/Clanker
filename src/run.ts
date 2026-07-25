@@ -97,6 +97,13 @@ export class LaneRun {
    * baseRepo, or it silently no-ops on the wrong repo and leaks the worktree.
    */
   readonly targetRepo?: string;
+  /**
+   * Full SHA the worktree was cut from when the dispatcher supplied an
+   * explicit `base` (verified server-side in manager.ts before the worktree
+   * was created). Undefined when the repo's default base resolution ran;
+   * surfaced in telemetry as `base_sha`.
+   */
+  readonly baseSha?: string;
   readonly readOnly: boolean;
   readonly runDir: string;
   readonly createdAt = Date.now();
@@ -184,6 +191,8 @@ export class LaneRun {
     worktreeBranch?: string;
     worktreePath?: string;
     targetRepo?: string;
+    /** Caller-named, server-verified cut commit (telemetry `base_sha`). */
+    baseSha?: string;
     requestOpts?: LaneRequestOptions;
     initialPrompt?: string;
     /** Per-profile hard turn ceiling (profiles.ts); undefined falls back to the global default. */
@@ -200,6 +209,7 @@ export class LaneRun {
     this.worktreeBranch = init.worktreeBranch;
     this.worktreePath = init.worktreePath;
     this.targetRepo = init.targetRepo;
+    this.baseSha = init.baseSha;
     this.requestOpts = init.requestOpts ?? {};
     this.initialPrompt = init.initialPrompt ?? "";
     this.turnTimeoutMs = init.turnTimeoutMs;
@@ -536,6 +546,7 @@ export class LaneRun {
       observed_model: this.observedModel, requested_effort: this.requestOpts.effort,
       observed_effort: this.observedEffort, lane: this.lane, transport: "acp-stdio",
       backend: this.lane, read_only: this.readOnly, sandbox: this.requestOpts.sandbox,
+      ...(this.baseSha !== undefined ? { base_sha: this.baseSha } : {}),
       ...(this.turnTimeoutMs !== undefined ? { turn_timeout_ms: this.turnTimeoutMs } : {}),
       created_at: new Date(this.createdAt).toISOString(),
       ...(this.startedAt ? { started_at: new Date(this.startedAt).toISOString() } : {}),

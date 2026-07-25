@@ -57,6 +57,19 @@ function narrowShape(profile: DispatchProfile): Record<string, z.ZodTypeAny> {
           "isolated worktree — the recipe for a review that must actually run build/test tooling.",
       );
   }
+  // `base` mirrors the worktree param's placement: only a profile that CAN cut
+  // a worktree (isolation not forbidden) may name the commit it is cut from.
+  if (profile.isolation !== "forbidden") {
+    shape.base = z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        "Optional ref to cut the worktree from (branch, tag, or SHA). Verified server-side before the worker " +
+          "starts; omit to use the repo's default base.",
+      );
+  }
   if (profile.model.kind === "caller-required") {
     shape.model = z.string().trim().min(1).describe("Required explicit model id or supported alias for this lane");
   }
@@ -158,6 +171,7 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
           prompt: args.prompt as string,
           cwd: args.cwd as string | undefined,
           worktree: args.worktree as string | undefined,
+          base: args.base as string | undefined,
           model: args.model as string | undefined,
           sandbox: args.sandbox as CodexSandboxMode | undefined,
           effort: args.effort as string | undefined,

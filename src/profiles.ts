@@ -336,7 +336,7 @@ export function allCombinations(): { lane: LaneName; readOnly: boolean }[] {
 /** Free (caller-supplied) parameter names for a profile — exactly what its generated tool exposes. */
 export function freeParams(profile: DispatchProfile): string[] {
   const params = ["prompt", "cwd"];
-  if (profile.isolation !== "forbidden") params.push("worktree");
+  if (profile.isolation !== "forbidden") params.push("worktree", "base");
   if (profile.model.kind === "caller-required") params.push("model");
   if (profile.sandbox?.kind === "caller") params.push("sandbox");
   params.push("effort");
@@ -366,6 +366,13 @@ export interface ProfileDispatchInput {
   prompt: string;
   cwd?: string;
   worktree?: string;
+  /**
+   * Optional ref (branch, tag, or SHA) to cut the worktree from. Verified
+   * server-side against the target repo before any worktree is created
+   * (manager.ts / worktree.ts resolveBaseCommit); a ref that does not resolve
+   * rejects the dispatch outright — there is no fallback to the default base.
+   */
+  base?: string;
   model?: string;
   sandbox?: CodexSandboxMode;
   effort?: string;
@@ -377,6 +384,7 @@ export interface ResolvedProfileDispatch {
   prompt: string;
   cwd?: string;
   worktree?: string;
+  base?: string;
   model?: string;
   effort?: string;
   readOnly: boolean;
@@ -402,6 +410,13 @@ export function resolveProfileDispatch(
 
   if (profile.isolation === "forbidden" && input.worktree !== undefined) {
     throw new Error(`profile '${profile.id}' runs in place and does not take a worktree`);
+  }
+  // `base` only means something where a worktree can exist; on a
+  // forbidden-isolation profile it is as unreachable as `worktree` itself, so
+  // an in-process caller supplying one gets the same loud refusal rather than
+  // a silently ignored parameter.
+  if (profile.isolation === "forbidden" && input.base !== undefined) {
+    throw new Error(`profile '${profile.id}' cuts no worktree and therefore takes no base`);
   }
   if (profile.isolation === "required" && !input.worktree?.trim()) {
     throw new Error(`profile '${profile.id}' is write-capable and requires a managed worktree branch name`);
@@ -459,6 +474,7 @@ export function resolveProfileDispatch(
     prompt: input.prompt,
     cwd: input.cwd,
     worktree: input.worktree,
+    base: input.base,
     model,
     effort: input.effort,
     readOnly: profile.readOnly,

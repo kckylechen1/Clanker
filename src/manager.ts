@@ -45,6 +45,7 @@ import {
   deriveWorktreePath,
   isGitWorkTree,
   removeIfClean,
+  resolveBaseCommit,
   resolveTargetRepo,
 } from "./worktree.js";
 import { annotatedError, clampWait, createTimeout, dedupe, envInt, errMessage, stderrSuffix } from "./util.js";
@@ -67,6 +68,14 @@ export interface DispatchParams extends Omit<LaneRequestOptions, "secrets"> {
   prompt: string;
   cwd?: string;
   worktree?: string;
+  /**
+   * Optional ref (branch, tag, or SHA) to cut the worktree from. Verified
+   * server-side against the target repo BEFORE any worktree is created; a ref
+   * that does not resolve rejects the dispatch — no fallback to the default
+   * base. Meaningless without `worktree` and rejected then, because silently
+   * ignoring a caller's cut point is worse than refusing it.
+   */
+  base?: string;
 }
 
 /**
@@ -378,6 +387,7 @@ export class LaneManager {
         prompt: resolved.prompt,
         cwd: resolved.cwd,
         worktree: resolved.worktree,
+        base: resolved.base,
         model: resolved.model,
         effort: resolved.effort,
         readOnly: resolved.readOnly,
@@ -418,6 +428,24 @@ export class LaneManager {
     let targetRepo = path.resolve(this.baseRepo);
     if (params.worktree && params.cwd) {
       targetRepo = await resolveTargetRepo(params.cwd);
+    }
+
+    // Server-side `base` verification: a caller-named cut point is resolved
+    // against the target repo BEFORE anything is created (no run dir, no
+    // worktree). A base that does not resolve to a commit rejects the whole
+    // dispatch — quoting the caller's original string verbatim — with NO
+    // fallback to the repo's default base. A base without a worktree names a
+    // cut point nothing will consume; that is refused rather than silently
+    // ignored.
+    if (params.base !== undefined && !params.worktree) {
+      throw new Error(
+        `dispatch base '${params.base}' was supplied without a worktree; a base only names the commit a ` +
+          `worktree is cut from, so pass 'worktree' as well or omit 'base'`,
+      );
+    }
+    let baseSha: string | undefined;
+    if (params.base !== undefined) {
+      baseSha = await resolveBaseCommit(targetRepo, params.base);
     }
 
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
@@ -469,7 +497,7 @@ export class LaneManager {
         // misconfiguration (WORKTREES_ROOT set inside the repo) that would put
         // writes back on the very checkout the isolation exists to protect.
         assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree), targetRepo);
-        worktreePath = await createWorktree(params.worktree, targetRepo);
+        worktreePath = await createWorktree(params.worktree, targetRepo, baseSha);
         cwd = worktreePath;
       }
     } catch (e) {
@@ -496,6 +524,7 @@ export class LaneManager {
       worktreeBranch: params.worktree,
       worktreePath,
       targetRepo: worktreePath ? targetRepo : undefined,
+      baseSha,
       requestOpts,
       initialPrompt: params.prompt,
       turnTimeoutMs: minted.turnTimeoutMs,
