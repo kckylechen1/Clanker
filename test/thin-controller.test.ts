@@ -55,15 +55,16 @@ test("a completed one-shot job closes its ACP session before publishing done", a
 test("each generated tool exposes only its own profile's free parameters", () => {
   const manager = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true });
   const tools = captureTools(manager);
-  // Read-only codex review: prompt/cwd/worktree(optional)/effort — no model
-  // (lane default), no sandbox (welded read-only), no lane, no read_only.
-  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-review")!.config.inputSchema), ["prompt", "cwd", "worktree", "effort"]);
+  // Read-only codex review: prompt/cwd/worktree(optional)/base/doNotTouch/
+  // effort — no model (lane default), no sandbox (welded read-only), no lane,
+  // no read_only. base/doNotTouch exist wherever a worktree can.
+  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-review")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "effort"]);
   // Write codex: adds a caller-selectable sandbox, and worktree is mandatory.
-  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "sandbox", "effort"]);
+  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "sandbox", "effort"]);
   // OpenCode write: model is the caller's, sandbox is not a knob on this lane.
-  assert.deepEqual(Object.keys(tools.get("clanker_start_oc-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "model", "effort"]);
-  // Supervised GLM: everything but prompt/cwd/worktree/effort is welded.
-  assert.deepEqual(Object.keys(tools.get("clanker_start_oc-glm-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "effort"]);
+  assert.deepEqual(Object.keys(tools.get("clanker_start_oc-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "model", "effort"]);
+  // Supervised GLM: everything but prompt/cwd/worktree/base/doNotTouch/effort is welded.
+  assert.deepEqual(Object.keys(tools.get("clanker_start_oc-glm-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "effort"]);
   // Gemini: the lane forbids worktrees, so the parameter does not exist.
   assert.deepEqual(Object.keys(tools.get("clanker_start_gemini-recon")!.config.inputSchema), ["prompt", "cwd", "effort"]);
 

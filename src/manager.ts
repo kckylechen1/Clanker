@@ -431,6 +431,10 @@ export class LaneManager {
     const validated = validateDispatchParams(params, minted, this.host);
     params = validated.params;
     const { profile, readOnly } = validated;
+    // Server-owned workspace-discipline prefix on every write-class dispatch
+    // (a08f7a1): the words the worker is held to are the words it was handed,
+    // so the ledger's initialPrompt and the first turn both use lanePrompt.
+    const lanePrompt = readOnly ? params.prompt : `${WRITE_DISCIPLINE_PREFIX}\n\n${params.prompt}`;
 
     // #12: the worktree must be cut from the repo the dispatch *targets*
     // (resolved from params.cwd via `git rev-parse --show-toplevel`), NOT the
@@ -528,8 +532,18 @@ export class LaneManager {
         cwd = worktreePath;
         // The diff base for doNotTouch terminal validation: the exact commit the
         // tree was cut from, captured NOW (before the worker's first commit can
-        // move HEAD) whether or not the caller named a base.
-        worktreeBaseSha = baseSha ?? (await headSha(worktreePath));
+        // move HEAD) whether or not the caller named a base. Best-effort (330c9b1):
+        // when the tree cannot be read, the terminal validation later simply finds
+        // nothing to diff — capture must never crash the dispatch itself.
+        if (baseSha !== undefined) {
+          worktreeBaseSha = baseSha;
+        } else {
+          try {
+            worktreeBaseSha = await headSha(worktreePath);
+          } catch {
+            worktreeBaseSha = undefined;
+          }
+        }
       }
     } catch (e) {
       // Leave a readable failure record instead of a silent gap: foreign.ts's

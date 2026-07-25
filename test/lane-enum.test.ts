@@ -70,7 +70,10 @@ test("there is no universal entrance — every start tool names exactly one prof
   await tools.get("clanker_start_gemini-recon")!.handler({ prompt: "inspect", profile: "oc-glm-write" });
   assert.deepEqual(received, [{
     profile: "gemini-recon", prompt: "inspect", cwd: undefined,
-    worktree: undefined, model: undefined, sandbox: undefined, effort: undefined,
+    // base/doNotTouch join the pass-through as of the server-enforced contract:
+    // absent here they would silently stop being asserted on.
+    worktree: undefined, base: undefined, doNotTouch: undefined,
+    model: undefined, sandbox: undefined, effort: undefined,
   }], "the tool's own registry row — not the caller's argument — decides the profile");
 });
 
