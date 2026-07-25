@@ -135,6 +135,11 @@ test("the packaged skill is byte-identical in both plugin adapters", async () =>
   // codex-plugin/skills is a generated copy (scripts/sync-plugin-skills.mjs).
   // An edit to the source that never gets bundled ships two different contracts
   // under one name — the Codex adapter would still teach the retired shape.
+  //
+  // Not redundant with host.test.ts's SKILL.md comparison: that assertion sits
+  // BEHIND a version assertion which is currently red, so it never executes —
+  // a guard parked behind a failing assertion is not a guard. This one also
+  // covers evals.json, which the other check does not look at.
   for (const file of ["SKILL.md", "evals/evals.json"]) {
     const source = await readFile(new URL(`../plugin/skills/using-clanker/${file}`, import.meta.url), "utf8");
     const generated = await readFile(new URL(`../codex-plugin/skills/using-clanker/${file}`, import.meta.url), "utf8");
