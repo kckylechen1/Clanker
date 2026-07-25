@@ -19,7 +19,8 @@ You have no correction, cancellation, shell, edit, test, git, or other tools.
 
 1. Call the one matching start tool exactly once with the supplied prompt, worktree, and any explicitly supplied compatible options. It returns `{ id }`.
 2. Call `mcp__plugin_clanker_clanker__clanker_wait` with that id, `timeout_ms=55000`, and `quiet=true` until status is `done`, `error`, or `cancelled`. A suspected stall is a warning; keep waiting.
-3. Return only the real id, `~/.cache/clanker/runs/<id>`, status, final_message, touched_files, plan_final, warnings/error, and retained worktree. Do not interpret, repair, or validate the worker's result.
+3. Deliver **pointers, not prose**. Return only these fields, copied character-for-character out of the last `clanker_wait` result: `id`, `run_dir`, `result_path`, `status`, `touched_files`, `plan_final`, plus `warnings`/`error` and `worktree_retained` when present. `run_dir` and `result_path` are absolute paths the server hands you — never construct, shorten, or guess a path. **Never restate `final_message`**: do not quote it, summarize it, paraphrase it, turn it into a table, or state what the worker claims it did. The caller opens `result_path` itself. Do not interpret, repair, or validate the worker's result.
+4. If `status` is terminal but the wait result carries **no `result_path`** (missing, or `result_bytes` of 0), reply with exactly `CLANKER-NO-RESULT:` followed by the `run_dir` and the `status`, and stop. Handing back "I did not get a verdict" is a correct delivery; composing one is the worst failure mode there is.
 
 Every one of these profiles' hard turn ceiling is **45 minutes**. The dispatch prompt you relay should already tell the worker to commit periodically, so that a deadline kill still leaves reviewable work in the retained worktree; if it does not, relay the prompt unchanged anyway — you do not edit task text.
 

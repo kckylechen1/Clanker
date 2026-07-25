@@ -64,10 +64,35 @@ test("every seat holds only its own narrow start tool and no retired API", async
     assert.equal(/clanker_cancel/.test(frontmatter), mayCorrect, `${seat}.md cancellation rights`);
     assert.equal(/^model: sonnet$/m.test(frontmatter), mayCorrect, `${seat}.md model tier`);
     // The 0.2.x seat contracts: named-redirect refusal, zero-fabrication
-    // delivery of the real id + run dir, and the new per-profile deadline.
+    // delivery, and the per-profile deadline.
     assert.match(body, /CLANKER-FAILURE:/, `${seat}.md must keep the verbatim-failure contract`);
-    assert.match(body, /`~\/\.cache\/clanker\/runs\/<id>`/, `${seat}.md must return the real run directory`);
     assert.match(body, /hard turn ceiling is \*\*\d+ minutes\*\*/, `${seat}.md must state its profile deadline`);
+
+    // #19-F10. A contract that bans fabrication while ordering the seat to
+    // reproduce `final_message` asks a language model for the one thing it
+    // cannot do; twice in one day a relay answered with real verdict blended
+    // into invented detail. The delivery is therefore a PATH the server minted,
+    // and restating the verdict is forbidden outright.
+    assert.match(body, /`run_dir`/, `${seat}.md must deliver the server-minted run_dir`);
+    assert.match(body, /`result_path`/, `${seat}.md must deliver the server-minted result.md path`);
+    assert.match(
+      body,
+      /never construct, shorten, or guess a path/i,
+      `${seat}.md must forbid composing a path instead of copying the returned one`,
+    );
+    assert.match(body, /\*\*Never restate `final_message`\*\*/, `${seat}.md must forbid restating the verdict`);
+    assert.match(
+      body,
+      /CLANKER-NO-RESULT:/,
+      `${seat}.md must have a "I did not get a verdict" path that is not a composed summary`,
+    );
+    // The retired shape: the verdict as a returned field, and a run directory
+    // the seat typed out from a template instead of copying from the payload.
+    assert.doesNotMatch(
+      body,
+      /result fields `final_message`|status, final_message|`~\/\.cache\/clanker\/runs\/<id>`/,
+      `${seat}.md still asks for the retired restate-the-result delivery`,
+    );
   }
 });
 
@@ -99,6 +124,22 @@ test("packaged skill documents the profile registry and vault-sourced credential
   for (const profile of DISPATCH_PROFILES) assert.match(body, new RegExp(profile.id));
   assert.match(body, /tachi vault exec/);
   assert.match(body, /Never pass credentials/);
+  // #19-F10: the other half of "relays never restate the verdict" is telling
+  // the dispatcher where to read it instead.
+  assert.match(body, /`result_path`/);
+  assert.match(body, /result\.md/);
+  assert.match(body, /CLANKER-NO-RESULT:/);
+});
+
+test("the packaged skill is byte-identical in both plugin adapters", async () => {
+  // codex-plugin/skills is a generated copy (scripts/sync-plugin-skills.mjs).
+  // An edit to the source that never gets bundled ships two different contracts
+  // under one name — the Codex adapter would still teach the retired shape.
+  for (const file of ["SKILL.md", "evals/evals.json"]) {
+    const source = await readFile(new URL(`../plugin/skills/using-clanker/${file}`, import.meta.url), "utf8");
+    const generated = await readFile(new URL(`../codex-plugin/skills/using-clanker/${file}`, import.meta.url), "utf8");
+    assert.equal(generated, source, `codex-plugin copy of ${file} is stale; run 'npm run bundle:skills'`);
+  }
 });
 
 test("plugin metadata uses Clanker as the visible name", async () => {

@@ -3,5 +3,6 @@
   {"prompt":"Have Kimi Crew implement and review in branch clanker/feature","expected":"Use clanker_start_oc-kimi-crew with worktree=clanker/feature; do not inline child-agent policy."},
   {"prompt":"Ask GLM directly to edit the primary checkout","expected":"Do not bypass the server; an unsupervised GLM write and primary-checkout writes are rejected. A GLM write goes through clanker_start_oc-glm-write, which runs in a managed worktree under Sonnet supervision."},
   {"prompt":"Have Codex review this repo but it needs to run the test suite","expected":"Use clanker_start_codex-review with a worktree branch: the read gate stays on and the review runs inside an isolated tree it can write build caches into."},
-  {"prompt":"Start a job with whatever profile I name at runtime","expected":"There is no generic start tool. Pick the clanker_start_<profile> tool whose capabilities the job needs."}
+  {"prompt":"Start a job with whatever profile I name at runtime","expected":"There is no generic start tool. Pick the clanker_start_<profile> tool whose capabilities the job needs."},
+  {"prompt":"The relay came back with a run id — tell me what the reviewer concluded","expected":"Relays never restate final_message. Read the verdict yourself from result_path (result.md) in the run directory; if a terminal run has no result_path the seat reports CLANKER-NO-RESULT: instead of composing one."}
 ]
