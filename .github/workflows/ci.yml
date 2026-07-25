@@ -42,8 +42,11 @@ jobs:
           set -e
 
           # node:test summary lines look like "ℹ tests 51" (or "# tests 51" on TAP output).
+          # get_count must never fail: under GitHub's `bash -e`, a non-zero
+          # exit inside `var=$(cmd)` aborts the whole script at the assignment
+          # and the guards below become unreachable (grep exits 1 on no match).
           get_count() {
-            grep -E "^(ℹ|#) $1 " "$LOG" | tail -n 1 | awk '{print $3}'
+            grep -E "^(ℹ|#) $1 " "$LOG" | tail -n 1 | awk '{print $3}' || true
           }
 
           tests=$(get_count tests)
