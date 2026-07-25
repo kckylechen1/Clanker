@@ -12,6 +12,26 @@
  * instead of "what does this shell have?". These tests drive that gate for real
  * (`.agents/setup --verify-node-only`) against fabricated PATHs, so they fail on
  * the pre-fix script, which had no such gate at all.
+ *
+ * #19-F8c — HOW THE FABRICATED PATH IS DELIVERED IS ITSELF LOAD-BEARING.
+ * The first revision of this file handed the fabricated PATH to
+ * `spawnSync(..., { env })`. On macOS that works; on the target Amp orb it does
+ * not: four of these five cases went red there while the gate itself was proven
+ * correct by hand (`bash .agents/setup` → next independent command gets
+ * v24.18.0; a stale PATH → exit 1). The environment a Node child is launched
+ * with is re-hydrated with the orb's installed NVM environment before the
+ * script's first line runs, so the fabrication was gone by the time
+ * `ORIGINAL_PATH="${PATH}"` executed, and setup's internal `env -i` faithfully
+ * propagated the REAL PATH — a real node 24, which is exactly what makes the
+ * "refuses a stale runtime" cases pass and the "reports where node came from"
+ * case report the wrong directory.
+ *
+ * So the environment is no longer handed across the spawn boundary at all: it
+ * is built from ARGV by `/usr/bin/env -i`, which discards everything it
+ * inherits and constructs the child's entire environment from the assignments
+ * it is given. Nothing between this process and setup's first line can put a
+ * node back. That is also a stricter reproduction of an orb's later command
+ * than the old form ever was: setup starts with HOME and PATH and nothing else.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -27,6 +47,16 @@ import { fileURLToPath } from "node:url";
  * against the shipped revision, where it must fail.
  */
 const SETUP = process.env.CLANKER_SETUP_PATH ?? fileURLToPath(new URL("../.agents/setup", import.meta.url));
+
+/** Absolute path to a tool, resolved once, so no fabricated PATH can hide it. */
+function toolPath(tool: string): string {
+  const resolved = spawnSync("/usr/bin/env", ["which", tool], { encoding: "utf8" }).stdout.trim();
+  assert.ok(resolved, `test precondition: '${tool}' must be on PATH`);
+  return resolved;
+}
+
+/** The interpreter the gate is run under. Absolute: the fabricated PATH may hold no bash. */
+const BASH = toolPath("bash");
 
 /** A directory holding a fake `node` that reports `version`. */
 function fakeNodeDir(version: string): string {
@@ -46,20 +76,32 @@ function fakeNodeDir(version: string): string {
  */
 function nodelessToolDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-no-node-"));
+  // Everything the gate reaches for by name once it is running: `env -i`, the
+  // shell it probes with, and `sed`/`cut` for the version comparison.
   for (const tool of ["bash", "env", "sed", "cut"]) {
-    const resolved = spawnSync("/usr/bin/env", ["which", tool], { encoding: "utf8" }).stdout.trim();
-    assert.ok(resolved, `test precondition: '${tool}' must exist to build a node-free PATH`);
-    fs.symlinkSync(resolved, path.join(dir, tool));
+    fs.symlinkSync(toolPath(tool), path.join(dir, tool));
   }
   return dir;
 }
 
-function verifyWithPath(pathValue: string): { status: number | null; stdout: string; stderr: string } {
-  const result = spawnSync("bash", [SETUP, "--verify-node-only"], {
-    env: { HOME: process.env.HOME ?? os.homedir(), PATH: pathValue },
+/**
+ * Runs the gate in an environment assembled from argv rather than inherited.
+ *
+ * `env -i` is the whole point (see the F8c note at the top of this file): it
+ * wipes whatever environment this process was able to hand down — including an
+ * orb's re-hydrated NVM PATH — and hands setup exactly `vars`. The executables
+ * named here are absolute for the same reason.
+ */
+function runGate(vars: Record<string, string>): { status: number | null; stdout: string; stderr: string } {
+  const assignments = Object.entries(vars).map(([name, value]) => `${name}=${value}`);
+  const result = spawnSync("/usr/bin/env", ["-i", ...assignments, BASH, SETUP, "--verify-node-only"], {
     encoding: "utf8",
   });
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+
+function verifyWithPath(pathValue: string): { status: number | null; stdout: string; stderr: string } {
+  return runGate({ HOME: process.env.HOME ?? os.homedir(), PATH: pathValue });
 }
 
 test("#19-F8b: setup refuses when the next command would get a node below the floor", () => {
@@ -92,7 +134,15 @@ test("#19-F8b: setup passes only when a fresh shell on the orb's own PATH resolv
     const r = verifyWithPath(`${fresh}:/usr/bin:/bin`);
     assert.equal(r.status, 0, `gate rejected a compliant runtime: ${r.stderr}`);
     assert.match(r.stdout, /later commands get node v24\.18\.0/);
-    assert.match(r.stdout, new RegExp(`from ${fresh}/node`), "the gate must report where that node resolved from");
+    // Load-bearing beyond "it passed": if a real node on the orb had leaked in
+    // and answered the probe, the status and version above could still be
+    // right while the directory is somebody else's. This is the assertion that
+    // proves the fabricated PATH is the one the gate actually read.
+    assert.match(
+      r.stdout,
+      new RegExp(`from ${fresh.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/node`),
+      "the gate must report where that node resolved from",
+    );
   } finally {
     fs.rmSync(fresh, { recursive: true, force: true });
   }
@@ -106,18 +156,15 @@ test("#19-F8b: the gate reads the ambient PATH, not the PATH setup builds for it
   const stale = fakeNodeDir("20.9.0");
   const good = fakeNodeDir("24.18.0");
   try {
-    const result = spawnSync("bash", [SETUP, "--verify-node-only"], {
-      env: {
-        HOME: process.env.HOME ?? os.homedir(),
-        PATH: `${stale}:/usr/bin:/bin`,
-        // A "helpful" leftover that must not be consulted.
-        NODE_PATH: good,
-        NVM_BIN: good,
-      },
-      encoding: "utf8",
+    const result = runGate({
+      HOME: process.env.HOME ?? os.homedir(),
+      PATH: `${stale}:/usr/bin:/bin`,
+      // "Helpful" leftovers that must not be consulted.
+      NODE_PATH: good,
+      NVM_BIN: good,
     });
     assert.notEqual(result.status, 0, "a node reachable only via this process's env is not what the next command gets");
-    assert.match(result.stderr ?? "", /would get node v20\.9\.0/);
+    assert.match(result.stderr, /would get node v20\.9\.0/);
   } finally {
     fs.rmSync(stale, { recursive: true, force: true });
     fs.rmSync(good, { recursive: true, force: true });
