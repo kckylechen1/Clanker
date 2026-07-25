@@ -28,6 +28,19 @@ Policy stays server-side: a host cannot dispatch itself; Gemini is fixed read-on
 
 Credentials are never parameters. OpenCode's own auth store owns everything OAuth-backed; the one bare API key in play, GLM's `ZHIPUAI_API_KEY`, is materialized from the OS keychain at spawn time by rewriting the spawn command to `tachi vault exec --keychain --require ZHIPUAI_API_KEY -- <original command>`, so it never lives in Clanker's or the ambient shell's environment.
 
+## Run artifacts
+
+Every job owns a directory under `CLANKER_RUNS_ROOT` (default `~/.cache/clanker/runs/<id>`), returned as `run_dir` by `clanker_wait`/`clanker_status` so no caller has to construct the path:
+
+| file | contents |
+|---|---|
+| `events.jsonl` | every raw ACP event, append-only |
+| `chunks.log` | agent thought/message fragments (the reasoning stream never enters a tool response) |
+| `telemetry.json` | the live telemetry projection, rewritten atomically |
+| `result.md` | **the terminal verdict**: status, lane, error (if any) and the untruncated final message |
+
+`result.md` is written exactly once, from the same terminal transition as the dispatch-ledger row. It exists so a verdict can be **handed over as a path** instead of retold: a relay seat reports `result_path` and the dispatcher reads the bytes itself. `clanker_wait` sets `result_path`/`result_bytes` only when the file is really there and non-empty — its absence on a terminal run is a seat's cue to report `CLANKER-NO-RESULT:` rather than compose a summary. Unlike the `final_message` field on the wire (capped at `CLANKER_FINAL_MESSAGE_CHAR_BUDGET`), the file is lossless.
+
 ## Kimi Crew setup
 
 Copy the profile once before using `profile=oc-kimi-crew`:

@@ -86,6 +86,10 @@ export interface LaneStatusView {
   last_event_age_ms: number;
   suspected_stall: boolean;
   cwd: string;
+  /** Absolute run directory (events.jsonl / chunks.log / telemetry.json / result.md). */
+  run_dir: string;
+  /** Absolute path of the terminal-judgment artifact, present only once it exists and is non-empty. */
+  result_path?: string;
   worktree?: string;
   /** Present when status is "error" — same text clanker_wait would surface (advisory-annotated for infra failures). */
   error?: string;

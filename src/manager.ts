@@ -98,8 +98,21 @@ export interface WaitResult {
   plan_summary: string;
   last_event_age_ms: number;
   suspected_stall: boolean;
+  /** Absolute run directory — handed to the caller so a seat never has to construct or guess a path. */
+  run_dir: string;
   warnings?: string[];
   // present when status is terminal
+  /**
+   * Absolute path of the terminal-judgment artifact (`result.md`), present ONLY
+   * when that file exists and is non-empty. Its absence on a terminal run is
+   * the machine-checkable signal a relay seat needs in order to say "I did not
+   * get a verdict" instead of composing one (see plugin/agents/*.md,
+   * `CLANKER-NO-RESULT:`); a seat holding only start+wait tools cannot stat a
+   * file itself, so the server answers that question for it.
+   */
+  result_path?: string;
+  /** Size of `result.md` in bytes; omitted whenever `result_path` is. */
+  result_bytes?: number;
   final_message?: string;
   touched_files?: string[];
   plan_final?: RunFinal["plan_final"];
@@ -639,10 +652,16 @@ export class LaneManager {
       plan_summary: run.planSummary(),
       last_event_age_ms: run.lastEventAgeMs(),
       suspected_stall: run.suspectedStall(this.stallThresholdMs),
+      run_dir: run.runDir,
     };
     const warnings = this.warningsById.get(run.id);
     if (warnings && warnings.length) result.warnings = warnings;
     if (run.isTerminalTurn()) {
+      const resultBytes = run.resultBytes();
+      if (resultBytes > 0) {
+        result.result_path = run.resultPath();
+        result.result_bytes = resultBytes;
+      }
       result.final_message = run.finalMessage();
       result.touched_files = run.finalTouched();
       result.plan_final = run.planState();
@@ -669,6 +688,8 @@ export class LaneManager {
       last_event_age_ms: run.lastEventAgeMs(),
       suspected_stall: run.suspectedStall(this.stallThresholdMs),
       cwd: run.cwd,
+      run_dir: run.runDir,
+      ...(run.resultBytes() > 0 ? { result_path: run.resultPath() } : {}),
       ...(run.worktreePath ? { worktree: run.worktreePath } : {}),
       telemetry: run.telemetry(),
     };
