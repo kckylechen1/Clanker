@@ -27,6 +27,7 @@ import type {
   RunStatus,
   RunTelemetry,
   PromptUsageTelemetry,
+  ContractViolation,
 } from "./types.js";
 import type { ClankerHost } from "./host.js";
 
@@ -104,6 +105,26 @@ export class LaneRun {
    * surfaced in telemetry as `base_sha`.
    */
   readonly baseSha?: string;
+  /**
+   * Full SHA of the commit the worktree was cut from, captured at creation
+   * time regardless of whether the caller named a base. This is the diff base
+   * for `doNotTouch` terminal validation (worktree.ts changedFilesSince).
+   */
+  readonly worktreeBaseSha?: string;
+  /**
+   * Caller-declared paths the worker must not touch, validated server-side at
+   * terminal time (manager.ts computeContractViolations) against the real
+   * worktree diff. Undefined when the dispatcher declared none — in which
+   * case NO validation runs and nothing is reported anywhere.
+   */
+  readonly doNotTouch?: readonly string[];
+  /**
+   * Violations found while the worktree still existed (closeRun runs before
+   * the terminal status flip, and a clean tree may be removed there — so the
+   * result is stored here for buildWaitResult / writeResultFileOnce to read
+   * afterwards). Set at most once, only when doNotTouch was declared.
+   */
+  contractViolations?: ContractViolation[];
   readonly readOnly: boolean;
   readonly runDir: string;
   readonly createdAt = Date.now();
@@ -193,6 +214,10 @@ export class LaneRun {
     targetRepo?: string;
     /** Caller-named, server-verified cut commit (telemetry `base_sha`). */
     baseSha?: string;
+    /** Cut commit captured at creation time (doNotTouch diff base). */
+    worktreeBaseSha?: string;
+    /** Caller-declared forbidden paths for terminal validation. */
+    doNotTouch?: readonly string[];
     requestOpts?: LaneRequestOptions;
     initialPrompt?: string;
     /** Per-profile hard turn ceiling (profiles.ts); undefined falls back to the global default. */
@@ -210,6 +235,8 @@ export class LaneRun {
     this.worktreePath = init.worktreePath;
     this.targetRepo = init.targetRepo;
     this.baseSha = init.baseSha;
+    this.worktreeBaseSha = init.worktreeBaseSha;
+    this.doNotTouch = init.doNotTouch;
     this.requestOpts = init.requestOpts ?? {};
     this.initialPrompt = init.initialPrompt ?? "";
     this.turnTimeoutMs = init.turnTimeoutMs;
@@ -638,6 +665,17 @@ export class LaneRun {
     if (this.error) {
       lines.push("## error", "", this.error, "");
       if (this.failureClass) lines.push(`failure_class: ${this.failureClass}`, "");
+    }
+    // doNotTouch breaches are reported, never silently absorbed — and never a
+    // status flip: the run's outcome stands, the contract violation is listed
+    // alongside it with the concrete offending paths.
+    if (this.contractViolations && this.contractViolations.length > 0) {
+      lines.push("## contract_violations", "");
+      for (const violation of this.contractViolations) {
+        lines.push(`- pattern \`${violation.pattern}\`:`);
+        for (const file of violation.files) lines.push(`  - ${file}`);
+      }
+      lines.push("");
     }
     // Last section, deliberately: a reader (or `tail`) that stops early still
     // ends on the verdict itself rather than on metadata.

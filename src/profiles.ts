@@ -336,7 +336,7 @@ export function allCombinations(): { lane: LaneName; readOnly: boolean }[] {
 /** Free (caller-supplied) parameter names for a profile — exactly what its generated tool exposes. */
 export function freeParams(profile: DispatchProfile): string[] {
   const params = ["prompt", "cwd"];
-  if (profile.isolation !== "forbidden") params.push("worktree", "base");
+  if (profile.isolation !== "forbidden") params.push("worktree", "base", "doNotTouch");
   if (profile.model.kind === "caller-required") params.push("model");
   if (profile.sandbox?.kind === "caller") params.push("sandbox");
   params.push("effort");
@@ -373,6 +373,12 @@ export interface ProfileDispatchInput {
    * rejects the dispatch outright — there is no fallback to the default base.
    */
   base?: string;
+  /**
+   * Paths the worker must not touch (exact file, or directory prefix).
+   * Validated server-side at terminal time against the worktree's real diff
+   * (committed and uncommitted); hits are reported as contract_violations.
+   */
+  doNotTouch?: string[];
   model?: string;
   sandbox?: CodexSandboxMode;
   effort?: string;
@@ -385,6 +391,7 @@ export interface ResolvedProfileDispatch {
   cwd?: string;
   worktree?: string;
   base?: string;
+  doNotTouch?: string[];
   model?: string;
   effort?: string;
   readOnly: boolean;
@@ -417,6 +424,9 @@ export function resolveProfileDispatch(
   // a silently ignored parameter.
   if (profile.isolation === "forbidden" && input.base !== undefined) {
     throw new Error(`profile '${profile.id}' cuts no worktree and therefore takes no base`);
+  }
+  if (profile.isolation === "forbidden" && input.doNotTouch !== undefined) {
+    throw new Error(`profile '${profile.id}' cuts no worktree and therefore takes no doNotTouch`);
   }
   if (profile.isolation === "required" && !input.worktree?.trim()) {
     throw new Error(`profile '${profile.id}' is write-capable and requires a managed worktree branch name`);
@@ -475,6 +485,7 @@ export function resolveProfileDispatch(
     cwd: input.cwd,
     worktree: input.worktree,
     base: input.base,
+    doNotTouch: input.doNotTouch,
     model,
     effort: input.effort,
     readOnly: profile.readOnly,

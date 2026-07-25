@@ -224,6 +224,42 @@ export function assertWorktreeOutsideRepo(worktreePath: string, targetRepo: stri
 }
 
 /**
+ * Every path a worktree run touched relative to the commit it was cut from:
+ * committed changes (`git diff --name-only <base>...HEAD`) UNION uncommitted
+ * ones (`git status --porcelain`). The porcelain half is load-bearing, not
+ * defensive: a worker that edits a forbidden file and never commits is the
+ * same contract breach as one that commits it, and a diff-only check would
+ * call the first one clean.
+ */
+export async function changedFilesSince(worktreePath: string, base: string): Promise<string[]> {
+  const out = await git(worktreePath, ["diff", "--name-only", `${base}...HEAD`]);
+  const committed = out.split("\n").filter((line) => line.trim().length > 0);
+  const uncommitted = await changedFiles(worktreePath);
+  return [...new Set([...committed, ...uncommitted])];
+}
+
+/**
+ * Match touched paths against `doNotTouch` patterns. A pattern matches a file
+ * when the file equals it, or when the file sits under it as a directory
+ * prefix — so "src/" and "src" both match "src/foo.ts", and "src" does NOT
+ * match "src2/foo.ts" (the prefix boundary is a path separator, not a string
+ * prefix, or one directory's contract would swallow its sibling).
+ */
+export function matchDoNotTouch(
+  patterns: readonly string[],
+  files: readonly string[],
+): { pattern: string; files: string[] }[] {
+  const violations: { pattern: string; files: string[] }[] = [];
+  for (const pattern of patterns) {
+    const dir = pattern.replace(/\/+$/, "");
+    if (!dir) continue;
+    const matched = files.filter((file) => file === dir || file.startsWith(dir + "/"));
+    if (matched.length > 0) violations.push({ pattern, files: matched });
+  }
+  return violations;
+}
+
+/**
  * Remove a worktree if it has no changes. Returns true if removed, false if it
  * was retained because of local changes.
  */

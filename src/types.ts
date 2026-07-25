@@ -147,9 +147,19 @@ export interface PromptUsageTelemetry {
   cachedWriteTokens?: number | null;
 }
 
+/**
+ * One `doNotTouch` pattern that a finished run violated, with the concrete
+ * file paths that matched it. Surfaced on the terminal wait payload as
+ * `contract_violations` and written into `result.md`; never flips the run's
+ * status — the violation is reported, not re-adjudicated.
+ */
+export interface ContractViolation {
+  pattern: string;
+  files: string[];
+}
+
 /** Result payload attached once a run reaches a terminal state. */
-export interface RunFinal {
-  final_message: string;
+export interface RunFinal {  final_message: string;
   touched_files: string[];
   plan_final: PlanState;
   /** Present when the run terminated abnormally. */

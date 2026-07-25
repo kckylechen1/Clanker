@@ -180,3 +180,131 @@ test("base: supplied without a worktree is refused, not silently ignored", async
     await m.shutdown();
   }
 });
+
+// ---- Feature 2: doNotTouch terminal validation ----------------------------
+
+test("doNotTouch: an UNCOMMITTED edit under a forbidden directory prefix is caught and reported, status untouched", async () => {
+  const repo = makeTwoCommitRepo();
+  const m = makeManager(repo.base);
+  const branch = `clanker/dnt-uncommitted-${Date.now()}`;
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "opencode",
+      model: "kimi",
+      prompt: "WRITEFILE src/forbidden.ts",
+      readOnly: false,
+      worktree: branch,
+      cwd: repo.base,
+      doNotTouch: ["src/"],
+    });
+    const r = await waitTerminal(m, id);
+    assert.equal(r.status, "done", "a violation never flips the run's status");
+    assert.deepEqual(r.contract_violations, [{ pattern: "src/", files: ["src/forbidden.ts"] }]);
+    const result = fs.readFileSync(r.result_path!, "utf8");
+    assert.match(result, /## contract_violations/);
+    assert.ok(result.includes("src/forbidden.ts"), "result.md lists the concrete offending path");
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("doNotTouch: a COMMITTED edit to a forbidden path is caught the same way", async () => {
+  const repo = makeTwoCommitRepo();
+  const m = makeManager(repo.base);
+  const branch = `clanker/dnt-committed-${Date.now()}`;
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "opencode",
+      model: "kimi",
+      prompt: "COMMITFILE src/committed.ts",
+      readOnly: false,
+      worktree: branch,
+      cwd: repo.base,
+      doNotTouch: ["src"],
+    });
+    const r = await waitTerminal(m, id);
+    assert.equal(r.status, "done");
+    assert.deepEqual(r.contract_violations, [{ pattern: "src", files: ["src/committed.ts"] }]);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("doNotTouch: a clean run under a declared contract reports NO violations field", async () => {
+  const repo = makeTwoCommitRepo();
+  const m = makeManager(repo.base);
+  const branch = `clanker/dnt-clean-${Date.now()}`;
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "opencode",
+      model: "kimi",
+      prompt: "WRITEFILE allowed/note.md",
+      readOnly: false,
+      worktree: branch,
+      cwd: repo.base,
+      doNotTouch: ["src/"],
+    });
+    const r = await waitTerminal(m, id);
+    assert.equal(r.status, "done");
+    assert.equal(r.contract_violations, undefined);
+    const result = fs.readFileSync(r.result_path!, "utf8");
+    assert.equal(result.includes("contract_violations"), false, "no violations section in result.md");
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("doNotTouch: omitted means zero behavior change even when files are written", async () => {
+  const repo = makeTwoCommitRepo();
+  const m = makeManager(repo.base);
+  const branch = `clanker/dnt-omitted-${Date.now()}`;
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "opencode",
+      model: "kimi",
+      prompt: "WRITEFILE src/anything.ts",
+      readOnly: false,
+      worktree: branch,
+      cwd: repo.base,
+    });
+    const r = await waitTerminal(m, id);
+    assert.equal(r.status, "done");
+    assert.equal(r.contract_violations, undefined);
+    const result = fs.readFileSync(r.result_path!, "utf8");
+    assert.equal(result.includes("contract_violations"), false);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("doNotTouch: matching is exact-or-directory-prefix, never a bare string prefix", async () => {
+  const { matchDoNotTouch } = await import("../src/worktree.js");
+  assert.deepEqual(matchDoNotTouch(["src/"], ["src/foo.ts"]), [{ pattern: "src/", files: ["src/foo.ts"] }]);
+  assert.deepEqual(matchDoNotTouch(["src"], ["src/foo.ts"]), [{ pattern: "src", files: ["src/foo.ts"] }]);
+  assert.deepEqual(matchDoNotTouch(["src"], ["src2/foo.ts"]), [], "'src' must not swallow the sibling 'src2'");
+  assert.deepEqual(matchDoNotTouch(["a/b.ts"], ["a/b.ts"]), [{ pattern: "a/b.ts", files: ["a/b.ts"] }]);
+  // Per the contract, EVERY pattern is also a directory prefix: "a/b.ts"
+  // matches "a/b.ts/x" the same way "src" matches "src/foo.ts".
+  assert.deepEqual(matchDoNotTouch(["a/b.ts"], ["a/b.ts/x"]), [{ pattern: "a/b.ts", files: ["a/b.ts/x"] }]);
+  assert.deepEqual(matchDoNotTouch([], ["src/foo.ts"]), []);
+});
+
+test("doNotTouch: supplied without a worktree is refused, not silently unchecked", async () => {
+  const repo = makeTwoCommitRepo();
+  const m = makeManager(repo.base);
+  try {
+    await assert.rejects(
+      () =>
+        m.dispatchStart({
+          lane: "codex",
+          prompt: "in place read",
+          readOnly: true,
+          cwd: repo.base,
+          doNotTouch: ["src/"],
+        }),
+      /doNotTouch was supplied without a worktree/,
+    );
+  } finally {
+    await m.shutdown();
+  }
+});

@@ -41,9 +41,12 @@ import { hostLaneBlockedReason, type ClankerHost } from "./host.js";
 import {
   assertWorktreeOutsideRepo,
   changedFiles,
+  changedFilesSince,
   createWorktree,
   deriveWorktreePath,
+  headSha,
   isGitWorkTree,
+  matchDoNotTouch,
   removeIfClean,
   resolveBaseCommit,
   resolveTargetRepo,
@@ -76,6 +79,14 @@ export interface DispatchParams extends Omit<LaneRequestOptions, "secrets"> {
    * ignoring a caller's cut point is worse than refusing it.
    */
   base?: string;
+  /**
+   * Paths the worker must not touch, validated server-side at terminal time
+   * against the worktree's real diff (committed and uncommitted). Hits are
+   * reported as `contract_violations`; the run's status is never flipped.
+   * Requires a worktree (the validation diffs it against its cut base), so it
+   * is refused without one rather than silently never checked.
+   */
+  doNotTouch?: string[];
 }
 
 /**
@@ -246,6 +257,13 @@ export interface WaitResult {
   result_bytes?: number;
   final_message?: string;
   touched_files?: string[];
+  /**
+   * doNotTouch breaches found at terminal time (pattern + concrete matched
+   * paths). Present only when the dispatch declared doNotTouch AND at least
+   * one pattern was hit; a clean run under a declared contract gets no field,
+   * and a dispatch without doNotTouch behaves exactly as before.
+   */
+  contract_violations?: import("./types.js").ContractViolation[];
   plan_final?: RunFinal["plan_final"];
   worktree_retained?: string;
   error?: string;
@@ -388,6 +406,7 @@ export class LaneManager {
         cwd: resolved.cwd,
         worktree: resolved.worktree,
         base: resolved.base,
+        doNotTouch: resolved.doNotTouch,
         model: resolved.model,
         effort: resolved.effort,
         readOnly: resolved.readOnly,
@@ -443,6 +462,12 @@ export class LaneManager {
           `worktree is cut from, so pass 'worktree' as well or omit 'base'`,
       );
     }
+    if (params.doNotTouch !== undefined && !params.worktree) {
+      throw new Error(
+        `doNotTouch was supplied without a worktree; the validation diffs a worktree against the commit it ` +
+          `was cut from, so pass 'worktree' as well or omit 'doNotTouch'`,
+      );
+    }
     let baseSha: string | undefined;
     if (params.base !== undefined) {
       baseSha = await resolveBaseCommit(targetRepo, params.base);
@@ -483,6 +508,7 @@ export class LaneManager {
 
     let cwd = params.cwd ?? this.baseRepo;
     let worktreePath: string | undefined;
+    let worktreeBaseSha: string | undefined;
     let spec: SpawnSpec;
     try {
       // Fail-closed lane-specific gates (opencode requires an explicit model,
@@ -499,6 +525,10 @@ export class LaneManager {
         assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree), targetRepo);
         worktreePath = await createWorktree(params.worktree, targetRepo, baseSha);
         cwd = worktreePath;
+        // The diff base for doNotTouch terminal validation: the exact commit the
+        // tree was cut from, captured NOW (before the worker's first commit can
+        // move HEAD) whether or not the caller named a base.
+        worktreeBaseSha = baseSha ?? (await headSha(worktreePath));
       }
     } catch (e) {
       // Leave a readable failure record instead of a silent gap: foreign.ts's
@@ -525,6 +555,8 @@ export class LaneManager {
       worktreePath,
       targetRepo: worktreePath ? targetRepo : undefined,
       baseSha,
+      worktreeBaseSha,
+      doNotTouch: params.doNotTouch,
       requestOpts,
       initialPrompt: params.prompt,
       turnTimeoutMs: minted.turnTimeoutMs,
@@ -954,6 +986,9 @@ export class LaneManager {
       }
       result.final_message = run.finalMessage();
       result.touched_files = run.finalTouched();
+      if (run.contractViolations && run.contractViolations.length > 0) {
+        result.contract_violations = run.contractViolations;
+      }
       result.plan_final = run.planState();
       if (run.error) result.error = annotatedError(run.error, run.failureClass);
       if (run.failureClass) result.failure_class = run.failureClass;
@@ -1113,6 +1148,30 @@ export class LaneManager {
     run.setFinalTouched(dedupe([...gitTouched, ...run.toolTouchedFiles()]));
   }
 
+  /**
+   * Terminal doNotTouch validation: diff the run's worktree against the commit
+   * it was cut from (committed AND uncommitted changes — an uncommitted edit
+   * to a forbidden path is the same breach as a committed one) and match the
+   * touched paths against the caller's patterns. Stored on the run; the wait
+   * payload and result.md read it from there. Fail-silent like every other
+   * diagnostics path: a validation error must never break terminal teardown,
+   * and the run's status is never flipped by a finding.
+   */
+  private async computeContractViolations(run: LaneRun): Promise<void> {
+    if (!run.doNotTouch || run.doNotTouch.length === 0) return;
+    if (run.contractViolations !== undefined) return;
+    if (!run.worktreePath || !run.worktreeBaseSha) return;
+    if (!fs.existsSync(run.worktreePath)) return;
+    try {
+      const touched = await changedFilesSince(run.worktreePath, run.worktreeBaseSha);
+      run.contractViolations = matchDoNotTouch(run.doNotTouch, touched);
+    } catch (err) {
+      console.error(
+        `[clanker] doNotTouch validation failed for '${run.id}': ${errMessage(err)}`,
+      );
+    }
+  }
+
   /** Close a session: dispose ACP session, kill subprocess, clean worktree. */
   async close(id: string): Promise<void> {
     const existing = this.closing.get(id);
@@ -1144,6 +1203,13 @@ export class LaneManager {
       }
     }
     if (run.worktreePath && run.worktreeBranch) {
+      // doNotTouch validation MUST run here, before removeIfClean can delete a
+      // clean worktree: closeRun is the last point where the tree is
+      // guaranteed to still exist on disk, and the terminal status flip
+      // (completeTurn/failTurn/cancelTurn → result.md, wait payload) happens
+      // strictly after close() returns. The verdict is stored on the run for
+      // those readers.
+      await this.computeContractViolations(run);
       if (!processStopped) {
         run.worktreeRetained = run.worktreePath;
       } else {
