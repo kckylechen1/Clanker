@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Amp orb setup — runs once on a fresh orb (see ampcode.com/manual/orbs).
+# Provisions the toolchain the Clanker cloud build/test/review seat needs.
+# Keep it fast and idempotent.
+#
+# Clanker is a pure Node/TypeScript project: everything it builds and tests
+# comes from package-lock.json. The only system-level requirement is a Node
+# runtime new enough for package.json's `engines.node: ">=20"`; the test
+# runner additionally needs node's built-in `--test` with `--import tsx/esm`,
+# which is stable from Node 20 on.
+set -euo pipefail
+
+export PATH="${HOME}/.local/bin:${HOME}/.nvm/versions/node/current/bin:${PATH}"
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
+
+# ---------------------------------------------------------------------------
+# Node >= 20 — install only when the base image ships nothing usable
+# ---------------------------------------------------------------------------
+need_node=1
+if command -v node >/dev/null 2>&1; then
+  major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  if [ "${major}" -ge 20 ] 2>/dev/null; then
+    need_node=0
+  else
+    echo "setup: node $(node -v) is older than the required >=20; installing a newer one" >&2
+  fi
+fi
+
+if [ "${need_node}" -eq 1 ]; then
+  export NVM_DIR="${HOME}/.nvm"
+  if [ ! -s "${NVM_DIR}/nvm.sh" ]; then
+    curl -sSfL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+  fi
+  # shellcheck disable=SC1091
+  . "${NVM_DIR}/nvm.sh"
+  nvm install --lts
+  nvm alias default 'lts/*'
+  # Make it visible to later non-login shells too, idempotently.
+  for rc in "${HOME}/.profile" "${HOME}/.bashrc"; do
+    grep -qs 'NVM_DIR' "${rc}" 2>/dev/null || {
+      printf 'export NVM_DIR="$HOME/.nvm"\n[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"\n' >>"${rc}"
+    }
+  done
+fi
+
+command -v node >/dev/null 2>&1 || { echo "setup: node still unavailable after install" >&2; exit 1; }
+echo "setup: node $(node -v), npm $(npm -v)"
+
+# ---------------------------------------------------------------------------
+# Dependencies — `npm ci` is the reproducible install and is idempotent enough
+# (it wipes and recreates node_modules from the lockfile). Skip when the tree
+# already matches the lockfile so a warm orb is close to a no-op.
+# ---------------------------------------------------------------------------
+stamp=".agents/.setup-npm-ci-stamp"
+lock_hash="$( (shasum -a 256 package-lock.json 2>/dev/null || sha256sum package-lock.json) | awk '{print $1}')"
+if [ -d node_modules ] && [ -f "${stamp}" ] && [ "$(cat "${stamp}")" = "${lock_hash}" ]; then
+  echo "setup: node_modules already matches package-lock.json; skipping npm ci"
+else
+  npm ci
+  printf '%s' "${lock_hash}" >"${stamp}"
+fi
+
+# ---------------------------------------------------------------------------
+# Fail loudly here rather than mid-mission: a broken toolchain must not look
+# like a failing test. (Constitution: a safety refusal must be loud.)
+# ---------------------------------------------------------------------------
+npm run typecheck
+
+echo "setup: ready — 'npm test', 'npm run build', 'npm run typecheck' are available"

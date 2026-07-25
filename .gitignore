@@ -17,3 +17,6 @@ codex-plugin/dist/*
 *.log
 *.db-shm
 *.db-wal
+
+# Amp orb setup idempotence stamp (local only)
+.agents/.setup-npm-ci-stamp
