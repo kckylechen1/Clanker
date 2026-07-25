@@ -24,8 +24,32 @@ import { isGlmModel, TURN_TIMEOUT_MS } from "./constants.js";
 import type { CodexSandboxMode, LaneName } from "./types.js";
 import { LANE_NAMES } from "./types.js";
 
-/** Whether a managed worktree is forbidden (strict read) or mandatory (write). */
-export type ProfileIsolation = "forbidden" | "required";
+/**
+ * Managed-worktree policy.
+ *  - `required`  — write-capable; the manager refuses to start without one.
+ *  - `optional`  — read-only, but the caller MAY ask for one. 0.2.5's read-only
+ *                  schema kept `worktree` optional (26e9c9f src/tools.ts:21-29,
+ *                  :129) and the manager really cut the tree (:223-227). It is a
+ *                  live workflow, not a leftover: backends.ts documents the
+ *                  review seat that must run `cargo test`/`go test`, which needs
+ *                  a tree it can write build caches into.
+ *  - `forbidden` — the lane itself rejects a worktree (today only gemini).
+ */
+export type ProfileIsolation = "forbidden" | "optional" | "required";
+
+/**
+ * codex-native sandbox strictness policy.
+ *  - `welded`  — fixed by the profile; not a parameter.
+ *  - `caller`  — caller-selectable across all three tiers, defaulting to
+ *                `defaultMode`. 0.2.5's write schema omitted only `read_only`
+ *                and kept the full three-way sandbox choice (26e9c9f
+ *                src/tools.ts:40-49, :131-138); welding it deleted two of the
+ *                three shapes.
+ *  - absent    — the lane has no native sandbox tier (it would only warn).
+ */
+export type ProfileSandboxPolicy =
+  | { readonly kind: "welded"; readonly mode: CodexSandboxMode }
+  | { readonly kind: "caller"; readonly defaultMode: CodexSandboxMode };
 
 /** `sonnet` marks the supervised-GLM shape: the seat holding it is a Sonnet supervisor with correction/cancel rights. */
 export type ProfileSupervision = "none" | "sonnet";
@@ -55,8 +79,8 @@ export interface DispatchProfile {
   readonly model: ProfileModelPolicy;
   /** Welded Clanker-level write gate. */
   readonly readOnly: boolean;
-  /** Welded codex-native sandbox strictness; only set on the codex lane (other lanes warn on it). */
-  readonly sandbox?: CodexSandboxMode;
+  /** codex-native sandbox strictness; only set on the codex lane (other lanes only warn on it). */
+  readonly sandbox?: ProfileSandboxPolicy;
   readonly isolation: ProfileIsolation;
   /** Vault-sourced env vars this profile needs; non-empty routes the spawn through `tachi vault exec`. */
   readonly secrets: readonly string[];
@@ -88,12 +112,13 @@ export const DISPATCH_PROFILES: readonly DispatchProfile[] = [
       "Read-only Codex review. lane, read_only=true and sandbox=read-only are welded server-side: " +
       "the sandbox is welded because a Codex dispatch with read_only=true but a write-capable native " +
       "sandbox can still write the workspace, so leaving sandbox callable would be a way around the " +
-      "read-only gate. Runs in place; no worktree.",
+      "read-only gate. Runs in place by default; an optional worktree branch runs the review inside an " +
+      "isolated tree instead.",
     lane: "codex",
     model: { kind: "lane-default" },
     readOnly: true,
-    sandbox: "read-only",
-    isolation: "forbidden",
+    sandbox: { kind: "welded", mode: "read-only" },
+    isolation: "optional",
     secrets: [],
     turnTimeoutMs: TURN_TIMEOUT_MS,
     supervision: "none",
@@ -104,13 +129,14 @@ export const DISPATCH_PROFILES: readonly DispatchProfile[] = [
     id: "codex-write",
     title: "Codex implementation (isolated worktree)",
     description:
-      "Write-capable Codex worker. read_only=false and sandbox=workspace-write are welded and a " +
-      "managed worktree branch is mandatory, so writes are boxed to the worktree. Model omitted on " +
-      "purpose: Codex runs its configured default.",
+      "Write-capable Codex worker. read_only=false is welded and a managed worktree branch is " +
+      "mandatory, so writes are boxed to the worktree. Sandbox strictness stays caller-selectable " +
+      "across all three Codex tiers and defaults to workspace-write. Model omitted on purpose: Codex " +
+      "runs its configured default.",
     lane: "codex",
     model: { kind: "lane-default" },
     readOnly: false,
-    sandbox: "workspace-write",
+    sandbox: { kind: "caller", defaultMode: "workspace-write" },
     isolation: "required",
     secrets: [],
     turnTimeoutMs: TURN_TIMEOUT_MS,
@@ -123,12 +149,13 @@ export const DISPATCH_PROFILES: readonly DispatchProfile[] = [
     title: "OpenCode cold review (read-only, in place)",
     description:
       "Read-only OpenCode review on the fixed clanker-worker permission profile. read_only=true is " +
-      "welded; no worktree. An explicit model is required: omitting it lets OpenCode's own interactive " +
-      "config pick the provider (possibly GLM) outside the vault-exec credential wrap.",
+      "welded; an optional worktree branch runs the review inside an isolated tree. An explicit model " +
+      "is required: omitting it lets OpenCode's own interactive config pick the provider (possibly GLM) " +
+      "outside the vault-exec credential wrap.",
     lane: "opencode",
     model: { kind: "caller-required" },
     readOnly: true,
-    isolation: "forbidden",
+    isolation: "optional",
     secrets: [],
     turnTimeoutMs: TURN_TIMEOUT_MS,
     supervision: "none",
@@ -196,7 +223,9 @@ export const DISPATCH_PROFILES: readonly DispatchProfile[] = [
     title: "Gemini reconnaissance (read-only, in place)",
     description:
       "Read-only Gemini survey. The lane is reconnaissance-only server-side and rejects both write mode " +
-      "and worktrees; the model defaults to the sidecar's configured Gemini model.",
+      "and worktrees (the only profile whose isolation is forbidden rather than optional — it is the " +
+      "lane's own rule, not a registry preference); the model defaults to the sidecar's configured " +
+      "Gemini model.",
     lane: "gemini",
     model: { kind: "lane-default" },
     readOnly: true,
@@ -211,12 +240,14 @@ export const DISPATCH_PROFILES: readonly DispatchProfile[] = [
     id: "grok-review",
     title: "Grok cold review (read-only, in place)",
     description:
-      "Read-only Grok review with Clanker's own native containment flags. read_only=true is welded; no " +
-      "worktree. Currently dormant: the account returns HTTP 402 (out of credit).",
+      "Read-only Grok review with Clanker's own native containment flags. read_only=true is welded; an " +
+      "optional worktree branch runs the review inside an isolated tree. Model may be omitted — the " +
+      "grok lane has its own configured default. Currently dormant: the account returns HTTP 402 (out " +
+      "of credit).",
     lane: "grok",
-    model: { kind: "caller-required" },
+    model: { kind: "lane-default" },
     readOnly: true,
-    isolation: "forbidden",
+    isolation: "optional",
     secrets: [],
     turnTimeoutMs: TURN_TIMEOUT_MS,
     supervision: "none",
@@ -256,8 +287,13 @@ export function getProfile(id: string): DispatchProfile {
 
 /**
  * lane × write-mode combinations that intentionally have no profile, with the
- * server-side reason. Anything NOT listed here must have a profile, or the
- * registry silently dropped a live dispatch shape during a migration.
+ * server-side reason.
+ *
+ * This list is DOCUMENTATION, not evidence. The coverage test must not subtract
+ * it from the combination space and then assert that the remainder has no
+ * profile — that only proves the list agrees with itself. Every combination
+ * without a profile has to be proven unreachable by actually calling the
+ * manager/backend and being refused (see test/profiles.test.ts #19-3).
  */
 export const UNREACHABLE_COMBINATIONS: readonly { lane: LaneName; readOnly: boolean; reason: string }[] = [
   {
@@ -267,14 +303,14 @@ export const UNREACHABLE_COMBINATIONS: readonly { lane: LaneName; readOnly: bool
   },
 ];
 
-/** Every lane × write-mode combination that is reachable and therefore needs a profile. */
-export function requiredCombinations(): { lane: LaneName; readOnly: boolean }[] {
+/**
+ * The whole lane × write-mode space, with nothing subtracted. Callers decide
+ * what a missing profile means — and must prove it against the real server.
+ */
+export function allCombinations(): { lane: LaneName; readOnly: boolean }[] {
   const combos: { lane: LaneName; readOnly: boolean }[] = [];
   for (const lane of LANE_NAMES) {
-    for (const readOnly of [true, false]) {
-      if (UNREACHABLE_COMBINATIONS.some((c) => c.lane === lane && c.readOnly === readOnly)) continue;
-      combos.push({ lane, readOnly });
-    }
+    for (const readOnly of [true, false]) combos.push({ lane, readOnly });
   }
   return combos;
 }
@@ -282,8 +318,9 @@ export function requiredCombinations(): { lane: LaneName; readOnly: boolean }[] 
 /** Free (caller-supplied) parameter names for a profile — exactly what its generated tool exposes. */
 export function freeParams(profile: DispatchProfile): string[] {
   const params = ["prompt", "cwd"];
-  if (profile.isolation === "required") params.push("worktree");
+  if (profile.isolation !== "forbidden") params.push("worktree");
   if (profile.model.kind === "caller-required") params.push("model");
+  if (profile.sandbox?.kind === "caller") params.push("sandbox");
   params.push("effort");
   return params;
 }
@@ -301,16 +338,22 @@ export function profileTurnTimeoutMs(
   return Number.isFinite(n) && n > 0 ? n : profile.turnTimeoutMs;
 }
 
+/**
+ * The ONLY thing a caller supplies: a profile id plus that profile's free
+ * parameters. There is deliberately no `lane`, `read_only`, `supervision` or
+ * `secrets` here — those are minted from the registry row, never received.
+ */
 export interface ProfileDispatchInput {
   profile: string;
   prompt: string;
   cwd?: string;
   worktree?: string;
   model?: string;
+  sandbox?: CodexSandboxMode;
   effort?: string;
 }
 
-/** What a resolved profile hands to LaneManager.dispatchStart. */
+/** What a resolved profile hands to LaneManager's private dispatch path. */
 export interface ResolvedProfileDispatch {
   lane: LaneName;
   prompt: string;
@@ -344,6 +387,22 @@ export function resolveProfileDispatch(
   }
   if (profile.isolation === "required" && !input.worktree?.trim()) {
     throw new Error(`profile '${profile.id}' is write-capable and requires a managed worktree branch name`);
+  }
+
+  // Sandbox: welded profiles take no argument at all; caller-selectable ones
+  // keep 0.2.5's full three-way choice and fall back to the declared default.
+  let sandbox: CodexSandboxMode | undefined;
+  if (profile.sandbox === undefined) {
+    if (input.sandbox !== undefined) {
+      throw new Error(`profile '${profile.id}' runs on a lane with no native sandbox tier; it takes no sandbox argument`);
+    }
+  } else if (profile.sandbox.kind === "welded") {
+    if (input.sandbox !== undefined && input.sandbox !== profile.sandbox.mode) {
+      throw new Error(`profile '${profile.id}' welds sandbox='${profile.sandbox.mode}'; it cannot be overridden`);
+    }
+    sandbox = profile.sandbox.mode;
+  } else {
+    sandbox = input.sandbox ?? profile.sandbox.defaultMode;
   }
 
   let model: string | undefined;
@@ -385,7 +444,7 @@ export function resolveProfileDispatch(
     model,
     effort: input.effort,
     readOnly: profile.readOnly,
-    sandbox: profile.sandbox,
+    sandbox,
     profile: profile.ocProfile,
     secrets: profile.secrets,
     supervision: profile.supervision,

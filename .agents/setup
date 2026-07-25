@@ -4,10 +4,19 @@
 # Keep it fast and idempotent.
 #
 # Clanker is a pure Node/TypeScript project: everything it builds and tests
-# comes from package-lock.json. The only system-level requirement is a Node
-# runtime new enough for package.json's `engines.node: ">=20"`; the test
-# runner additionally needs node's built-in `--test` with `--import tsx/esm`,
-# which is stable from Node 20 on.
+# comes from package-lock.json. The only system-level requirement is Node, but
+# the floor is **24**, not package.json's nominal `engines.node: ">=20"`:
+#
+#   * TypeScript 7 ships an extensionless `node_modules/.bin/tsc` entry that
+#     Node 20.9 refuses to load (ERR_UNKNOWN_FILE_EXTENSION), so `npm run
+#     typecheck`/`build` die on a stock orb image even though 20.9 passes a
+#     `major >= 20` check;
+#   * `npm test` under Node 20.9 and 22 cancels 21 cases from the
+#     capacity-retry suite onward. Only Node 24 finishes with zero cancelled.
+#
+# Measured on a clean Amp orb, 2026-07-25. A gate that admits a runtime which
+# then silently cancels a sixth of the suite is worse than no gate: it reports
+# a broken toolchain as passing tests.
 set -euo pipefail
 
 export PATH="${HOME}/.local/bin:${HOME}/.nvm/versions/node/current/bin:${PATH}"
@@ -16,15 +25,18 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
 # ---------------------------------------------------------------------------
-# Node >= 20 — install only when the base image ships nothing usable
+# Node >= 24 — install only when the base image ships nothing usable
 # ---------------------------------------------------------------------------
+REQUIRED_NODE_MAJOR=24
+
+node_major() { node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }
+
 need_node=1
 if command -v node >/dev/null 2>&1; then
-  major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-  if [ "${major}" -ge 20 ] 2>/dev/null; then
+  if [ "$(node_major)" -ge "${REQUIRED_NODE_MAJOR}" ] 2>/dev/null; then
     need_node=0
   else
-    echo "setup: node $(node -v) is older than the required >=20; installing a newer one" >&2
+    echo "setup: node $(node -v) is older than the required >=${REQUIRED_NODE_MAJOR}; installing a newer one" >&2
   fi
 fi
 
@@ -35,8 +47,9 @@ if [ "${need_node}" -eq 1 ]; then
   fi
   # shellcheck disable=SC1091
   . "${NVM_DIR}/nvm.sh"
-  nvm install --lts
-  nvm alias default 'lts/*'
+  nvm install "${REQUIRED_NODE_MAJOR}"
+  nvm alias default "${REQUIRED_NODE_MAJOR}"
+  nvm use "${REQUIRED_NODE_MAJOR}"
   # Make it visible to later non-login shells too, idempotently.
   for rc in "${HOME}/.profile" "${HOME}/.bashrc"; do
     grep -qs 'NVM_DIR' "${rc}" 2>/dev/null || {
@@ -46,6 +59,13 @@ if [ "${need_node}" -eq 1 ]; then
 fi
 
 command -v node >/dev/null 2>&1 || { echo "setup: node still unavailable after install" >&2; exit 1; }
+
+# Fail loudly rather than proceed on a runtime that cancels tests.
+if [ "$(node_major)" -lt "${REQUIRED_NODE_MAJOR}" ] 2>/dev/null; then
+  echo "setup: node $(node -v) is still below the required >=${REQUIRED_NODE_MAJOR}; refusing to continue" >&2
+  echo "setup: on this runtime 'npm run typecheck' cannot load TypeScript 7's tsc and 'npm test' cancels 21 cases" >&2
+  exit 1
+fi
 echo "setup: node $(node -v), npm $(npm -v)"
 
 # ---------------------------------------------------------------------------

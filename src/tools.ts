@@ -1,14 +1,22 @@
 /**
  * Public MCP surface.
  *
- * Two entrances, one policy source:
- *  - `clanker_start(profile, ...)` — the generic entrance kept for the leader
- *    that actually chooses which profile a job belongs to.
- *  - `clanker_start_<profile-id>` — one narrow tool generated per registry row.
- *    Its input schema contains ONLY that profile's free parameters; `lane`,
- *    `read_only`, `sandbox` and every welded `model` are absent from the schema
- *    rather than overwritten in the handler, so a seat that holds one of these
- *    tools has no way to ask for a capability the profile does not grant.
+ * The ONLY dispatch entrance is `clanker_start_<profile-id>`: one narrow tool
+ * generated per registry row, whose input schema contains ONLY that profile's
+ * free parameters. Every welded dimension is absent from the schema rather
+ * than overwritten in the handler, so a seat that holds one of these tools has
+ * no way to ask for a capability the profile does not grant.
+ *
+ * There is deliberately NO generic `clanker_start(profile, ...)`. It existed
+ * in the first #19 revision "for the leader", and cold review showed that one
+ * exception voids the whole property: on host=codex — where the supervised-GLM
+ * seat is not supposed to exist at all — the generic entrance still started
+ * `oc-glm-write` and returned a live opencode/glm/write job. A universal
+ * entrance that can reach every profile makes the narrow tools decoration.
+ *
+ * Host filtering therefore has to be complete rather than cosmetic: a profile
+ * whose lane the host cannot drive, and any supervised profile on host=codex,
+ * is never registered, so no tool on the surface can reach it.
  *
  * All routing and safety policy is still enforced by LaneManager; the registry
  * narrows the entrance, it does not re-implement the gates.
@@ -18,13 +26,8 @@ import { z } from "zod";
 import { DEFAULT_WAIT_MS, MAX_WAIT_MS, PROGRESS_EXPERIMENTAL } from "./constants.js";
 import { hostLaneBlockedReason } from "./host.js";
 import type { LaneManager, WaitResult } from "./manager.js";
-import {
-  DISPATCH_PROFILES,
-  PROFILE_IDS,
-  resolveProfileDispatch,
-  type DispatchProfile,
-} from "./profiles.js";
-import { LANE_NAMES } from "./types.js";
+import { DISPATCH_PROFILES, type DispatchProfile } from "./profiles.js";
+import { LANE_NAMES, type CodexSandboxMode } from "./types.js";
 
 export const laneEnum = z.enum(LANE_NAMES);
 
@@ -37,34 +40,33 @@ const effortField = z
   .optional()
   .describe("Reasoning effort override (codex/gemini/grok only; warned and ignored elsewhere)");
 
-const startShape = {
-  profile: z
-    .enum(PROFILE_IDS)
-    .describe(`Dispatch profile — the whole capability combination: ${PROFILE_IDS.join(" | ")}`),
-  prompt: promptField,
-  cwd: cwdField,
-  worktree: z
-    .string()
-    .trim()
-    .min(1)
-    .optional()
-    .describe("Managed worktree branch name — required by write profiles, rejected by read-only ones"),
-  model: z
-    .string()
-    .trim()
-    .min(1)
-    .optional()
-    .describe("Only for profiles whose model is caller-required; rejected when the profile welds a model or takes the lane default"),
-  effort: effortField,
-} as const;
+const sandboxEnum = z.enum(["read-only", "workspace-write", "danger-full-access"]);
 
 function narrowShape(profile: DispatchProfile): Record<string, z.ZodTypeAny> {
   const shape: Record<string, z.ZodTypeAny> = { prompt: promptField, cwd: cwdField };
   if (profile.isolation === "required") {
     shape.worktree = z.string().trim().min(1).describe("Required branch name for the server-created isolated worktree");
+  } else if (profile.isolation === "optional") {
+    shape.worktree = z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        "Optional branch name. Omit to review the working checkout in place; supply one to run the read inside an " +
+          "isolated worktree — the recipe for a review that must actually run build/test tooling.",
+      );
   }
   if (profile.model.kind === "caller-required") {
     shape.model = z.string().trim().min(1).describe("Required explicit model id or supported alias for this lane");
+  }
+  if (profile.sandbox?.kind === "caller") {
+    shape.sandbox = sandboxEnum
+      .optional()
+      .describe(
+        `Codex-native sandbox strictness (default ${profile.sandbox.defaultMode}). "read-only" blocks all writes, ` +
+          `"workspace-write" boxes them to the session cwd + tmp, "danger-full-access" removes the sandbox.`,
+      );
   }
   shape.effort = effortField;
   return shape;
@@ -108,13 +110,22 @@ function describe(profile: DispatchProfile): string {
   const welded = [
     `lane=${profile.lane}`,
     `read_only=${profile.readOnly}`,
-    profile.sandbox ? `sandbox=${profile.sandbox}` : undefined,
+    profile.sandbox?.kind === "welded" ? `sandbox=${profile.sandbox.mode}` : undefined,
     profile.model.kind === "welded" ? `model=${profile.model.id}` : undefined,
     profile.ocProfile ? `opencode-profile=${profile.ocProfile}` : undefined,
   ].filter(Boolean).join(", ");
+  const isolation =
+    profile.isolation === "required"
+      ? "a managed worktree is mandatory"
+      : profile.isolation === "optional"
+        ? "runs in place, or inside a managed worktree when you name one"
+        : "worktrees are rejected by this lane";
   return [
     profile.description,
-    `Server-welded: ${welded}. Isolation: ${profile.isolation}.`,
+    `Server-welded: ${welded}. Isolation: ${profile.isolation} — ${isolation}.`,
+    profile.sandbox?.kind === "caller"
+      ? `Caller-selectable sandbox across all three Codex tiers, default ${profile.sandbox.defaultMode}.`
+      : undefined,
     profile.secrets.length
       ? `Credentials: ${profile.secrets.join(", ")} materialized from the OS keychain via \`tachi vault exec\` at spawn time — never passed as a parameter.`
       : undefined,
@@ -127,20 +138,6 @@ function describe(profile: DispatchProfile): string {
 }
 
 export function registerTools(server: McpServer, manager: LaneManager): void {
-  server.registerTool("clanker_start", {
-    title: "Start a Clanker job",
-    description:
-      "Start one asynchronous cross-harness job by naming a dispatch profile. The profile fixes lane, " +
-      "write mode, sandbox, isolation, credentials, supervision and turn ceiling; routing and host gates " +
-      "are normalized server-side.",
-    inputSchema: startShape,
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-  }, async (args) => {
-    try {
-      return ok(await manager.dispatchStart(resolveProfileDispatch(args)));
-    } catch (error) { return fail(error); }
-  });
-
   for (const profile of profilesForHost(manager)) {
     server.registerTool(`clanker_start_${profile.id}`, {
       title: profile.title,
@@ -154,14 +151,17 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
       },
     }, async (args: Record<string, unknown>) => {
       try {
-        return ok(await manager.dispatchStart(resolveProfileDispatch({
+        // dispatchProfile is the only entrance that mints a registry
+        // capability; the handler forwards free parameters and nothing else.
+        return ok(await manager.dispatchProfile({
           profile: profile.id,
           prompt: args.prompt as string,
           cwd: args.cwd as string | undefined,
           worktree: args.worktree as string | undefined,
           model: args.model as string | undefined,
+          sandbox: args.sandbox as CodexSandboxMode | undefined,
           effort: args.effort as string | undefined,
-        })));
+        }));
       } catch (error) { return fail(error); }
     });
   }
