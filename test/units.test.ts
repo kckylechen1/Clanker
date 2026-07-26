@@ -17,7 +17,7 @@ test("runtime, package, and plugin versions agree", () => {
   const pluginVersion = JSON.parse(
     fs.readFileSync(path.resolve("plugin/.claude-plugin/plugin.json"), "utf8"),
   ).version;
-  assert.equal(SERVER_VERSION, "0.3.3");
+  assert.equal(SERVER_VERSION, "0.3.4");
   assert.equal(packageVersion, SERVER_VERSION);
   assert.equal(pluginVersion, SERVER_VERSION);
   const codexPluginVersion = JSON.parse(
@@ -291,8 +291,24 @@ test("codex lane always disables multi_agent_v2 in CODEX_CONFIG, with no model o
   const spec = buildSpawnSpec("codex", {}, runDir);
   assert.ok(spec.env.CODEX_CONFIG, "CODEX_CONFIG env is set even with no model/effort opts");
   const cfg = JSON.parse(spec.env.CODEX_CONFIG);
-  assert.equal(Object.hasOwn(cfg, "model"), false, "omitting model preserves the Codex configured default");
   assert.equal(cfg.features?.multi_agent_v2?.enabled, false);
+});
+
+// ---- codex lane pins model/effort so ~/.codex/config.toml can't silently
+// swap the running model out from under a dispatch (2026-07-26 incident:
+// an out-of-band config.toml edit swapped every codex dispatch onto
+// gpt-5.3-codex-spark with zero signal, because an omitted model/effort
+// used to fall back to whatever that file said). ------------------------
+
+test("codex lane defaults model/effort in CODEX_CONFIG when no override is given", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-codex-default-model-"));
+  const spec = buildSpawnSpec("codex", {}, runDir);
+  const cfg = JSON.parse(spec.env.CODEX_CONFIG);
+  // Asserted against the Captain-pinned literals, not the imported constant —
+  // comparing against the constant it was pulled from would make this
+  // tautological (it would still pass if DEFAULT_CODEX_MODEL itself drifted).
+  assert.equal(cfg.model, "gpt-5.5", "omitting model must NOT fall back to ~/.codex/config.toml");
+  assert.equal(cfg.model_reasoning_effort, "xhigh");
 });
 
 test("codex lane keeps multi_agent_v2 disabled alongside a model override (e.g. sol lane)", () => {
@@ -301,6 +317,14 @@ test("codex lane keeps multi_agent_v2 disabled alongside a model override (e.g. 
   const cfg = JSON.parse(spec.env.CODEX_CONFIG);
   assert.equal(cfg.model, "gpt-5.6-sol");
   assert.equal(cfg.features?.multi_agent_v2?.enabled, false);
+});
+
+test("codex lane's explicit model/effort override wins over the pinned default", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-codex-override-"));
+  const spec = buildSpawnSpec("codex", { model: "gpt-5.6-sol", effort: "medium" }, runDir);
+  const cfg = JSON.parse(spec.env.CODEX_CONFIG);
+  assert.equal(cfg.model, "gpt-5.6-sol", "an explicit model must not be overwritten by the default");
+  assert.equal(cfg.model_reasoning_effort, "medium", "an explicit effort must not be overwritten by the default");
 });
 
 // ---- codex lane: local dependency, not npx (2026-07-17 cold-start fix) --

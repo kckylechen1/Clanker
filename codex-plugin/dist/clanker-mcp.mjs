@@ -27760,7 +27760,9 @@ var RUNS_ROOT = process.env.CLANKER_RUNS_ROOT ?? path.join(os.homedir(), ".cache
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.3.3";
+var SERVER_VERSION = "0.3.4";
+var DEFAULT_CODEX_MODEL = "gpt-5.5";
+var DEFAULT_CODEX_EFFORT = "xhigh";
 var OC_MODEL_ALIASES = {
   glm: "zhipuai-coding-plan/glm-5.2",
   ds: "deepseek/deepseek-v4-pro",
@@ -31636,8 +31638,8 @@ function buildSpawnSpec(lane, opts, runDir) {
       const codexConfig = {
         features: { multi_agent_v2: { enabled: false } }
       };
-      if (opts.model) codexConfig.model = opts.model;
-      if (opts.effort) codexConfig.model_reasoning_effort = opts.effort;
+      codexConfig.model = opts.model?.trim() || DEFAULT_CODEX_MODEL;
+      codexConfig.model_reasoning_effort = opts.effort?.trim() || DEFAULT_CODEX_EFFORT;
       env.CODEX_CONFIG = JSON.stringify(codexConfig);
       const agentMode = opts.sandbox ? SANDBOX_TO_AGENT_MODE[opts.sandbox] ?? (opts.readOnly ? "read-only" : "agent") : opts.readOnly ? "read-only" : "agent";
       env.INITIAL_AGENT_MODE = agentMode;

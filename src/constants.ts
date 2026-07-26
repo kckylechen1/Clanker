@@ -75,7 +75,22 @@ export const WORKTREES_ROOT =
 export const BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 
 export const SERVER_NAME = "clanker-mcp-server";
-export const SERVER_VERSION = "0.3.3";
+export const SERVER_VERSION = "0.3.4";
+
+/**
+ * Load-bearing default: without an explicit override, the codex lane must
+ * still pin a known model/effort — never leave `codexConfig.model` /
+ * `model_reasoning_effort` unset and let codex-acp fall back to whatever
+ * `~/.codex/config.toml` happens to say. That file is not Clanker's to own;
+ * an out-of-band edit to it (e.g. 2026-07-26 01:04, source unknown) silently
+ * swapped every dispatch onto `gpt-5.3-codex-spark` with zero signal to the
+ * dispatcher — telemetry only reported it after the fact via observed_model.
+ * Dispatch has to be reproducible: a lane card's model profile is meaningless
+ * if the model it names can drift underneath it. Same shape as the gemini
+ * lane's `|| "gemini-3.6-flash-high"` default in backends.ts.
+ */
+export const DEFAULT_CODEX_MODEL = "gpt-5.5";
+export const DEFAULT_CODEX_EFFORT = "xhigh";
 
 /**
  * Single source of truth for opencode model shortnames (mirrors the /oc-dispatch
