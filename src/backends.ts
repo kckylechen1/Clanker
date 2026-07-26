@@ -96,7 +96,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { isGlmModel, resolveOcModel } from "./constants.js";
+import { DEFAULT_CODEX_EFFORT, DEFAULT_CODEX_MODEL, isGlmModel, resolveOcModel } from "./constants.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "./types.js";
 
 const nodeRequire = createRequire(import.meta.url);
@@ -430,8 +430,14 @@ export function buildSpawnSpec(
       const codexConfig: Record<string, unknown> = {
         features: { multi_agent_v2: { enabled: false } },
       };
-      if (opts.model) codexConfig.model = opts.model;
-      if (opts.effort) codexConfig.model_reasoning_effort = opts.effort;
+      // Load-bearing default (not just "set a default"): if model/effort are
+      // left unset here, codex-acp falls back to whatever the operator's own
+      // `~/.codex/config.toml` says, and that file is outside Clanker's
+      // control — an out-of-band edit there silently changes every dispatch
+      // with zero signal. Explicit override still wins; only the fallback
+      // is new. See DEFAULT_CODEX_MODEL/DEFAULT_CODEX_EFFORT in constants.ts.
+      codexConfig.model = opts.model?.trim() || DEFAULT_CODEX_MODEL;
+      codexConfig.model_reasoning_effort = opts.effort?.trim() || DEFAULT_CODEX_EFFORT;
       env.CODEX_CONFIG = JSON.stringify(codexConfig);
       // opts.sandbox (workspace-write middle tier) takes precedence when set;
       // otherwise writes default to the cwd-boxed workspace tier.
