@@ -22,7 +22,11 @@ A **dispatch profile** is the whole capability combination under one name: lane,
 | `oc-glm-write` | opencode | yes | required | welded `glm`, Sonnet-supervised | n/a |
 | `oc-kimi-crew` | opencode | yes | required | welded `kimi` | n/a |
 | `gemini-recon` / `gemini-research` | gemini | no | forbidden | lane default | n/a |
+| `cursor-review` | cursor | no | optional | optional, default `composer-2.5` | n/a (cursor's own read-only mode + sandbox) |
+| `cursor-write` | cursor | yes | required | optional, default `composer-2.5` | n/a |
 | `grok-review` / `grok-write` | grok | no / yes | optional / required | lane default / required | n/a (dormant: HTTP 402) |
+
+Where a profile's model is optional (`cursor-review` / `cursor-write`), pass one only when the caller named it; omitted, the lane's pinned default runs. Cursor's aliases are lane-local: `composer` → `composer-2.5`, `grok` → `cursor-grok-4.5-high`, `codex53` → `gpt-5.3-codex-high` — they are NOT the opencode shortnames, where `composer` means a different provider's model entirely. Composer 2.5 is a bounded single-layer-scaffolding tier (composer-2.5 lane card, #1368): provenance and identity-critical cores still need a cross-vendor screen.
 
 Pass the profile's free parameters truthfully and do not reproduce routing rules client-side: the manager rejects host self-dispatch, unsafe writes, unsupervised GLM writes, and invalid Gemini requests. A read-only profile whose worktree is optional runs in the working checkout unless you name a branch — name one when the review has to run build or test tooling.
 

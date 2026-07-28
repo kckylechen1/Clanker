@@ -3,7 +3,7 @@
   "name": "clanker",
   "displayName": "Clanker",
   "version": "0.3.8",
-  "description": "Claude Code adapter for Clanker tasks, including read-only Clanker: Gemini reconnaissance through ACP.",
+  "description": "Claude Code adapter for Clanker tasks, including read-only Clanker: Gemini reconnaissance and the Cursor lane through ACP.",
   "author": {
     "name": "kckylechen1"
   },
@@ -17,6 +17,7 @@
     "deepseek",
     "kimi",
     "gemini",
+    "cursor",
     "research",
     "dispatch"
   ]
