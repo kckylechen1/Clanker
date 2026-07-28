@@ -129,8 +129,9 @@ const BACKEND_AUTH_PATTERNS: readonly RegExp[] = [
  *
  * Checked AFTER billing/auth, deliberately: those two describe what a backend
  * said, and a backend that answered at all was reached by a spawn that
- * succeeded — so on any message where both could match, the backend's own
- * words are the more specific truth.
+ * succeeded — so on a message that merely MENTIONS an ENOENT alongside a
+ * backend's answer, the backend's own words are the more specific truth.
+ * (SPAWN_FAILURE_PATTERNS below is the one exception, and it runs first.)
  */
 const ENV_DRIFT_PATTERNS: readonly RegExp[] = [
   // Node's own spawn error text: `spawn <command> ENOENT` (the command may
@@ -139,14 +140,49 @@ const ENV_DRIFT_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
+ * The one signature that outranks billing and auth: acp-client.ts's own
+ * spawn-failure wrapper, `failed to spawn '<command>': spawn <command> ENOENT`
+ * (src/acp-client.ts:330 → manager.ts's runTurn → here).
+ *
+ * The order is load-bearing and it is the REVERSE of the ENV_DRIFT_PATTERNS
+ * rule above. PR #40's cold review (run codex-62e86) probed the shipped
+ * classifier and got:
+ *
+ *     failed to spawn '/tmp/billing/node': ... ENOENT      -> CLANKER-BACKEND-BILLING
+ *     failed to spawn '/tmp/unauthorized/node': ... ENOENT -> CLANKER-BACKEND-AUTH
+ *
+ * Both pattern sets match bare substrings (`billing`, `unauthorized`, a loose
+ * `\b40[13]\b`), and the failing COMMAND PATH is part of the message — so any
+ * lane whose node happened to live under such a directory had its ENVIRONMENT
+ * failure routed to the account team, and the dispatcher was told to go check a
+ * balance that was never queried. A spawn that failed opened no socket: there is
+ * no backend that could have said anything about a balance or a credential, so
+ * this shape short-circuits before either of them.
+ *
+ * Deliberately narrow — the whole wrapper, not a bare `ENOENT` — so prose that
+ * only mentions an earlier spawn failure next to a real backend answer still
+ * classifies as what the backend said.
+ */
+const SPAWN_FAILURE_PATTERNS: readonly RegExp[] = [
+  /failed to spawn .+ ENOENT/i,
+];
+
+/**
  * Classify a failure message as a permanent backend billing or auth
  * rejection. Unlike classifyTurnFailure's CLANKER-INFRA-FAILURE (scoped to a
  * turn-1, zero-tool-call schema rejection), a billing/auth failure is
  * permanent regardless of turn number or tool-call count — the account
  * state doesn't change mid-session — so there is no turnsCount/toolCalls
- * gate here. Billing is checked before auth only because 402 and 401/403 are
- * mutually exclusive HTTP statuses in practice; the two pattern sets
- * otherwise don't need a specific relative order.
+ * gate here.
+ *
+ * Three tiers, in this order, and the order carries meaning:
+ *  1. A structural spawn failure (SPAWN_FAILURE_PATTERNS) — nothing was ever
+ *     asked of any backend, so no backend verdict can be the truth here.
+ *  2. What a backend actually said: billing, then auth. Billing before auth
+ *     only because 402 and 401/403 are mutually exclusive HTTP statuses in
+ *     practice; those two otherwise need no particular relative order.
+ *  3. A looser environment-drift mention (ENV_DRIFT_PATTERNS), which loses to
+ *     a backend that answered.
  *
  * BOUNDARY: only ever run this against the error/stderr text a *failed* turn
  * carries — the same channel classifyTurnFailure/isCapacityTransient
@@ -163,6 +199,7 @@ const ENV_DRIFT_PATTERNS: readonly RegExp[] = [
 export function classifyBackendFailure(
   message: string,
 ): typeof BACKEND_BILLING_TAG | typeof BACKEND_AUTH_TAG | typeof ENV_DRIFT_TAG | undefined {
+  if (SPAWN_FAILURE_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   if (BACKEND_BILLING_PATTERNS.some((re) => re.test(message))) return BACKEND_BILLING_TAG;
   if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;
   if (ENV_DRIFT_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
