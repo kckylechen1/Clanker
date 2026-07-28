@@ -73,10 +73,13 @@ export interface ExitInfo {
  *    leaving a live worker unsignaled. Losing the grandchildren is bad; losing
  *    the worker too would be worse.
  *
- * (gemini-acp.ts has a sibling `signalChildTree` for the same reason. It is a
- * standalone sidecar with no imports from src/, so the two stay separate on
- * purpose rather than sharing a module that would drag this file into the
- * sidecar bundle.)
+ * (The gemini sidecar leans on this function rather than duplicating it. Since
+ * PR #40's cold review it spawns `agy` UNDETACHED, so agy and its descendants
+ * inherit the sidecar's group and this one kill(-pid) reaps the whole tree;
+ * gemini-acp.ts's own `signalAgy` therefore signals a bare pid and never a
+ * group. Its reaped-child gate is a copy of the one below, not an import: it is
+ * a standalone sidecar with no imports from src/, and sharing a module would
+ * drag this file into the sidecar bundle. Change one gate, change both.)
  */
 function signalWorkerGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   if (child.exitCode !== null || child.signalCode !== null) return;

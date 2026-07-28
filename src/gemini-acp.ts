@@ -121,20 +121,65 @@ function runAgy(sessionId: string, session: Session, prompt: string): Promise<st
     const child = spawn(invocation.command, invocation.args, {
       cwd: session.cwd,
       env: agyEnv,
-      // A headless agent may launch terminal/search helpers of its own. Give
-      // the turn a process group so cancellation tears down the whole tree
-      // instead of orphaning a grandchild that keeps stdout/stderr open.
-      detached: process.platform !== "win32",
+      // NOT detached, deliberately (PR #40 cold review, run codex-62e86).
+      //
+      // acp-client.ts spawns THIS sidecar detached, so the sidecar leads a
+      // process group whose pgid is its own pid, and every manager teardown
+      // signals `-sidecarPid`. Leaving agy undetached puts it in that same
+      // group: one kill(-sidecarPid) covers the sidecar, agy, and every
+      // descendant agy did not setsid away — atomically, in one syscall,
+      // needing no cooperation from this process.
+      //
+      // Giving agy a group of its own (the shape this replaces) looked
+      // stronger and was weaker. The manager's escalation to SIGKILL is
+      // uncatchable and lands on the SIDECAR's group only, so whenever the
+      // manager's grace elapsed before terminateChild's fixed 1s inner
+      // escalation below, this process died first and agy's entire group was
+      // orphaned with nothing left alive that knew its pgid.
+      //
+      // The price, paid knowingly: a session/cancel can no longer take down
+      // agy's own helpers, because a group kill from in here would kill this
+      // sidecar too. terminateChild signals agy's pid alone, so a helper agy
+      // leaves behind lives until the manager's group kill — bounded by the
+      // connection (manager.ts's cancel() closes it after CANCEL_GRACE_MS),
+      // rather than orphaned past every process that knew its pgid.
+      detached: false,
       stdio: ["ignore", "pipe", "pipe"],
     });
     session.active = child;
     let stdout = "";
     let stderr = "";
+    // Only ever clear the slot this turn put there. A cancelled turn settles on
+    // `exit` while its `close` can arrive far later (see below) — by then the
+    // next turn may already own session.active, and clearing it would strand
+    // that turn's child unreachable by terminateChild.
+    const releaseSlot = () => { if (session.active === child) session.active = undefined; };
     child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
     child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
-    child.once("error", (error) => { session.active = undefined; reject(new Error(`Clanker: Gemini failed to start agy: ${error.message}`)); });
+    child.once("error", (error) => { releaseSlot(); reject(new Error(`Clanker: Gemini failed to start agy: ${error.message}`)); });
+    // A CANCELLED turn settles here, on `exit`, not on `close`.
+    //
+    // `close` additionally waits for the stdio pipes, and agy's helpers inherit
+    // them. Now that agy shares this sidecar's group (see spawn above),
+    // terminateChild reaches agy alone, so a helper it leaves behind holds
+    // stdout open long past agy's death: measured on this machine, agy killed
+    // at +1.9s and `close` not firing until +3.4s, when the orphan helper was
+    // killed by hand — unbounded in general (a `sleep 45` helper holds it for
+    // 45s). manager.ts's cancel() gives the turn CANCEL_GRACE_MS to report
+    // `cancelled` before it force-kills the run and flags forced_kill, so a
+    // cancel that waits on the pipes is a cancel that gets recorded as a forced
+    // kill. Nothing is lost by settling early: a cancelled turn discards its
+    // output. Every other outcome still settles on `close`, where the full
+    // stdout is guaranteed to have been read.
+    child.once("exit", () => {
+      if (!session.cancellationRequested) return;
+      releaseSlot();
+      reject(new TurnCancelled("Clanker: Gemini turn cancelled"));
+    });
     child.once("close", (code, signal) => {
-      session.active = undefined;
+      releaseSlot();
+      // Still reachable, and still correct: a cancel that arrives between
+      // `exit` and `close` never saw the early settle above.
       if (session.cancellationRequested) {
         reject(new TurnCancelled("Clanker: Gemini turn cancelled"));
         return;
@@ -231,25 +276,48 @@ function gitPath(cwd: string, flag: "--show-toplevel" | "--absolute-git-dir" | "
   return fs.realpathSync(output);
 }
 
+/**
+ * Terminate this session's agy, escalating to SIGKILL if it does not go.
+ *
+ * Both gates test `exitCode !== null || signalCode !== null` — the same pair
+ * acp-client.ts's signalWorkerGroup checks (src/acp-client.ts:81), for the same
+ * measured reason. Node reports a SIGNAL-killed child as `exitCode === null`
+ * with `signalCode` set, so an exitCode-only gate reads a child that has
+ * already been killed and reaped as "still running". PR #40's cold review (run
+ * codex-62e86) proved it with a live probe — `exitCode null signalCode SIGTERM`
+ * on a child whose `close` was still pending behind a descendant — and caught
+ * this file signalling reaped children through both gates.
+ *
+ * The two gates are not redundant: the first keeps an already-dead turn from
+ * arming a pointless escalation timer, the second keeps that timer from firing
+ * at a child that died during the grace window.
+ */
 function terminateChild(session: Session): void {
   const child = session.active;
-  if (!child || child.exitCode !== null) return;
-  signalChildTree(child, "SIGTERM");
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  signalAgy(child, "SIGTERM");
   const timer = setTimeout(() => {
-    if (session.active === child && child.exitCode === null) signalChildTree(child, "SIGKILL");
+    if (session.active === child && child.exitCode === null && child.signalCode === null) signalAgy(child, "SIGKILL");
   }, 1_000);
   timer.unref?.();
 }
 
-function signalChildTree(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (process.platform !== "win32" && child.pid !== undefined) {
-    try {
-      process.kill(-child.pid, signal);
-      return;
-    } catch {
-      // The process group may already be gone; fall through to the direct PID.
-    }
-  }
+/**
+ * Signal agy itself — its pid, never a process group.
+ *
+ * agy runs in THIS sidecar's process group (see the spawn in runAgy), so
+ * `-agy.pid` is not agy's group at all: at best ESRCH, at worst an unrelated
+ * group that recycled the pid — the wrong-group signal acp-client.ts:64-74
+ * spells out. The group that does cover agy is this sidecar's own, and its only
+ * correct signaller is the manager: sending it from in here would kill this
+ * sidecar too, which is precisely what a cancel must not do.
+ *
+ * `child.kill` and not `process.kill(child.pid)`: Node drops the handle when it
+ * reaps the child, so kill on an already-reaped child is a no-op instead of a
+ * raw syscall at a pid that may since have been recycled.
+ */
+function signalAgy(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
   try { child.kill(signal); } catch { /* already exited */ }
 }
 
