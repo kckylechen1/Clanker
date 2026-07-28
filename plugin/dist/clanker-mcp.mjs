@@ -32011,6 +32011,14 @@ var LaneRun = class {
    * then falls back to the global CLANKER_TURN_TIMEOUT_MS.
    */
   turnTimeoutMs;
+  /**
+   * Whether this run's profile is the supervised shape. Only a supervised run
+   * accepts a correction turn (manager.promptExisting): the capability is
+   * checked against the registry row that minted the run, not against which
+   * tool the caller happens to hold, so a seat cannot talk its way into
+   * steering an unsupervised worker.
+   */
+  supervised;
   turnStatus = "running";
   turnsCount = 0;
   sessionClosed = false;
@@ -32062,6 +32070,7 @@ var LaneRun = class {
     this.requestOpts = init.requestOpts ?? {};
     this.initialPrompt = init.initialPrompt ?? "";
     this.turnTimeoutMs = init.turnTimeoutMs;
+    this.supervised = init.supervised ?? false;
   }
   // ---- lifecycle ----------------------------------------------------------
   beginTurn(prompt, correction = false) {
@@ -32479,7 +32488,27 @@ var LaneRun = class {
       );
     }
   }
+  /**
+   * One ledger row per DISPATCH, not per terminal transition.
+   *
+   * "Once" used to be an emergent property rather than a rule: `completeTurn`
+   * and `failTurn` both return early on an already-terminal run, so with a
+   * strictly one-shot controller they could only fire once. A correction turn
+   * (manager.promptExisting) breaks that arithmetic — it clears `terminalAt`
+   * and reaches a second terminal transition — so a supervised run would have
+   * appended two rows describing one dispatch, quietly double-counting every
+   * GLM write in the ledger's stats. The invariant now belongs to a flag that
+   * says so, instead of to a coincidence of control flow.
+   *
+   * Deliberately NOT symmetric with `writeResultFileOnce`, which has no such
+   * flag and must not have one: the verdict file has to hold the LATEST turn's
+   * result, or a corrected run would hand its reader the very output the
+   * correction was issued to replace.
+   */
+  ledgerRowWritten = false;
   writeLedgerRowOnce() {
+    if (this.ledgerRowWritten) return;
+    this.ledgerRowWritten = true;
     appendLedgerRow({
       id: this.id,
       lane: this.lane,
@@ -32927,7 +32956,8 @@ var LaneManager = class {
       targetRepo: worktreePath ? targetRepo : void 0,
       requestOpts: opts,
       initialPrompt: params.prompt,
-      turnTimeoutMs: minted.turnTimeoutMs
+      turnTimeoutMs: minted.turnTimeoutMs,
+      supervised: minted.supervision === "sonnet"
     });
     this.runs.set(id, run);
     const drive = this.driveNewSession(run, spec, params.prompt);
@@ -32947,6 +32977,61 @@ var LaneManager = class {
   }
   async driveNewSession(run, spec, prompt) {
     await this.attemptInitialTurn(run, spec, prompt, 1);
+  }
+  /**
+   * Run another turn on a session that is still open — the supervised
+   * correction ("严父") flow.
+   *
+   * This is turn-by-turn supervision, NOT mid-flight steering: ACP has no way
+   * to redirect a prompt already in progress, so a correction is a new turn
+   * issued after the previous one came back. The window is bounded by the
+   * idle-TTL reaper, which closes a finished session after `sessionTtlMs` —
+   * miss it and the only honest answer is that the session is gone, not a
+   * silently respawned worker with no memory of what it was corrected about.
+   *
+   * The capability is checked against the REGISTRY ROW that minted the run
+   * (`run.supervised`), not against which tool the caller holds. Holding
+   * `clanker_prompt` is necessary but not sufficient: an unsupervised profile
+   * refuses the correction server-side, so the narrow-tool property survives a
+   * seat file that drifts.
+   */
+  async promptExisting(id, prompt, correction = false) {
+    const run = this.runs.get(id);
+    if (!run) throw new Error(`run '${id}' not found`);
+    if (!run.supervised) {
+      throw new Error(
+        `run '${id}' was not started from a supervised profile, so it takes no correction turn (only the supervised shape accepts one \u2014 see profiles.ts supervision)`
+      );
+    }
+    if (run.turnStatus === "running" || this.turnDrives.has(id)) {
+      throw new Error(`a turn is already running for '${id}'; wait for it to reach a terminal state first`);
+    }
+    if (run.sessionClosed) throw new Error(`session for '${id}' is already closed`);
+    const conn = this.connections.get(id);
+    if (!conn) {
+      throw new Error(
+        `session for '${id}' is gone \u2014 a finished session is closed by the idle-TTL reaper after ${this.sessionTtlMs}ms (CLANKER_SESSION_TTL_MS). The worker cannot be corrected; report the blocker instead of starting a fresh dispatch on your own.`
+      );
+    }
+    const drive = this.driveContinuation(run, conn, prompt, correction);
+    this.trackDrive(id, drive);
+    return { id, status: run.turnStatus };
+  }
+  async driveContinuation(run, conn, prompt, correction) {
+    const outcome = await this.runTurn(run, conn, prompt, correction);
+    if (run.cancellationRequested) {
+      await this.close(run.id);
+      run.cancelTurn();
+      return;
+    }
+    if (run.isTerminalTurn()) return;
+    if (outcome.ok) return;
+    await this.computeTouched(run);
+    await this.close(run.id);
+    run.failTurn(
+      outcome.message,
+      classifyTurnFailure({ message: outcome.message, turnsCount: run.turnsCount, toolCalls: run.toolCalls() })
+    );
   }
   /**
    * Drive the first turn of a fresh dispatch, with one automatic retry when
@@ -33130,7 +33215,7 @@ var LaneManager = class {
     }
     const touched = dedupe([...gitTouched, ...run.toolTouchedFiles()]);
     run.setFinalTouched(touched);
-    await this.close(run.id);
+    if (!run.supervised || stopReason === "cancelled") await this.close(run.id);
     if (stopReason === "cancelled") {
       run.cancelTurn();
     } else {
@@ -33526,6 +33611,22 @@ function registerTools(server, manager) {
       const result = await manager.wait(args.id, args.timeout_ms, args.quiet);
       progressSender(extra)?.(result);
       return ok(result);
+    } catch (error40) {
+      return fail(error40);
+    }
+  });
+  server.registerTool("clanker_prompt", {
+    title: "Send a correction turn to a supervised Clanker job",
+    description: "Run another turn on a job whose session is still open \u2014 the supervised correction flow. This is turn-by-turn supervision, not mid-flight steering: issue it only after the previous turn has come back terminal, then poll the same id with clanker_wait. Refused when the job did not come from a supervised profile, when a turn is still running, or once the idle-TTL reaper has closed the session. The run keeps its id, its worktree and its single ledger row; result.md is rewritten with the corrected turn's verdict.",
+    inputSchema: {
+      id: external_exports.string(),
+      prompt: external_exports.string().min(1),
+      correction: external_exports.boolean().optional()
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+  }, async (args) => {
+    try {
+      return ok(await manager.promptExisting(args.id, args.prompt, args.correction ?? false));
     } catch (error40) {
       return fail(error40);
     }

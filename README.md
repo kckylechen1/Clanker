@@ -4,7 +4,9 @@ Clanker is a thin cross-harness job controller. It starts an ACP-backed job, rec
 
 ## MCP API
 
-Four lifecycle tools are exposed — `clanker_wait`, `clanker_status`, `clanker_cancel`, `clanker_list` — plus one generated `clanker_start_<profile>` tool per row of the dispatch-profile registry (`src/profiles.ts`). Those generated tools are the **only** way to start a job.
+Five lifecycle tools are exposed — `clanker_wait`, `clanker_status`, `clanker_cancel`, `clanker_list`, `clanker_prompt` — plus one generated `clanker_start_<profile>` tool per row of the dispatch-profile registry (`src/profiles.ts`). Those generated tools are the **only** way to start a job.
+
+`clanker_prompt` is the supervised correction turn, and it is deliberately narrow. Supervision here is **turn-by-turn, not mid-flight**: ACP cannot redirect a prompt already in progress, so a correction is a new turn issued after the previous one came back terminal. A supervised run therefore keeps its session — and its worktree — open past that terminal turn, and the idle-TTL reaper closes both once the window expires. The correction is refused unless the run was minted from a profile whose `supervision` is `sonnet`: the check is against the registry row, not against which tool the caller holds, so a seat file that drifts into declaring the tool still cannot steer an unsupervised worker. A corrected run keeps its id, its worktree and its **single** ledger row, while `result.md` is rewritten so the verdict on disk is the corrected one rather than the output the correction was issued to replace.
 
 A **dispatch profile** is the whole capability combination under one name: lane, write mode, sandbox, worktree isolation, required vault credentials, supervision, role class and per-profile turn ceiling. Each generated tool exposes only that profile's free parameters, so a seat holding one cannot ask for a capability the profile does not grant.
 

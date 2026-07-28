@@ -74,6 +74,7 @@ test("every seat holds only its own narrow start tool and no retired API", async
     assert.match(frontmatter, /clanker_wait/);
     // Only the GLM supervisor may cancel a worker, and only it is Sonnet.
     const maySupervise = seat === "supervisor";
+    assert.equal(/clanker_prompt/.test(frontmatter), maySupervise, `${seat}.md correction rights`);
     assert.equal(/clanker_cancel/.test(frontmatter), maySupervise, `${seat}.md cancellation rights`);
     assert.equal(/^model: sonnet$/m.test(frontmatter), maySupervise, `${seat}.md model tier`);
     // The 0.2.x seat contracts: named-redirect refusal, zero-fabrication

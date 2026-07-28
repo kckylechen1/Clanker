@@ -374,6 +374,7 @@ export class LaneManager {
       requestOpts: opts,
       initialPrompt: params.prompt,
       turnTimeoutMs: minted.turnTimeoutMs,
+      supervised: minted.supervision === "sonnet",
     });
     this.runs.set(id, run);
 
@@ -392,6 +393,70 @@ export class LaneManager {
 
   private async driveNewSession(run: LaneRun, spec: SpawnSpec, prompt: string): Promise<void> {
     await this.attemptInitialTurn(run, spec, prompt, 1);
+  }
+
+  /**
+   * Run another turn on a session that is still open — the supervised
+   * correction ("严父") flow.
+   *
+   * This is turn-by-turn supervision, NOT mid-flight steering: ACP has no way
+   * to redirect a prompt already in progress, so a correction is a new turn
+   * issued after the previous one came back. The window is bounded by the
+   * idle-TTL reaper, which closes a finished session after `sessionTtlMs` —
+   * miss it and the only honest answer is that the session is gone, not a
+   * silently respawned worker with no memory of what it was corrected about.
+   *
+   * The capability is checked against the REGISTRY ROW that minted the run
+   * (`run.supervised`), not against which tool the caller holds. Holding
+   * `clanker_prompt` is necessary but not sufficient: an unsupervised profile
+   * refuses the correction server-side, so the narrow-tool property survives a
+   * seat file that drifts.
+   */
+  async promptExisting(id: string, prompt: string, correction = false): Promise<{ id: string; status: RunStatus }> {
+    const run = this.runs.get(id);
+    if (!run) throw new Error(`run '${id}' not found`);
+    if (!run.supervised) {
+      throw new Error(
+        `run '${id}' was not started from a supervised profile, so it takes no correction turn ` +
+          `(only the supervised shape accepts one — see profiles.ts supervision)`,
+      );
+    }
+    if (run.turnStatus === "running" || this.turnDrives.has(id)) {
+      throw new Error(`a turn is already running for '${id}'; wait for it to reach a terminal state first`);
+    }
+    if (run.sessionClosed) throw new Error(`session for '${id}' is already closed`);
+    const conn = this.connections.get(id);
+    if (!conn) {
+      throw new Error(
+        `session for '${id}' is gone — a finished session is closed by the idle-TTL reaper after ` +
+          `${this.sessionTtlMs}ms (CLANKER_SESSION_TTL_MS). The worker cannot be corrected; report the ` +
+          `blocker instead of starting a fresh dispatch on your own.`,
+      );
+    }
+    const drive = this.driveContinuation(run, conn, prompt, correction);
+    this.trackDrive(id, drive);
+    return { id, status: run.turnStatus };
+  }
+
+  private async driveContinuation(run: LaneRun, conn: LaneConnection, prompt: string, correction: boolean): Promise<void> {
+    const outcome = await this.runTurn(run, conn, prompt, correction);
+    if (run.cancellationRequested) {
+      await this.close(run.id);
+      run.cancelTurn();
+      return;
+    }
+    if (run.isTerminalTurn()) return;
+    if (outcome.ok) return;
+    // No capacity-retry here, unlike a fresh dispatch's first turn: the retry
+    // path respawns the subprocess, which would destroy the very session this
+    // continuation exists to reuse — and the worker would come back with no
+    // memory of the work it is being corrected about.
+    await this.computeTouched(run);
+    await this.close(run.id);
+    run.failTurn(
+      outcome.message,
+      classifyTurnFailure({ message: outcome.message, turnsCount: run.turnsCount, toolCalls: run.toolCalls() }),
+    );
   }
 
   /**
@@ -601,7 +666,20 @@ export class LaneManager {
     }
     const touched = dedupe([...gitTouched, ...run.toolTouchedFiles()]);
     run.setFinalTouched(touched);
-    await this.close(run.id);
+    // A supervised run keeps its session open past this terminal turn — that
+    // window IS the correction flow (promptExisting). Closing here would make
+    // the strict-parent shape structurally impossible: the supervisor would be
+    // handed a finished turn to judge and no session left to act on, which is
+    // exactly the state the seat contract used to promise its way around.
+    //
+    // Only the SUCCESS path defers. An errored turn still closes on its own
+    // paths above: a session whose backend just failed is not one to keep
+    // holding a worktree open for. The deferred close (and the worktree
+    // reaping inside it) then falls to the idle-TTL reaper, which already
+    // closes any non-running run past sessionTtlMs — so the window is bounded
+    // by an existing mechanism rather than a new one, and `worktree_retained`
+    // becomes meaningful only once that close really happens.
+    if (!run.supervised || stopReason === "cancelled") await this.close(run.id);
     if (stopReason === "cancelled") {
       run.cancelTurn();
     } else {

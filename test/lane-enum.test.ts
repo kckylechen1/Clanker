@@ -23,11 +23,15 @@ test("laneEnum accepts exactly the backend registry", () => {
   for (const bad of ["claude", "", "Codex"]) assert.throws(() => laneEnum.parse(bad));
 });
 
-test("public tools are the four lifecycle tools plus exactly one generated tool per profile", () => {
+test("public tools are the five lifecycle tools plus exactly one generated tool per profile", () => {
   const tools = capture({});
   assert.deepEqual([...tools.keys()].sort(), [
     "clanker_cancel",
     "clanker_list",
+    // The supervised correction turn. Narrow by the registry, not by this list:
+    // it is registered unconditionally and refuses server-side unless the run
+    // was minted from a profile whose supervision is `sonnet`.
+    "clanker_prompt",
     "clanker_start_codex-review",
     "clanker_start_codex-write",
     "clanker_start_gemini-recon",

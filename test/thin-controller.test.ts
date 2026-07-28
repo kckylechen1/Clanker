@@ -17,11 +17,11 @@ function captureTools(manager: LaneManager) {
   return tools;
 }
 
-test("public inventory is one generated tool per profile plus four lifecycle tools", () => {
+test("public inventory is one generated tool per profile plus five lifecycle tools", () => {
   const manager = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true });
   assert.deepEqual([...captureTools(manager).keys()], [
     ...DISPATCH_PROFILES.map((p) => `clanker_start_${p.id}`),
-    "clanker_wait", "clanker_status", "clanker_cancel", "clanker_list",
+    "clanker_wait", "clanker_prompt", "clanker_status", "clanker_cancel", "clanker_list",
   ]);
 });
 
