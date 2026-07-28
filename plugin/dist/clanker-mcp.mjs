@@ -27761,9 +27761,26 @@ var RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 864e5;
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.3.5";
+var SERVER_VERSION = "0.3.6";
 var DEFAULT_CODEX_MODEL = "gpt-5.5";
 var DEFAULT_CODEX_EFFORT = "xhigh";
+var WRITE_DISCIPLINE_PREFIX = `Workspace discipline, enforced by the dispatching contract \u2014 these override any
+convenience you would otherwise prefer:
+
+- Stage precise paths. Never \`git add -A\`: a single sweep once pulled three
+  sibling worktrees and another session's untracked WIP into one 62,000-line
+  commit. After committing, read the change summary and confirm nothing rode in.
+- Run side-effecting steps one command at a time and read each output. Never
+  chain them with \`&&\`: when the first link fails the rest are skipped silently,
+  and that is how "verified" gets reported for work that never ran.
+- Commit inside your worktree. Do not push, do not open a pull request \u2014 opening
+  a PR is the adjudicator's act, not yours.
+- Never weaken a frozen assertion. If an acceptance check cannot pass, STOP and
+  report back; do not edit the test, add a skip, or relax the assertion to reach
+  green.
+- Deliver evidence, not claims: paste the verbatim command output. If you could
+  not obtain something, say so plainly \u2014 "I could not get this" is a valid
+  delivery; composing a plausible result is the worst failure mode there is.`;
 var OC_MODEL_ALIASES = {
   glm: "zhipuai-coding-plan/glm-5.2",
   ds: "deepseek/deepseek-v4-pro",
@@ -31791,6 +31808,33 @@ var LaneRun = class {
    * baseRepo, or it silently no-ops on the wrong repo and leaks the worktree.
    */
   targetRepo;
+  /**
+   * Full SHA the worktree was cut from when the dispatcher supplied an
+   * explicit `base` (verified server-side in manager.ts before the worktree
+   * was created). Undefined when the repo's default base resolution ran;
+   * surfaced in telemetry as `base_sha`.
+   */
+  baseSha;
+  /**
+   * Full SHA of the commit the worktree was cut from, captured at creation
+   * time regardless of whether the caller named a base. This is the diff base
+   * for `doNotTouch` terminal validation (worktree.ts changedFilesSince).
+   */
+  worktreeBaseSha;
+  /**
+   * Caller-declared paths the worker must not touch, validated server-side at
+   * terminal time (manager.ts computeContractViolations) against the real
+   * worktree diff. Undefined when the dispatcher declared none — in which
+   * case NO validation runs and nothing is reported anywhere.
+   */
+  doNotTouch;
+  /**
+   * Violations found while the worktree still existed (closeRun runs before
+   * the terminal status flip, and a clean tree may be removed there — so the
+   * result is stored here for buildWaitResult / writeResultFileOnce to read
+   * afterwards). Set at most once, only when doNotTouch was declared.
+   */
+  contractViolations;
   readOnly;
   runDir;
   createdAt = Date.now();
@@ -31873,6 +31917,9 @@ var LaneRun = class {
     this.worktreeBranch = init.worktreeBranch;
     this.worktreePath = init.worktreePath;
     this.targetRepo = init.targetRepo;
+    this.baseSha = init.baseSha;
+    this.worktreeBaseSha = init.worktreeBaseSha;
+    this.doNotTouch = init.doNotTouch;
     this.requestOpts = init.requestOpts ?? {};
     this.initialPrompt = init.initialPrompt ?? "";
     this.turnTimeoutMs = init.turnTimeoutMs;
@@ -32186,6 +32233,7 @@ var LaneRun = class {
       backend: this.lane,
       read_only: this.readOnly,
       sandbox: this.requestOpts.sandbox,
+      ...this.baseSha !== void 0 ? { base_sha: this.baseSha } : {},
       ...this.turnTimeoutMs !== void 0 ? { turn_timeout_ms: this.turnTimeoutMs } : {},
       created_at: new Date(this.createdAt).toISOString(),
       ...this.startedAt ? { started_at: new Date(this.startedAt).toISOString() } : {},
@@ -32283,6 +32331,14 @@ var LaneRun = class {
     if (this.error) {
       lines.push("## error", "", this.error, "");
       if (this.failureClass) lines.push(`failure_class: ${this.failureClass}`, "");
+    }
+    if (this.contractViolations && this.contractViolations.length > 0) {
+      lines.push("## contract_violations", "");
+      for (const violation of this.contractViolations) {
+        lines.push(`- pattern \`${violation.pattern}\`:`);
+        for (const file2 of violation.files) lines.push(`  - ${file2}`);
+      }
+      lines.push("");
     }
     lines.push(RESULT_FINAL_MESSAGE_HEADING, "", this.lastFinalMessage, "");
     try {
@@ -32756,6 +32812,12 @@ function resolveProfileDispatch(input, env = process.env) {
   if (profile.isolation === "forbidden" && input.worktree !== void 0) {
     throw new Error(`profile '${profile.id}' runs in place and does not take a worktree`);
   }
+  if (profile.isolation === "forbidden" && input.base !== void 0) {
+    throw new Error(`profile '${profile.id}' cuts no worktree and therefore takes no base`);
+  }
+  if (profile.isolation === "forbidden" && input.doNotTouch !== void 0) {
+    throw new Error(`profile '${profile.id}' cuts no worktree and therefore takes no doNotTouch`);
+  }
   if (profile.isolation === "required" && !input.worktree?.trim()) {
     throw new Error(`profile '${profile.id}' is write-capable and requires a managed worktree branch name`);
   }
@@ -32803,6 +32865,8 @@ function resolveProfileDispatch(input, env = process.env) {
     prompt: input.prompt,
     cwd: input.cwd,
     worktree: input.worktree,
+    base: input.base,
+    doNotTouch: input.doNotTouch,
     model,
     effort: input.effort,
     readOnly: profile.readOnly,
@@ -32892,12 +32956,25 @@ async function resolveBaseRef(targetRepo) {
     `target repo '${targetRepo}' has no origin/HEAD, origin/main, origin/master, or local HEAD commit to cut a worktree from (a repo with zero commits cannot be worktree'd)`
   );
 }
-async function createWorktree(branch, targetRepo = BASE_REPO) {
+async function resolveBaseCommit(targetRepo, base) {
+  try {
+    const sha = (await git(targetRepo, ["rev-parse", "--verify", `${base}^{commit}`])).trim();
+    if (sha) return sha;
+  } catch {
+  }
+  throw new Error(
+    `dispatch base '${base}' does not resolve to a commit in target repo '${targetRepo}'; refusing to fall back to the repo's default base (the worktree would be cut from a commit the dispatcher did not name)`
+  );
+}
+async function headSha(cwd) {
+  return (await git(cwd, ["rev-parse", "--verify", "HEAD"])).trim();
+}
+async function createWorktree(branch, targetRepo = BASE_REPO, base) {
   const wtPath = deriveWorktreePath(branch);
   if (fs7.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
-  const baseRef = await resolveBaseRef(targetRepo);
+  const baseRef = base ?? await resolveBaseRef(targetRepo);
   fs7.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
   return wtPath;
@@ -32945,6 +33022,22 @@ function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
       `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT outside the repo)`
     );
   }
+}
+async function changedFilesSince(worktreePath, base) {
+  const out = await git(worktreePath, ["diff", "--name-only", `${base}...HEAD`]);
+  const committed = out.split("\n").filter((line) => line.trim().length > 0);
+  const uncommitted = await changedFiles(worktreePath);
+  return [.../* @__PURE__ */ new Set([...committed, ...uncommitted])];
+}
+function matchDoNotTouch(patterns, files) {
+  const violations = [];
+  for (const pattern of patterns) {
+    const dir = pattern.replace(/\/+$/, "");
+    if (!dir) continue;
+    const matched = files.filter((file2) => file2 === dir || file2.startsWith(dir + "/"));
+    if (matched.length > 0) violations.push({ pattern, files: matched });
+  }
+  return violations;
 }
 async function removeIfClean(worktreePath, targetRepo = BASE_REPO) {
   const changes = await changedFiles(worktreePath);
@@ -33137,6 +33230,8 @@ var LaneManager = class {
         prompt: resolved.prompt,
         cwd: resolved.cwd,
         worktree: resolved.worktree,
+        base: resolved.base,
+        doNotTouch: resolved.doNotTouch,
         model: resolved.model,
         effort: resolved.effort,
         readOnly: resolved.readOnly,
@@ -33156,9 +33251,26 @@ var LaneManager = class {
     const validated = validateDispatchParams(params, minted, this.host);
     params = validated.params;
     const { profile, readOnly } = validated;
+    const lanePrompt = readOnly ? params.prompt : `${WRITE_DISCIPLINE_PREFIX}
+
+${params.prompt}`;
     let targetRepo = path9.resolve(this.baseRepo);
     if (params.worktree && params.cwd) {
       targetRepo = await resolveTargetRepo(params.cwd);
+    }
+    if (params.base !== void 0 && !params.worktree) {
+      throw new Error(
+        `dispatch base '${params.base}' was supplied without a worktree; a base only names the commit a worktree is cut from, so pass 'worktree' as well or omit 'base'`
+      );
+    }
+    if (params.doNotTouch !== void 0 && !params.worktree) {
+      throw new Error(
+        `doNotTouch was supplied without a worktree; the validation diffs a worktree against the commit it was cut from, so pass 'worktree' as well or omit 'doNotTouch'`
+      );
+    }
+    let baseSha;
+    if (params.base !== void 0) {
+      baseSha = await resolveBaseCommit(targetRepo, params.base);
     }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
     const runDir = path9.join(this.runsRoot, id);
@@ -33185,13 +33297,23 @@ var LaneManager = class {
     };
     let cwd = params.cwd ?? this.baseRepo;
     let worktreePath;
+    let worktreeBaseSha;
     let spec;
     try {
       spec = this.resolveSpec(params.lane, requestOpts, runDir);
       if (params.worktree) {
         assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree), targetRepo);
-        worktreePath = await createWorktree(params.worktree, targetRepo);
+        worktreePath = await createWorktree(params.worktree, targetRepo, baseSha);
         cwd = worktreePath;
+        if (baseSha !== void 0) {
+          worktreeBaseSha = baseSha;
+        } else {
+          try {
+            worktreeBaseSha = await headSha(worktreePath);
+          } catch {
+            worktreeBaseSha = void 0;
+          }
+        }
       }
     } catch (e) {
       writeTelemetryStub(runDir, {
@@ -33213,13 +33335,16 @@ var LaneManager = class {
       worktreeBranch: params.worktree,
       worktreePath,
       targetRepo: worktreePath ? targetRepo : void 0,
+      baseSha,
+      worktreeBaseSha,
+      doNotTouch: params.doNotTouch,
       requestOpts,
-      initialPrompt: params.prompt,
+      initialPrompt: lanePrompt,
       turnTimeoutMs: minted.turnTimeoutMs,
       supervised: minted.supervision === "sonnet"
     });
     this.runs.set(id, run);
-    const drive = this.driveNewSession(run, spec, params.prompt);
+    const drive = this.driveNewSession(run, spec, lanePrompt);
     this.trackDrive(id, drive);
     return { id, warnings: spec.warnings };
   }
@@ -33547,6 +33672,9 @@ ${grokDetail}` : "";
       }
       result.final_message = run.finalMessage();
       result.touched_files = run.finalTouched();
+      if (run.contractViolations && run.contractViolations.length > 0) {
+        result.contract_violations = run.contractViolations;
+      }
       result.plan_final = run.planState();
       if (run.error) result.error = annotatedError(run.error, run.failureClass);
       if (run.failureClass) result.failure_class = run.failureClass;
@@ -33694,6 +33822,29 @@ ${grokDetail}` : "";
     }
     run.setFinalTouched(dedupe([...gitTouched, ...run.toolTouchedFiles()]));
   }
+  /**
+   * Terminal doNotTouch validation: diff the run's worktree against the commit
+   * it was cut from (committed AND uncommitted changes — an uncommitted edit
+   * to a forbidden path is the same breach as a committed one) and match the
+   * touched paths against the caller's patterns. Stored on the run; the wait
+   * payload and result.md read it from there. Fail-silent like every other
+   * diagnostics path: a validation error must never break terminal teardown,
+   * and the run's status is never flipped by a finding.
+   */
+  async computeContractViolations(run) {
+    if (!run.doNotTouch || run.doNotTouch.length === 0) return;
+    if (run.contractViolations !== void 0) return;
+    if (!run.worktreePath || !run.worktreeBaseSha) return;
+    if (!fs8.existsSync(run.worktreePath)) return;
+    try {
+      const touched = await changedFilesSince(run.worktreePath, run.worktreeBaseSha);
+      run.contractViolations = matchDoNotTouch(run.doNotTouch, touched);
+    } catch (err) {
+      console.error(
+        `[clanker] doNotTouch validation failed for '${run.id}': ${errMessage(err)}`
+      );
+    }
+  }
   /** Close a session: dispose ACP session, kill subprocess, clean worktree. */
   async close(id) {
     const existing = this.closing.get(id);
@@ -33724,6 +33875,7 @@ ${grokDetail}` : "";
       }
     }
     if (run.worktreePath && run.worktreeBranch) {
+      await this.computeContractViolations(run);
       if (!processStopped) {
         run.worktreeRetained = run.worktreePath;
       } else {
@@ -33787,6 +33939,14 @@ function narrowShape(profile) {
   } else if (profile.isolation === "optional") {
     shape.worktree = external_exports.string().trim().min(1).optional().describe(
       "Optional branch name. Omit to review the working checkout in place; supply one to run the read inside an isolated worktree \u2014 the recipe for a review that must actually run build/test tooling."
+    );
+  }
+  if (profile.isolation !== "forbidden") {
+    shape.base = external_exports.string().trim().min(1).optional().describe(
+      "Optional ref to cut the worktree from (branch, tag, or SHA). Verified server-side before the worker starts; omit to use the repo's default base."
+    );
+    shape.doNotTouch = external_exports.array(external_exports.string()).optional().describe(
+      'Optional paths the worker must not touch (exact file, or directory prefix: "src/" matches "src/foo.ts"). Checked server-side against the worktree diff when the run ends; any hit is reported as contract_violations on the terminal result.'
     );
   }
   if (profile.model.kind === "caller-required") {
@@ -33864,6 +34024,8 @@ function registerTools(server, manager) {
           prompt: args.prompt,
           cwd: args.cwd,
           worktree: args.worktree,
+          base: args.base,
+          doNotTouch: args.doNotTouch,
           model: args.model,
           sandbox: args.sandbox,
           effort: args.effort
