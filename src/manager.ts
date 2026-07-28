@@ -803,7 +803,15 @@ export class LaneManager {
       }
       await this.computeTouched(run);
       await this.close(run.id);
-      run.failTurn(message);
+      // A connect failure is a real classifiable failure and used to be the one
+      // terminal path that carried NO failure_class at all. It is also the only
+      // path CLANKER-ENV-DRIFT (#37) can ever arrive on — a spawn that dies with
+      // ENOENT never gets far enough to run a turn — so leaving it unclassified
+      // would have made that tag unreachable code. classifyTurnFailure is not
+      // consulted here on purpose: its CLANKER-INFRA-FAILURE describes a backend
+      // that rejected the request SHAPE, which presupposes a backend that was
+      // reached; nothing here ever got that far.
+      run.failTurn(message, classifyBackendFailure(message));
       return;
     } finally {
       if (this.pendingConnects.get(run.id) === controller) this.pendingConnects.delete(run.id);

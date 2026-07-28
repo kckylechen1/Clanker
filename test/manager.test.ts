@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LaneManager, assertWorktreeOutsideRepo, type SpecResolver, type WaitResult } from "../src/manager.js";
-import { INFRA_FAILURE_TAG } from "../src/failure-classifier.js";
+import { ENV_DRIFT_TAG, INFRA_FAILURE_TAG } from "../src/failure-classifier.js";
 import { LaneRun } from "../src/run.js";
 import type { LaneRequestOptions } from "../src/types.js";
 import { fakeResolver, fakeSpec, until } from "./helpers.js";
@@ -315,6 +315,31 @@ test("CP1: a subprocess that exits mid-turn drives the run to error and dispatch
     const r = await waitTerminal(m, id, 5000);
     assert.equal(r.status, "error");
     assert.match(r.error ?? "", /exited mid-turn/);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+/**
+ * #37: the 2026-07-28 shape end to end — the command a long-lived server spawns
+ * is gone, so connect() never gets a process at all. That failure used to be
+ * the ONE terminal path carrying no failure_class, which is how an environment
+ * break reached the dispatcher wearing a task failure's clothes.
+ */
+test("#37: a spawn ENOENT reaches the dispatcher tagged CLANKER-ENV-DRIFT", async () => {
+  const gone = path.join(os.tmpdir(), "clanker-node-bumped-away", "bin", "node");
+  const m = new LaneManager({
+    resolveSpec: () => ({ command: gone, args: ["whatever.mjs"], env: {}, warnings: [] }),
+    disableReaper: true,
+    baseRepo: os.tmpdir(),
+  });
+  try {
+    const { id } = await m.dispatchStart({ lane: "codex", prompt: "hello", cwd: os.tmpdir(), readOnly: true });
+    const r = await waitTerminal(m, id, 5000);
+    assert.equal(r.status, "error");
+    assert.match(r.error ?? "", /ENOENT/);
+    assert.equal(r.failure_class, ENV_DRIFT_TAG, "an ENOENT spawn is the environment, not the task");
+    assert.equal(m.status(id).failure_class, ENV_DRIFT_TAG, "status must carry the same verdict as wait");
   } finally {
     await m.shutdown();
   }

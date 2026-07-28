@@ -81,6 +81,9 @@ export const BACKEND_BILLING_TAG = "CLANKER-BACKEND-BILLING";
 /** Machine-checkable tag for a permanent backend auth/credential rejection. */
 export const BACKEND_AUTH_TAG = "CLANKER-BACKEND-AUTH";
 
+/** Machine-checkable tag for a local ENVIRONMENT failure: the spawn never reached any backend. */
+export const ENV_DRIFT_TAG = "CLANKER-ENV-DRIFT";
+
 /**
  * Backend billing-account failure signatures. 2026-07-24 incident (issue
  * #9): Grok's ACP bridge returned HTTP 402 ("API error (status 402 Payment
@@ -109,6 +112,33 @@ const BACKEND_AUTH_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
+ * Local environment drift — the spawn itself failed to find its command, so
+ * nothing was ever asked of any backend (issue #37).
+ *
+ * 2026-07-28: a homebrew revision bump deleted the Cellar directory three
+ * hours-old MCP servers had cached in `process.execPath`, and every subsequent
+ * lane spawn came back `spawn /opt/homebrew/Cellar/node/26.5.0/bin/node
+ * ENOENT`. The relay seat reported it verbatim and correctly, but as an
+ * untagged CLANKER-FAILURE it reads exactly like a task/backend failure — the
+ * dispatcher's first instinct is to re-dispatch, and re-dispatching is
+ * precisely useless: nothing about the environment changed. node-binary.ts now
+ * degrades around the common cause; this tag is what a dispatcher sees when
+ * the spawn dies anyway, and it says the fix is on the machine, not in the
+ * task. Same family as #9's GROK_HOME drift: long-lived process vs. an
+ * environment that moved underneath it.
+ *
+ * Checked AFTER billing/auth, deliberately: those two describe what a backend
+ * said, and a backend that answered at all was reached by a spawn that
+ * succeeded — so on any message where both could match, the backend's own
+ * words are the more specific truth.
+ */
+const ENV_DRIFT_PATTERNS: readonly RegExp[] = [
+  // Node's own spawn error text: `spawn <command> ENOENT` (the command may
+  // itself contain spaces, hence `.+` rather than `\S+`).
+  /spawn .+ ENOENT/i,
+];
+
+/**
  * Classify a failure message as a permanent backend billing or auth
  * rejection. Unlike classifyTurnFailure's CLANKER-INFRA-FAILURE (scoped to a
  * turn-1, zero-tool-call schema rejection), a billing/auth failure is
@@ -130,8 +160,11 @@ const BACKEND_AUTH_PATTERNS: readonly RegExp[] = [
  * passed in), not lexical — this function cannot itself tell content from a
  * real backend rejection, since both are just strings.
  */
-export function classifyBackendFailure(message: string): typeof BACKEND_BILLING_TAG | typeof BACKEND_AUTH_TAG | undefined {
+export function classifyBackendFailure(
+  message: string,
+): typeof BACKEND_BILLING_TAG | typeof BACKEND_AUTH_TAG | typeof ENV_DRIFT_TAG | undefined {
   if (BACKEND_BILLING_PATTERNS.some((re) => re.test(message))) return BACKEND_BILLING_TAG;
   if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;
+  if (ENV_DRIFT_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   return undefined;
 }

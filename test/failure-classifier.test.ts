@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyTurnFailure, INFRA_FAILURE_TAG, isCapacityTransient } from "../src/failure-classifier.js";
+import {
+  BACKEND_AUTH_TAG,
+  BACKEND_BILLING_TAG,
+  ENV_DRIFT_TAG,
+  classifyBackendFailure,
+  classifyTurnFailure,
+  INFRA_FAILURE_TAG,
+  isCapacityTransient,
+} from "../src/failure-classifier.js";
 
 // ---- CLANKER-INFRA-FAILURE classification --------------------------------
 //
@@ -82,4 +90,39 @@ test("isCapacityTransient does not match ordinary failures or 4xx client errors"
   assert.equal(isCapacityTransient("lane process exited mid-turn (code=1 signal=null)"), false);
   assert.equal(isCapacityTransient('{"error":{"type":"invalid_request_error","param":"tools"}}'), false);
   assert.equal(isCapacityTransient("HTTP 400 bad request"), false);
+});
+
+// ---- CLANKER-ENV-DRIFT classification (#37) ------------------------------
+//
+// The 2026-07-28 incident's literal text: a homebrew revision bump deleted the
+// Cellar directory three long-lived servers had cached in process.execPath, and
+// every lane spawn afterwards came back ENOENT. Untagged, that reads like a task
+// failure and invites a useless re-dispatch.
+
+test("tags a spawn ENOENT as CLANKER-ENV-DRIFT — the environment moved, not the task", () => {
+  assert.equal(
+    classifyBackendFailure(
+      "failed to spawn '/opt/homebrew/Cellar/node/26.5.0/bin/node': spawn /opt/homebrew/Cellar/node/26.5.0/bin/node ENOENT",
+    ),
+    ENV_DRIFT_TAG,
+  );
+  // A command path with spaces in it still classifies.
+  assert.equal(
+    classifyBackendFailure("failed to spawn 'grok': spawn /Applications/My Tools/grok ENOENT"),
+    ENV_DRIFT_TAG,
+  );
+});
+
+test("a backend that ANSWERED outranks env drift — billing/auth are checked first", () => {
+  // Both signatures in one message: the backend was reached (so the spawn
+  // worked), and what it said is the more specific truth.
+  const billing = "spawn helper ENOENT was logged earlier; API error (status 402): usage balance exhausted";
+  assert.equal(classifyBackendFailure(billing), BACKEND_BILLING_TAG);
+  const auth = "spawn helper ENOENT was logged earlier; 401 unauthorized";
+  assert.equal(classifyBackendFailure(auth), BACKEND_AUTH_TAG);
+});
+
+test("ordinary failures are still untagged — ENOENT alone is not enough", () => {
+  assert.equal(classifyBackendFailure("ENOENT: no such file or directory, open 'result.md'"), undefined);
+  assert.equal(classifyBackendFailure("turn exceeded CLANKER_TURN_TIMEOUT_MS (2700000ms)"), undefined);
 });

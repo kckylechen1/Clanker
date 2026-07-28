@@ -23,6 +23,7 @@ import type {
   WriteTextFileResponse,
 } from "@agentclientprotocol/sdk";
 import { HANDSHAKE_TIMEOUT_MS, PROCESS_TERM_GRACE_MS } from "./constants.js";
+import { resolveNodeBinary } from "./node-binary.js";
 import type { SpawnSpec } from "./types.js";
 
 /** Minimal promise-with-resolvers helper (Node's Promise.withResolvers exists on 22+ but kept explicit). */
@@ -259,13 +260,18 @@ export class LaneConnection {
       );
     }
 
-    const nodeBinDir = path.dirname(process.execPath);
+    // #37: through resolveNodeBinary, so the prepended directory is the one
+    // that still EXISTS. When the recorded binary is gone the fallback is the
+    // bare name `node` (PATH resolves it), which has no directory to prepend —
+    // and prepending the dead one would only re-assert the vanished layout.
+    const nodeBin = resolveNodeBinary();
+    const nodeBinDir = path.isAbsolute(nodeBin) ? path.dirname(nodeBin) + path.delimiter : "";
     const child = spawn(spec.command, spec.args, {
       cwd,
       env: {
         ...process.env,
         ...spec.env,
-        PATH: `${nodeBinDir}${path.delimiter}${spec.env?.PATH ?? process.env.PATH ?? ""}`,
+        PATH: `${nodeBinDir}${spec.env?.PATH ?? process.env.PATH ?? ""}`,
       },
       // Give every worker its own process group (pgid === worker pid) so the
       // kill paths above can take down the grandchildren it spawns — see

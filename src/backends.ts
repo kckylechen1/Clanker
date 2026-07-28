@@ -98,6 +98,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_CODEX_EFFORT, DEFAULT_CODEX_MODEL, isGlmModel, resolveOcModel } from "./constants.js";
 import { resolveGrokHome } from "./grok-diagnostics.js";
+import { resolveNodeBinary } from "./node-binary.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "./types.js";
 
 const nodeRequire = createRequire(import.meta.url);
@@ -359,7 +360,9 @@ export function buildSpawnSpec(
       }
       if (effort) env.CLANKER_GEMINI_EFFORT = effort;
       return wrapWithVaultExec(
-        { command: process.execPath, args: [resolveGeminiAcpEntry()], env, warnings },
+        // resolveNodeBinary(), not process.execPath: this server can outlive
+        // the path it was launched from (#37).
+        { command: resolveNodeBinary(), args: [resolveGeminiAcpEntry()], env, warnings },
         requiredEnvFor(lane, opts),
       );
     }
@@ -470,7 +473,9 @@ export function buildSpawnSpec(
       // downloaded — CODEX_PATH is load-bearing, not an optional override.
       env.CODEX_PATH = resolveSystemCodexPath();
       return wrapWithVaultExec(
-        { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings },
+        // resolveNodeBinary(), not process.execPath: this server can outlive
+        // the path it was launched from (#37).
+        { command: resolveNodeBinary(), args: [resolveCodexAcpEntry()], env, warnings },
         requiredEnvFor(lane, opts),
       );
     }

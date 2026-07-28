@@ -7,6 +7,7 @@ import path from "node:path";
 import { LaneConnection } from "../src/acp-client.js";
 import { buildSpawnSpec } from "../src/backends.js";
 import { LaneManager } from "../src/manager.js";
+import { resolveNodeBinary } from "../src/node-binary.js";
 import { fakeResolver, fakeSpec } from "./helpers.js";
 
 const workspaceSandboxAvailable = (() => {
@@ -85,7 +86,8 @@ test("Gemini backend is read-only, defaults model, and passes effort through sid
     return;
   }
   const spec = buildSpawnSpec("gemini", { readOnly: true, effort: "high" }, runDir);
-  assert.equal(spec.command, process.execPath);
+  // #37: the sidecar's node is the recorded-and-still-existing one.
+  assert.equal(spec.command, resolveNodeBinary());
   assert.match(spec.args[0], /gemini-acp\.m?js$/);
   assert.equal(spec.env.CLANKER_GEMINI_MODEL, "gemini-3.6-flash-high");
   assert.equal(spec.env.CLANKER_GEMINI_EFFORT, "high");
