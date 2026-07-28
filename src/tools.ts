@@ -84,6 +84,13 @@ function narrowShape(profile: DispatchProfile): Record<string, z.ZodTypeAny> {
   }
   if (profile.model.kind === "caller-required") {
     shape.model = z.string().trim().min(1).describe("Required explicit model id or supported alias for this lane");
+  } else if (profile.model.kind === "caller-optional") {
+    shape.model = z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(`Optional model id or supported alias for this lane (default ${profile.model.defaultId}).`);
   }
   if (profile.sandbox?.kind === "caller") {
     shape.sandbox = sandboxEnum
@@ -150,6 +157,9 @@ function describe(profile: DispatchProfile): string {
     `Server-welded: ${welded}. Isolation: ${profile.isolation} — ${isolation}.`,
     profile.sandbox?.kind === "caller"
       ? `Caller-selectable sandbox across all three Codex tiers, default ${profile.sandbox.defaultMode}.`
+      : undefined,
+    profile.model.kind === "caller-optional"
+      ? `Model is a free parameter; omitting it runs the lane's pinned default (${profile.model.defaultId}).`
       : undefined,
     profile.secrets.length
       ? `Credentials: ${profile.secrets.join(", ")} materialized from the OS keychain via \`tachi vault exec\` at spawn time — never passed as a parameter.`

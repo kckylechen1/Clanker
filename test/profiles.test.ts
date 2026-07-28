@@ -15,7 +15,7 @@ import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { buildSpawnSpec } from "../src/backends.js";
-import { isGlmModel } from "../src/constants.js";
+import { isGlmModel, LANES_WITH_PINNED_WRITE_MODEL } from "../src/constants.js";
 import type { ClankerHost } from "../src/host.js";
 import { LaneManager } from "../src/manager.js";
 import {
@@ -151,9 +151,13 @@ test("#19-F1: no generated start tool exposes lane or read_only, or a welded mod
     for (const welded of ["lane", "read_only", "profile", "supervision", "secrets"]) {
       assert.equal(keys.includes(welded), false, `clanker_start_${profile.id} must not expose '${welded}'`);
     }
+    // Two policies put `model` on the schema (required, optional) and two keep
+    // it off (welded, lane-default). Spelled out rather than delegated to
+    // `modelIsCallerSupplied`, so that helper changing behaviour cannot make
+    // this assertion agree with it automatically.
     assert.equal(
       keys.includes("model"),
-      profile.model.kind === "caller-required",
+      profile.model.kind === "caller-required" || profile.model.kind === "caller-optional",
       `clanker_start_${profile.id}: model exposure must match the registry model policy`,
     );
     assert.equal(
@@ -817,7 +821,10 @@ test("#19-5: the registry never emits a dispatch the manager would have to rejec
     if (resolved.readOnly && resolved.lane === "codex") {
       assert.equal(resolved.sandbox, "read-only", `${profile.id} would trip writeCapableSandbox`);
     }
-    if (!resolved.readOnly && resolved.lane !== "codex") {
+    // The manager's rule, consulted rather than restated: a write may omit the
+    // model only on a lane whose backend pins a load-bearing default. A second
+    // literal list here would go green while the manager rejected the dispatch.
+    if (!resolved.readOnly && !LANES_WITH_PINNED_WRITE_MODEL.has(resolved.lane)) {
       assert.ok(resolved.model?.trim(), `${profile.id} must carry an explicit model`);
     }
     if (resolved.lane === "gemini") assert.equal(resolved.readOnly, true);

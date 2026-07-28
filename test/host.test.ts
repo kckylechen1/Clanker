@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { SERVER_VERSION } from "../src/constants.js";
 import { hostLaneBlockedReason, laneNamesForHost, parseHostArgs } from "../src/host.js";
 import { LaneManager } from "../src/manager.js";
+import { LANE_NAMES } from "../src/types.js";
 
 test("host parser defaults and accepts both CLI forms", () => {
   assert.equal(parseHostArgs([]), "standalone");
@@ -15,10 +16,21 @@ test("host parser defaults and accepts both CLI forms", () => {
 });
 
 test("codex host prohibits only self-dispatch", () => {
-  assert.deepEqual(laneNamesForHost("codex"), ["opencode", "grok", "gemini"]);
-  assert.deepEqual(laneNamesForHost("claude"), ["codex", "opencode", "grok", "gemini"]);
+  assert.deepEqual(laneNamesForHost("codex"), ["opencode", "grok", "gemini", "cursor"]);
+  assert.deepEqual(laneNamesForHost("claude"), ["codex", "opencode", "grok", "gemini", "cursor"]);
   assert.match(hostLaneBlockedReason("codex", "codex") ?? "", /self-dispatch/);
   assert.equal(hostLaneBlockedReason("codex", "grok"), undefined);
+  // The cursor lane is nobody's own harness, so no host self-dispatches it —
+  // it must be reachable from every host, including the Codex adapter.
+  assert.equal(hostLaneBlockedReason("codex", "cursor"), undefined);
+  assert.equal(hostLaneBlockedReason("claude", "cursor"), undefined);
+  // The codex list is DERIVED (host.ts) — every lane but the host's own, with
+  // nothing dropped. A literal list here would go stale silently; this one
+  // fails the moment the derivation stops covering the registry.
+  assert.deepEqual(
+    [...laneNamesForHost("codex")].sort(),
+    LANE_NAMES.filter((lane) => lane !== "codex").sort(),
+  );
 });
 
 test("manager blocks host self-dispatch before backend resolution", async () => {

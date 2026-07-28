@@ -18,7 +18,7 @@ function capture(manager: any) {
 }
 
 test("laneEnum accepts exactly the backend registry", () => {
-  assert.deepEqual([...LANE_NAMES].sort(), ["codex", "gemini", "grok", "opencode"]);
+  assert.deepEqual([...LANE_NAMES].sort(), ["codex", "cursor", "gemini", "grok", "opencode"]);
   for (const lane of LANE_NAMES) assert.equal(laneEnum.parse(lane), lane);
   for (const bad of ["claude", "", "Codex"]) assert.throws(() => laneEnum.parse(bad));
 });
@@ -34,6 +34,8 @@ test("public tools are the five lifecycle tools plus exactly one generated tool 
     "clanker_prompt",
     "clanker_start_codex-review",
     "clanker_start_codex-write",
+    "clanker_start_cursor-review",
+    "clanker_start_cursor-write",
     "clanker_start_gemini-recon",
     "clanker_start_gemini-research",
     "clanker_start_grok-review",

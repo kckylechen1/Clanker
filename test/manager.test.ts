@@ -591,7 +591,9 @@ test("manager requires explicit external write models and rejects unsupervised G
         new RegExp(`explicit model is required for write lane '${lane}'`),
       );
     }
-    for (const lane of ["codex", "opencode", "grok"] as const) {
+    // The GLM gate is lane-agnostic on purpose — including on lanes whose own
+    // backend pins a default model and therefore skips the loop above.
+    for (const lane of ["codex", "opencode", "grok", "cursor"] as const) {
       await assert.rejects(
         () => m.dispatchStart({ lane, model: "glm", prompt: "write", readOnly: false, worktree: "never-created" }),
         /direct GLM write is prohibited; use profile='kimi-crew'/,

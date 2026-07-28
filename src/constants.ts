@@ -149,6 +149,52 @@ export function resolveOcModel(model: string | undefined): string | undefined {
   return OC_MODEL_ALIASES[model] ?? model;
 }
 
+/**
+ * Cursor-lane model shortnames. A SEPARATE namespace from OC_MODEL_ALIASES on
+ * purpose: `composer` means `xai/grok-composer-2.5-fast` when opencode serves
+ * it and `composer-2.5` when Cursor does — same word, different provider, and
+ * merging the two maps would make one of them silently wrong.
+ *
+ * Every target is a real id from `cursor-agent`'s own model list (read off the
+ * CLI's refusal message for an unknown model, 2026-07-28).
+ */
+export const CURSOR_MODEL_ALIASES: Readonly<Record<string, string>> = {
+  composer: "composer-2.5",
+  grok: "cursor-grok-4.5-high",
+  codex53: "gpt-5.3-codex-high",
+};
+
+/**
+ * The cursor lane's pinned default.
+ *
+ * Load-bearing exactly like DEFAULT_CODEX_MODEL above: cursor-agent's own
+ * default is not stable — two back-to-back probes with no `--model` reported
+ * `Cursor Grok 4.5` and `Cursor Grok 4.5 High Fast` — so an unpinned dispatch
+ * cannot say what it ran on. cursor-acp.ts carries the same literal for
+ * standalone runs; keep the two in sync (#13's shadowing hazard).
+ */
+export const DEFAULT_CURSOR_MODEL = "composer-2.5";
+
+/** Expand a cursor model shortname to its full id; pass through unknown/full ids. */
+export function resolveCursorModel(model: string | undefined): string | undefined {
+  if (!model) return model;
+  return CURSOR_MODEL_ALIASES[model.trim()] ?? model.trim();
+}
+
+/**
+ * Lanes whose backend pins a load-bearing default model, so a write dispatch
+ * may omit one.
+ *
+ * The rule this encodes: a write must never let the HARNESS's own interactive
+ * configuration choose the model (that is how an opencode write could land on
+ * an unintended provider). Where Clanker itself pins the default — codex via
+ * DEFAULT_CODEX_MODEL, cursor via DEFAULT_CURSOR_MODEL — the caller omitting a
+ * model still yields a known, reproducible model, so the requirement would only
+ * be ceremony. Membership is a claim about backends.ts and must be checked
+ * there before a lane is added.
+ */
+export const LANES_WITH_PINNED_WRITE_MODEL: ReadonlySet<string> = new Set(["codex", "cursor"]);
+
 const GLM_PROVIDER_PREFIX = `${OC_MODEL_ALIASES.glm.split("/", 1)[0]}/`;
 
 /** True when a shortname or full model id resolves to the supervised GLM provider. */

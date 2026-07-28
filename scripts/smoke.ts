@@ -126,9 +126,11 @@ async function runCanary(lane: LaneName, model: string | undefined): Promise<voi
   process.exitCode = r.ok ? 0 : 1;
 }
 
-/** Full 4-lane regression sweep — `npm run smoke` with no args. */
+/** Full regression sweep over every registered lane — `npm run smoke` with no args. */
 async function runFullBattery(): Promise<void> {
-  const backends: LaneName[] = ["codex", "opencode", "grok", "gemini"];
+  // Derived from the registry, never a parallel list: a lane added to
+  // LANE_NAMES and forgotten here would ship with no smoke coverage at all.
+  const backends: LaneName[] = [...LANE_NAMES];
   const rows: Row[] = [];
   for (const lane of backends) {
     process.stderr.write(`\n[smoke] ${lane}: dispatching read-only micro prompt...\n`);

@@ -63,11 +63,20 @@ export type ProfileRoleClass = "scout" | "reviewer" | "implementer";
  *  - `caller-required`— the lane fails closed without an explicit model
  *                       (backends.ts opencode guard), and no single model is
  *                       correct for the profile, so the caller must name one.
+ *  - `caller-optional`— the caller MAY name any model the lane serves, and the
+ *                       lane's pinned default runs when they do not. Distinct
+ *                       from `lane-default`, which forbids the argument
+ *                       entirely: the cursor lane serves ~200 models across
+ *                       four vendors on one subscription, so choosing among
+ *                       them is the point of the lane, while still having one
+ *                       reproducible default (`defaultId`, documentation of
+ *                       what backends.ts pins — never a second source for it).
  */
 export type ProfileModelPolicy =
   | { readonly kind: "welded"; readonly id: string }
   | { readonly kind: "lane-default" }
-  | { readonly kind: "caller-required" };
+  | { readonly kind: "caller-required" }
+  | { readonly kind: "caller-optional"; readonly defaultId: string };
 
 export interface DispatchProfile {
   /** Profile id — this string IS the public interface (`clanker_start_<id>`). */
@@ -103,6 +112,30 @@ export interface DispatchProfile {
  * still fires first instead of being preempted.
  */
 const GEMINI_TURN_TIMEOUT_MS = 660_000;
+
+/**
+ * Cursor's read ceiling. The sidecar caps a read-only `cursor-agent` print at
+ * 10m and classifies timeout-vs-crash there, so the manager ceiling sits just
+ * above it — same ordering as gemini's 10m/11m pair, for the same reason: the
+ * sidecar's classification must fire first instead of being preempted by a
+ * generic manager kill. (The write profile keeps the standard 45m ceiling and
+ * the sidecar's write-mode default is 40m, preserving the same ordering.)
+ */
+const CURSOR_REVIEW_TURN_TIMEOUT_MS = 900_000;
+
+/**
+ * Routing judgment, carried on both cursor rows because a seat description is
+ * where a dispatcher actually reads it: Composer 2.5 is a BOUNDED
+ * single-layer-scaffolding worker (composer-2.5 lane card, #1368). Provenance
+ * and identity-critical cores must still be screened by a different vendor —
+ * this lane is not a general-purpose implementer, and selling it as one is how
+ * a cheap fast model ends up owning a load-bearing decision.
+ */
+const CURSOR_ROUTING_NOTE =
+  "Routing: the default Composer 2.5 is a bounded single-layer-scaffolding tier (composer-2.5 lane card, " +
+  "#1368) — provenance and identity-critical cores still require a cross-vendor screen, so do not route " +
+  "those here. Model is a free parameter: the same Cursor subscription also serves cursor-grok-4.5-high " +
+  "(alias `grok`) and gpt-5.3-codex-high (alias `codex53`).";
 
 export const DISPATCH_PROFILES: readonly DispatchProfile[] = [
   {
@@ -255,6 +288,41 @@ export const DISPATCH_PROFILES: readonly DispatchProfile[] = [
     status: "active",
   },
   {
+    id: "cursor-review",
+    title: "Cursor cold review (read-only, in place)",
+    description:
+      "Read-only Cursor review through the cursor-agent headless stream. read_only=true is welded and the " +
+      "lane runs cursor's own read-only execution mode plus its sandbox on top of it; an optional worktree " +
+      "branch runs the review inside an isolated tree instead of the working checkout. " +
+      CURSOR_ROUTING_NOTE,
+    lane: "cursor",
+    model: { kind: "caller-optional", defaultId: "composer-2.5" },
+    readOnly: true,
+    isolation: "optional",
+    secrets: [],
+    turnTimeoutMs: CURSOR_REVIEW_TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "reviewer",
+    status: "active",
+  },
+  {
+    id: "cursor-write",
+    title: "Cursor implementation (isolated worktree)",
+    description:
+      "Write-capable Cursor worker. read_only=false is welded and a managed worktree branch is mandatory, " +
+      "so writes are boxed to the worktree rather than to cursor's own `--worktree`, which Clanker does not " +
+      "use. " + CURSOR_ROUTING_NOTE,
+    lane: "cursor",
+    model: { kind: "caller-optional", defaultId: "composer-2.5" },
+    readOnly: false,
+    isolation: "required",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "implementer",
+    status: "active",
+  },
+  {
     id: "grok-review",
     title: "Grok cold review (read-only, in place)",
     description:
@@ -333,11 +401,16 @@ export function allCombinations(): { lane: LaneName; readOnly: boolean }[] {
   return combos;
 }
 
+/** True when the caller may name a model at all — the two policies that expose the parameter. */
+export function modelIsCallerSupplied(profile: DispatchProfile): boolean {
+  return profile.model.kind === "caller-required" || profile.model.kind === "caller-optional";
+}
+
 /** Free (caller-supplied) parameter names for a profile — exactly what its generated tool exposes. */
 export function freeParams(profile: DispatchProfile): string[] {
   const params = ["prompt", "cwd"];
   if (profile.isolation !== "forbidden") params.push("worktree", "base", "doNotTouch");
-  if (profile.model.kind === "caller-required") params.push("model");
+  if (modelIsCallerSupplied(profile)) params.push("model");
   if (profile.sandbox?.kind === "caller") params.push("sandbox");
   params.push("effort");
   return params;
@@ -461,6 +534,14 @@ export function resolveProfileDispatch(
         throw new Error(`profile '${profile.id}' uses the lane's configured default model; it takes no model argument`);
       }
       model = undefined;
+      break;
+    case "caller-optional":
+      // Undefined, deliberately, when the caller named nothing: the default
+      // belongs to backends.ts (and is mirrored into resolved_model by run.ts).
+      // Substituting `defaultId` here would make the registry a SECOND source
+      // for the pinned default, and the two would drift the first time one
+      // moved — the failure mode #13 documents for the gemini print-timeout.
+      model = input.model?.trim() || undefined;
       break;
     case "caller-required":
       if (!input.model?.trim()) {

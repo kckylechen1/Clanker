@@ -19,6 +19,7 @@ import {
   DEFAULT_STALL_THRESHOLD_MS,
   HANDSHAKE_TIMEOUT_MS,
   isGlmModel,
+  LANES_WITH_PINNED_WRITE_MODEL,
   RUNS_ROOT,
   TURN_TIMEOUT_MS,
   WRITE_DISCIPLINE_PREFIX,
@@ -165,7 +166,11 @@ function validateDispatchParams(
   }
   const readOnly = params.lane === "gemini" ? true : (params.readOnly ?? false);
   if (params.lane === "gemini" && params.worktree) throw new Error("Clanker: Gemini rejects worktree");
-  if (!readOnly && params.lane !== "codex" && !params.model?.trim()) {
+  // A write must never let the LANE'S OWN interactive configuration pick the
+  // model. Where Clanker pins the default itself the requirement is satisfied
+  // without the caller naming one — see LANES_WITH_PINNED_WRITE_MODEL, which
+  // replaced a growing `lane !== "codex"` blacklist.
+  if (!readOnly && !LANES_WITH_PINNED_WRITE_MODEL.has(params.lane) && !params.model?.trim()) {
     throw new Error(`an explicit model is required for write lane '${params.lane}'`);
   }
   // GLM writes are supervised-only. 0.2.5 expressed this as "GLM writes
