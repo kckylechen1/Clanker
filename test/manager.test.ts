@@ -321,8 +321,18 @@ test("a capacity-transient first-turn failure auto-retries once (after backoff) 
 test("a capacity-transient failure on the SECOND attempt is not retried again (single-retry cap)", async () => {
   // No marker file ever gets created by this scenario keyword, so every
   // attempt "at capacity"s — proves the retry budget is exactly one, not
-  // unbounded.
-  const m = makeManager({ capacityRetryBackoffMs: 20 });
+  // unbounded. status=error + /capacity/i alone is also satisfied by an
+  // implementation that retries 5 times before giving up, so pin the actual
+  // attempt count via the CLANKER_TEST_ATTEMPT_COUNTER mechanism used below
+  // (:341+): exactly 2 (first attempt + one retry), never more.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-capacity-cap-"));
+  const counter = path.join(dir, "attempts");
+  const m = new LaneManager({
+    resolveSpec: () => fakeSpec({ CLANKER_TEST_ATTEMPT_COUNTER: counter }),
+    disableReaper: true,
+    baseRepo: os.tmpdir(),
+    capacityRetryBackoffMs: 20,
+  });
   try {
     const { id } = await m.dispatchStart({
       lane: "codex",
@@ -333,8 +343,10 @@ test("a capacity-transient failure on the SECOND attempt is not retried again (s
     const r = await waitTerminal(m, id, 5000);
     assert.equal(r.status, "error");
     assert.match(r.error ?? "", /capacity/i);
+    assert.equal(fs.readFileSync(counter, "utf8"), "2", "exactly first attempt + one retry, no more");
   } finally {
     await m.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -356,7 +368,10 @@ test("shutdown wakes capacity backoff immediately without spawning attempt two",
     const started = Date.now();
     await m.shutdown();
     const elapsed = Date.now() - started;
-    assert.ok(elapsed < 1_000, `shutdown should wake backoff, elapsed=${elapsed}ms`);
+    // Upper bound is generous (not tight-1s) because it includes OS process
+    // teardown, not just this process's backoff-wake logic — see #29-class
+    // note in test/gemini-acp.test.ts:285-297.
+    assert.ok(elapsed < 5_000, `shutdown should wake backoff, elapsed=${elapsed}ms`);
     assert.equal(m.status(id).status, "cancelled");
     assert.equal(fs.readFileSync(counter, "utf8"), "1", "shutdown must not spawn attempt two");
   } finally {
@@ -384,7 +399,10 @@ test("cancel wakes capacity backoff immediately without spawning attempt two", a
     m.cancel(id);
     await until(() => m.status(id).status === "cancelled", 1_000);
     const elapsed = Date.now() - started;
-    assert.ok(elapsed < 1_000, `cancel should wake backoff, elapsed=${elapsed}ms`);
+    // Upper bound is generous (not tight-1s) because it includes OS process
+    // teardown, not just this process's backoff-wake logic — see #29-class
+    // note in test/gemini-acp.test.ts:285-297.
+    assert.ok(elapsed < 5_000, `cancel should wake backoff, elapsed=${elapsed}ms`);
     assert.equal(fs.readFileSync(counter, "utf8"), "1", "cancel must not spawn attempt two");
   } finally {
     await m.shutdown();
@@ -434,7 +452,7 @@ test("kimi-crew profile fixes the single OpenCode lifecycle request", async () =
   };
   const repo = makeCrewBaseRepo();
   const m = new LaneManager({ resolveSpec: spy, disableReaper: true, baseRepo: repo.base });
-  const branch = `clanker/kimi-crew-test-${Date.now()}`;
+  const branch = `clanker/kimi-crew-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     const { id } = await m.dispatchStart({
       lane: "opencode", profile: "kimi-crew", prompt: "implement and review", worktree: branch,
@@ -560,7 +578,7 @@ test("#12: read-only dispatch with cwd+worktree also cuts from the cwd's repo, n
     .toString()
     .trim();
   const m = new LaneManager({ resolveSpec: fakeResolver, disableReaper: true, baseRepo: host.base });
-  const branch = `clanker/ro-xrepo-${Date.now()}`;
+  const branch = `clanker/ro-xrepo-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     const { id } = await m.dispatchStart({
       lane: "codex",
@@ -598,7 +616,7 @@ test("#12: write dispatch cuts its worktree from the cwd's repo, not the host ba
     .toString()
     .trim();
   const m = new LaneManager({ resolveSpec: fakeResolver, disableReaper: true, baseRepo: host.base });
-  const branch = `clanker/xrepo-${Date.now()}`;
+  const branch = `clanker/xrepo-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     const { id } = await m.dispatchStart({
       lane: "codex",
@@ -688,7 +706,7 @@ test("cancel during handshake waits for child exit and cannot publish a late con
   });
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "too late", cwd: os.tmpdir(), readOnly: true });
-    await until(() => fs.existsSync(pidFile), 1000);
+    await until(() => fs.existsSync(pidFile), 10_000);
     const pid = Number(fs.readFileSync(pidFile, "utf8"));
     const result = await m.cancel(id);
     assert.equal(result.status, "cancelled");
@@ -733,9 +751,14 @@ test("shutdown terminates an active initial turn without deadlocking on its driv
     lane: "codex", prompt: "STALL during shutdown", cwd: os.tmpdir(), readOnly: true,
   });
   await until(() => m.status(id).tool_calls === 1, 4000);
+  // 10s upper bound, not a deadlock detector: this waits on the OS actually
+  // tearing down the terminated child process, not on this process's own
+  // logic hanging — same class as #29 (test/gemini-acp.test.ts:285-297).
   await Promise.race([
     m.shutdown(),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("shutdown deadlocked")), 1000)),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("shutdown did not settle within 10000ms")), 10_000),
+    ),
   ]);
   assert.equal(m.status(id).status, "cancelled");
   assert.equal(m.list().some((entry) => entry.id === id), false);
@@ -777,4 +800,51 @@ test("reaper is idempotent after one-shot completion already closed the run", as
   } finally {
     await m.shutdown();
   }
+});
+
+test("reap() closes a supervised session's idle-past-TTL run and drops it from list()", async () => {
+  // Unlike the one-shot run above, a supervised run (manager.ts:701) stays
+  // open past its terminal turn — reap() is the only thing that ever closes
+  // it, so this is the one path that actually exercises manual reaping rather
+  // than reap() finding nothing to do.
+  const repo = makeCrewBaseRepo();
+  const m = new LaneManager({
+    resolveSpec: () => fakeSpec(),
+    disableReaper: true,
+    baseRepo: repo.base,
+    sessionTtlMs: 50,
+  });
+  try {
+    const { id } = await m.dispatchProfile({
+      profile: "oc-glm-write",
+      prompt: "implement the frozen spec",
+      worktree: `clanker/reap-${Math.random().toString(36).slice(2, 8)}`,
+    });
+    await until(() => m.status(id).status !== "running", 6_000);
+    assert.ok(m.list().find((e) => e.id === id), "the supervised session must still be open right after its turn ends");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const reaped = await m.reap();
+    assert.deepEqual(reaped, [id]);
+    assert.equal(m.list().find((e) => e.id === id), undefined, "reap() must close the session (list() drops it)");
+  } finally {
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("with the reaper enabled, a manager that was never dispatched to shuts down without hanging", async () => {
+  // No dispatch at all — this is purely "does an enabled reaper's setInterval
+  // keep the event loop (and thus `node --test`) alive forever", the thing
+  // `.unref()` (manager.ts:225) exists to prevent. Deliberately NOT waiting
+  // out a real reaper period (min 5s, manager.ts:223): the regression this
+  // guards is a deleted `.unref()`, which would not fail shutdown() itself —
+  // it would silently hang the whole test-file process after the last test —
+  // so the race below is a fast, deterministic proxy, not a real-time wait.
+  const m = new LaneManager({ resolveSpec: fakeResolver, baseRepo: os.tmpdir() });
+  await Promise.race([
+    m.shutdown(),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("shutdown with reaper enabled hung")), 2_000),
+    ),
+  ]);
 });

@@ -68,7 +68,7 @@ test("a directory with no telemetry is not reported as a run", () => {
   // never have spawned — worse than the silence it replaces.
   const root = makeRunsRoot();
   fs.mkdirSync(path.join(root, "codex-empty"), { recursive: true });
-  fs.writeFileSync(path.join(root, "codex-streams-only", "..", "stray"), "x");
+  fs.writeFileSync(path.join(root, "stray"), "x");
   fs.mkdirSync(path.join(root, "codex-streams-only"), { recursive: true });
   fs.writeFileSync(path.join(root, "codex-streams-only", "events.jsonl"), "{}\n");
 

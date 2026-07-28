@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -76,12 +77,21 @@ export function dropMutant(name: string): void {
   fs.rmSync(path.join(MUTANTS_ROOT, name), { recursive: true, force: true });
 }
 
-/** Poll `fn` until it returns true or the deadline passes. */
-export async function until(fn: () => boolean, timeoutMs = 4000, stepMs = 20): Promise<boolean> {
+/**
+ * Poll `fn` until it returns true, or throw if the deadline passes first.
+ *
+ * A silent-timeout version of this used to return `false` here, but none of
+ * the ~30 call sites across the suite checked the return value — a timeout
+ * would fall through to a downstream assertion that failed with an unrelated
+ * message instead of naming the condition that never became true. Fail loudly
+ * at the point of the actual timeout instead (mirrors the `waitUntil` in
+ * test/gemini-acp.test.ts:38-42).
+ */
+export async function until(fn: () => boolean, timeoutMs = 4000, stepMs = 20): Promise<true> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (fn()) return true;
     await new Promise((r) => setTimeout(r, stepMs));
   }
-  return fn();
+  assert.fail(`condition not met within ${timeoutMs}ms`);
 }

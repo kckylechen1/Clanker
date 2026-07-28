@@ -17,7 +17,7 @@
     "bundle:dist": "tsx scripts/bundle.ts",
     "clean": "rm -rf dist plugin/dist codex-plugin/dist",
     "typecheck": "tsc --noEmit",
-    "test": "CLANKER_RUNS_ROOT=\"$PWD/.test-tmp/runs\" CLANKER_WORKTREES_ROOT=\"$PWD/.test-tmp/worktrees\" CLANKER_LEDGER_DIR=\"$PWD/.test-tmp/ledger\" node --import tsx/esm --test test/*.test.ts",
+    "test": "rm -rf .test-tmp/runs .test-tmp/worktrees .test-tmp/ledger && CLANKER_RUNS_ROOT=\"$PWD/.test-tmp/runs\" CLANKER_WORKTREES_ROOT=\"$PWD/.test-tmp/worktrees\" CLANKER_LEDGER_DIR=\"$PWD/.test-tmp/ledger\" node --import tsx/esm --test test/*.test.ts",
     "smoke": "tsx scripts/smoke.ts",
     "start": "node dist/index.js"
   },

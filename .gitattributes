@@ -1,2 +1,2 @@
-plugin/dist/*.mjs -diff linguist-generated=true
-codex-plugin/dist/*.mjs -diff linguist-generated=true
+plugin/dist/*.mjs -diff linguist-generated=true -text
+codex-plugin/dist/*.mjs -diff linguist-generated=true -text
