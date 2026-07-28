@@ -147,7 +147,16 @@ export async function createWorktree(branch: string, targetRepo = BASE_REPO, bas
   return wtPath;
 }
 
-/** Porcelain-parsed list of changed paths in `cwd` (tracked + untracked). */
+/**
+ * Porcelain-parsed list of changed paths in `cwd` (tracked + untracked).
+ *
+ * A rename line (`XY <old> -> <new>`) reports BOTH the source and destination
+ * path, not just the destination: moving `src/keep.ts` to `allowed/keep.ts`
+ * touches `src/keep.ts` exactly as much as editing or deleting it would —
+ * "removing a file out of a doNotTouch directory" IS touching that directory.
+ * A destination-only report let a rename silently launder a forbidden-path
+ * edit into an unrelated one.
+ */
 export async function changedFiles(cwd: string): Promise<string[]> {
   const out = await git(cwd, ["status", "--porcelain"]);
   const files: string[] = [];
@@ -156,7 +165,11 @@ export async function changedFiles(cwd: string): Promise<string[]> {
     // Format: "XY <path>" or "XY <old> -> <new>" for renames.
     const rest = line.slice(3);
     const arrow = rest.indexOf(" -> ");
-    files.push(arrow >= 0 ? rest.slice(arrow + 4) : rest);
+    if (arrow >= 0) {
+      files.push(rest.slice(0, arrow), rest.slice(arrow + 4));
+    } else {
+      files.push(rest);
+    }
   }
   return files;
 }
@@ -225,14 +238,26 @@ export function assertWorktreeOutsideRepo(worktreePath: string, targetRepo: stri
 
 /**
  * Every path a worktree run touched relative to the commit it was cut from:
- * committed changes (`git diff --name-only <base>...HEAD`) UNION uncommitted
+ * committed changes (`git diff --name-only <base> HEAD`) UNION uncommitted
  * ones (`git status --porcelain`). The porcelain half is load-bearing, not
  * defensive: a worker that edits a forbidden file and never commits is the
  * same contract breach as one that commits it, and a diff-only check would
  * call the first one clean.
+ *
+ * TWO-dot diff (`<base> HEAD`), not three-dot (`<base>...HEAD`): three-dot
+ * diffs the merge-base of the two, which requires `base` and `HEAD` to share
+ * ancestry. `base` is the frozen SHA the worktree was cut from — normally an
+ * ancestor of HEAD, where two-dot and three-dot agree — but a worker that
+ * rewrites its branch onto an unrelated/orphan HEAD has no merge-base with
+ * that SHA at all, and three-dot then fails outright, leaving the terminal
+ * validation silently unable to see anything (the exact failure this
+ * function's caller must not treat as "nothing touched" — see the catch in
+ * `computeContractViolations`, manager.ts). Two-dot performs a direct tree
+ * comparison and needs no common ancestor, so it still finds real violations
+ * on a HEAD that three-dot could not even diff against.
  */
 export async function changedFilesSince(worktreePath: string, base: string): Promise<string[]> {
-  const out = await git(worktreePath, ["diff", "--name-only", `${base}...HEAD`]);
+  const out = await git(worktreePath, ["diff", "--name-only", base, "HEAD"]);
   const committed = out.split("\n").filter((line) => line.trim().length > 0);
   const uncommitted = await changedFiles(worktreePath);
   return [...new Set([...committed, ...uncommitted])];

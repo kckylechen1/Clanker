@@ -12,9 +12,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LaneManager, type WaitResult } from "../src/manager.js";
-import { deriveWorktreePath } from "../src/worktree.js";
-import { WRITE_DISCIPLINE_PREFIX } from "../src/constants.js";
-import { fakeResolver } from "./helpers.js";
+import { changedFilesSince, deriveWorktreePath } from "../src/worktree.js";
+import { RUNS_ROOT, WRITE_DISCIPLINE_PREFIX } from "../src/constants.js";
+import { fakeResolver, until } from "./helpers.js";
 
 /**
  * A real (origin + clone) repo with TWO commits on main, so an explicit `base`
@@ -114,6 +114,13 @@ test("base: a ref that does not resolve rejects the dispatch, quotes the caller 
   const repo = makeTwoCommitRepo();
   const m = makeManager(repo.base);
   const branch = `clanker/base-bogus-${Date.now()}`;
+  // node:test runs test FILES concurrently and RUNS_ROOT is one shared
+  // directory across the whole suite, so a plain before/after directory diff
+  // can pick up an unrelated run dir some other file created in the same
+  // window. Give this dispatch's bogus ref a run-unique marker and find the
+  // run dir by grepping telemetry.json for it, not by set difference alone.
+  const bogusRef = `refs/does/not-exist-bogus-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const before = new Set(fs.existsSync(RUNS_ROOT) ? fs.readdirSync(RUNS_ROOT) : []);
   try {
     await assert.rejects(
       () =>
@@ -124,15 +131,32 @@ test("base: a ref that does not resolve rejects the dispatch, quotes the caller 
           readOnly: false,
           worktree: branch,
           cwd: repo.base,
-          base: "refs/does/not-exist-bogus",
+          base: bogusRef,
         }),
       (e: Error) => {
-        assert.ok(e.message.includes("'refs/does/not-exist-bogus'"), "error quotes the caller's base verbatim");
+        assert.ok(e.message.includes(`'${bogusRef}'`), "error quotes the caller's base verbatim");
         assert.match(e.message, /refusing to fall back/, "no silent fallback to the default base");
         return true;
       },
     );
     assert.equal(fs.existsSync(deriveWorktreePath(branch)), false, "no worktree was created for a rejected base");
+
+    // A rejected dispatch must still leave a READABLE terminal stub (#35 / C1):
+    // resolveBaseCommit rejects before any worktree exists, but the run
+    // directory and its telemetry.json must exist by the time the throw
+    // reaches the caller, or foreign.ts's orphan scan (and every human reading
+    // the runs directory) sees a gap with no record of what happened.
+    const created = fs.readdirSync(RUNS_ROOT).filter((entry) => !before.has(entry));
+    const match = created.find((entry) => {
+      const telemetryPath = path.join(RUNS_ROOT, entry, "telemetry.json");
+      return fs.existsSync(telemetryPath) && fs.readFileSync(telemetryPath, "utf8").includes(bogusRef);
+    });
+    assert.ok(match, `expected a new run dir whose telemetry.json names '${bogusRef}'; new dirs: ${created.join(", ")}`);
+    const runDir = path.join(RUNS_ROOT, match!);
+    assert.ok(fs.existsSync(runDir), "run dir exists for the rejected base dispatch");
+    const telemetry = JSON.parse(fs.readFileSync(path.join(runDir, "telemetry.json"), "utf8"));
+    assert.ok(telemetry.terminal_at, "telemetry.json has terminal_at for the rejected dispatch");
+    assert.equal(telemetry.terminal_reason, "rejected");
   } finally {
     await m.shutdown();
   }
@@ -310,6 +334,137 @@ test("doNotTouch: supplied without a worktree is refused, not silently unchecked
   }
 });
 
+test("doNotTouch: a SUPERVISED success reports contract_violations at the FIRST terminal state, without waiting for close()", async () => {
+  // The supervised shape defers close() past the first terminal turn (see
+  // manager.ts finalizeTurn) so a correction can still be issued — but the
+  // supervising seat reads contract_violations off THAT first terminal
+  // wait/result.md, before it ever decides whether to correct. If the
+  // violation only appeared once closeRun() finally ran, a supervisor reading
+  // the first terminal state would see a clean run and never know to correct.
+  const repo = makeTwoCommitRepo();
+  const m = makeManager(repo.base);
+  const branch = `clanker/dnt-supervised-${Date.now()}`;
+  try {
+    const { id } = await m.dispatchProfile({
+      profile: "oc-glm-write",
+      prompt: "WRITEFILE src/forbidden.ts",
+      worktree: branch,
+      cwd: repo.base,
+      doNotTouch: ["src/"],
+    });
+    // #37 A1/A2-style race: `wait()` can observe `turnStatus === "done"` a tick
+    // before the drive promise's own bookkeeping (`turnDrives`) clears, so a
+    // `promptExisting` fired immediately off a `waitTerminal` return can still
+    // see "a turn is already running". `until()` polling on `status()` (as
+    // correction-turn.test.ts does) gives that bookkeeping a real macrotask to
+    // settle before the correction is sent.
+    await until(() => m.status(id).status !== "running", 6_000);
+    const r = m.status(id);
+    assert.equal(r.status, "done", "a violation never flips the run's status, supervised or not");
+    const w = await m.wait(id, 200);
+    assert.deepEqual(
+      w.contract_violations,
+      [{ pattern: "src/", files: ["src/forbidden.ts"] }],
+      "the FIRST terminal wait already carries the violation",
+    );
+    // And the session is still open for exactly the reason supervision
+    // exists: the supervisor can still send a correction turn.
+    await m.promptExisting(id, "you touched src/; move it back and finish", true);
+    await until(() => m.status(id).status !== "running", 6_000);
+    assert.equal(m.status(id).status, "done", "the correction turn ran on a still-open session");
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("doNotTouch: a rename OUT of a forbidden directory still reports the SOURCE path as touched", async () => {
+  const repo = makeTwoCommitRepo();
+  const m = makeManager(repo.base);
+  const branch = `clanker/dnt-rename-${Date.now()}`;
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "codex",
+      prompt: "CANCELME",
+      readOnly: false,
+      worktree: branch,
+      cwd: repo.base,
+      doNotTouch: ["src/"],
+    });
+    await until(() => m.status(id).tool_calls > 0, 4_000);
+    const wt = m.status(id).worktree;
+    assert.ok(wt, "worktree path present");
+    fs.mkdirSync(path.join(wt!, "allowed"), { recursive: true });
+    execFileSync("git", ["mv", "src/keep.ts", "allowed/keep.ts"], { cwd: wt!, stdio: "pipe" });
+    const cancelled = await m.cancel(id);
+    assert.equal(cancelled.status, "cancelled");
+    const w = await m.wait(id, 200);
+    assert.deepEqual(
+      w.contract_violations,
+      [{ pattern: "src/", files: ["src/keep.ts"] }],
+      "the rename's SOURCE path (inside the forbidden dir) must be reported — not just the destination it landed at",
+    );
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("changedFilesSince: a two-dot diff still finds real violations when HEAD is rewritten onto an unrelated/orphan history", async () => {
+  // Direct unit test of the worktree.ts fix: a three-dot diff against `base`
+  // requires a merge-base with HEAD, which an orphan branch never has —
+  // exercised end-to-end via the manager below, but pinned here at the
+  // exact function whose diff mode changed.
+  const repo = makeTwoCommitRepo();
+  const wtPath = path.join(repo.root, "wt-orphan-unit");
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t",
+  };
+  gitIn(repo.base, ["worktree", "add", wtPath, "-b", `clanker/dnt-orphan-unit-${Date.now()}`, "HEAD"]);
+  const baseSha = gitIn(wtPath, ["rev-parse", "HEAD"]);
+  execFileSync("git", ["checkout", "--orphan", "unrelated"], { cwd: wtPath, stdio: "pipe" });
+  fs.writeFileSync(path.join(wtPath, "src", "forbidden.ts"), "orphan write\n");
+  execFileSync("git", ["add", "-A"], { cwd: wtPath, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "orphan"], { cwd: wtPath, stdio: "pipe", env: gitEnv });
+  try {
+    const touched = await changedFilesSince(wtPath, baseSha);
+    assert.ok(touched.includes("src/forbidden.ts"), "two-dot diff finds the forbidden path even on an unrelated HEAD");
+  } finally {
+    gitIn(repo.base, ["worktree", "remove", "--force", wtPath]);
+  }
+});
+
+test("doNotTouch: a validation failure itself is reported, never silently swallowed into a clean run", async () => {
+  const repo = makeTwoCommitRepo();
+  const m = makeManager(repo.base);
+  const branch = `clanker/dnt-validation-failed-${Date.now()}`;
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "codex",
+      prompt: "CANCELME",
+      readOnly: false,
+      worktree: branch,
+      cwd: repo.base,
+      doNotTouch: ["src/"],
+    });
+    await until(() => m.status(id).tool_calls > 0, 4_000);
+    const wt = m.status(id).worktree;
+    assert.ok(wt, "worktree path present");
+    // Break git itself inside the worktree — "the diff could not even run",
+    // distinct from "the diff ran and found nothing".
+    fs.rmSync(path.join(wt!, ".git"), { force: true });
+    const cancelled = await m.cancel(id);
+    assert.equal(cancelled.status, "cancelled");
+    const w = await m.wait(id, 200);
+    assert.ok(
+      w.contract_violations && w.contract_violations.length > 0,
+      "a validation failure must surface, never vanish into zero violations",
+    );
+    assert.equal(w.contract_violations?.[0]?.pattern, "(validation-failed)");
+  } finally {
+    await m.shutdown();
+  }
+});
+
 // ---- Feature 3: write-class discipline prefix -----------------------------
 
 test("prefix: a write-class dispatch prompt starts with the discipline prefix, original text verbatim after", async () => {
@@ -331,6 +486,38 @@ test("prefix: a write-class dispatch prompt starts with the discipline prefix, o
     // The fake agent echoes the prompt it received as its final message, so
     // the terminal message is direct evidence of what the lane was handed.
     assert.equal(r.final_message, WRITE_DISCIPLINE_PREFIX + "\n\n" + original);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("prefix: a supervised correction turn ALSO gets the discipline prefix, not just the initial dispatch", async () => {
+  // a08f7a1 put the prefix on the first turn only. A correction turn drives
+  // the SAME worker under the SAME write contract, so the words it is held to
+  // must be on every turn it is handed, not just turn 1.
+  const repo = makeTwoCommitRepo();
+  const m = makeManager(repo.base);
+  const branch = `clanker/prefix-correction-${Date.now()}`;
+  const correctionText = "you drifted: only touch src/";
+  try {
+    const { id } = await m.dispatchProfile({
+      profile: "oc-glm-write",
+      prompt: "implement the frozen spec",
+      worktree: branch,
+      cwd: repo.base,
+    });
+    // See the note in the supervised doNotTouch test above: `until()` on
+    // `status()`, not `waitTerminal`, avoids a real race with `turnDrives`
+    // bookkeeping that a correction fired too early can still trip.
+    await until(() => m.status(id).status !== "running", 6_000);
+    await m.promptExisting(id, correctionText, true);
+    await until(() => m.status(id).status !== "running", 6_000);
+    const r = await m.wait(id, 200);
+    assert.equal(r.status, "done");
+    // The fake agent echoes the prompt it received as its final message, so
+    // the terminal message is direct evidence of what the continuation turn
+    // was actually handed.
+    assert.equal(r.final_message, WRITE_DISCIPLINE_PREFIX + "\n\n" + correctionText);
   } finally {
     await m.shutdown();
   }

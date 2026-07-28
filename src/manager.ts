@@ -436,31 +436,11 @@ export class LaneManager {
     // so the ledger's initialPrompt and the first turn both use lanePrompt.
     const lanePrompt = readOnly ? params.prompt : `${WRITE_DISCIPLINE_PREFIX}\n\n${params.prompt}`;
 
-    // #12: the worktree must be cut from the repo the dispatch *targets*
-    // (resolved from params.cwd via `git rev-parse --show-toplevel`), NOT the
-    // host checkout the MCP server was launched from. Cutting from the host is
-    // what silently polluted an unrelated primary checkout: the worker was told
-    // its cwd was a worktree of the wrong repo, couldn't find the target repo's
-    // files there, and fell back to absolute paths into the target's primary
-    // checkout. Whenever a worktree dispatch carries a cwd — read-only or write;
-    // the wrong-repo cut is identical either way — resolve its repo and fail
-    // LOUDLY if that cwd is not inside a git work tree (resolveTargetRepo). Only
-    // when no cwd is given do we fall back to the host baseRepo (the legitimate
-    // "cut from my own repo" default). This condition MUST stay aligned with the
-    // `if (params.worktree)` creation guard below, or a path that creates a
-    // worktree without resolving targetRepo silently cuts from the host again.
-    let targetRepo = path.resolve(this.baseRepo);
-    if (params.worktree && params.cwd) {
-      targetRepo = await resolveTargetRepo(params.cwd);
-    }
-
-    // Server-side `base` verification: a caller-named cut point is resolved
-    // against the target repo BEFORE anything is created (no run dir, no
-    // worktree). A base that does not resolve to a commit rejects the whole
-    // dispatch — quoting the caller's original string verbatim — with NO
-    // fallback to the repo's default base. A base without a worktree names a
-    // cut point nothing will consume; that is refused rather than silently
-    // ignored.
+    // Server-side `base` verification names a caller-supplied cut point; a
+    // `base`/`doNotTouch` without a worktree names something nothing will ever
+    // consume, so both are refused rather than silently ignored. These two
+    // checks are pure (no I/O) and stay ahead of the run directory / telemetry
+    // stub below — same rule as `validateDispatchParams` above.
     if (params.base !== undefined && !params.worktree) {
       throw new Error(
         `dispatch base '${params.base}' was supplied without a worktree; a base only names the commit a ` +
@@ -472,10 +452,6 @@ export class LaneManager {
         `doNotTouch was supplied without a worktree; the validation diffs a worktree against the commit it ` +
           `was cut from, so pass 'worktree' as well or omit 'doNotTouch'`,
       );
-    }
-    let baseSha: string | undefined;
-    if (params.base !== undefined) {
-      baseSha = await resolveBaseCommit(targetRepo, params.base);
     }
 
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
@@ -512,10 +488,42 @@ export class LaneManager {
     };
 
     let cwd = params.cwd ?? this.baseRepo;
+    // #12: the worktree must be cut from the repo the dispatch *targets*
+    // (resolved from params.cwd via `git rev-parse --show-toplevel`), NOT the
+    // host checkout the MCP server was launched from. Cutting from the host is
+    // what silently polluted an unrelated primary checkout: the worker was told
+    // its cwd was a worktree of the wrong repo, couldn't find the target repo's
+    // files there, and fell back to absolute paths into the target's primary
+    // checkout. Whenever a worktree dispatch carries a cwd — read-only or write;
+    // the wrong-repo cut is identical either way — resolve its repo and fail
+    // LOUDLY if that cwd is not inside a git work tree (resolveTargetRepo). Only
+    // when no cwd is given do we fall back to the host baseRepo (the legitimate
+    // "cut from my own repo" default). This condition MUST stay aligned with the
+    // `if (params.worktree)` creation guard below, or a path that creates a
+    // worktree without resolving targetRepo silently cuts from the host again.
+    //
+    // Resolved INSIDE the try block below (with resolveBaseCommit), not before
+    // the telemetry stub write: both are I/O-bound rejection points, and a
+    // rejection here must leave the same readable terminal stub every other
+    // fail-closed gate in this try block leaves — not a silent gap before any
+    // run directory exists (the bug this reordering fixes).
+    let targetRepo = path.resolve(this.baseRepo);
+    let baseSha: string | undefined;
     let worktreePath: string | undefined;
     let worktreeBaseSha: string | undefined;
     let spec: SpawnSpec;
     try {
+      if (params.worktree && params.cwd) {
+        targetRepo = await resolveTargetRepo(params.cwd);
+      }
+      // Server-side `base` verification: a caller-named cut point is resolved
+      // against the target repo BEFORE any worktree is created. A base that
+      // does not resolve to a commit rejects the whole dispatch — quoting the
+      // caller's original string verbatim — with NO fallback to the repo's
+      // default base.
+      if (params.base !== undefined) {
+        baseSha = await resolveBaseCommit(targetRepo, params.base);
+      }
       // Fail-closed lane-specific gates (opencode requires an explicit model,
       // gemini's own rules, sandbox validation) live inside resolveSpec — run
       // it BEFORE createWorktree so a rejection here never leaves a real
@@ -653,7 +661,13 @@ export class LaneManager {
           `blocker instead of starting a fresh dispatch on your own.`,
       );
     }
-    const drive = this.driveContinuation(run, conn, prompt, correction);
+    // Server-owned workspace-discipline prefix on every write-class turn, not
+    // just the first one (a08f7a1 only covered the initial dispatch): a
+    // correction turn is the same worker under the same write contract, so the
+    // words it is held to must be the words it is handed on EVERY turn, not
+    // just turn 1.
+    const turnPrompt = run.readOnly ? prompt : `${WRITE_DISCIPLINE_PREFIX}\n\n${prompt}`;
+    const drive = this.driveContinuation(run, conn, turnPrompt, correction);
     this.trackDrive(id, drive);
     return { id, status: run.turnStatus };
   }
@@ -935,7 +949,21 @@ export class LaneManager {
     // closes any non-running run past sessionTtlMs — so the window is bounded
     // by an existing mechanism rather than a new one, and `worktree_retained`
     // becomes meaningful only once that close really happens.
-    if (!run.supervised || stopReason === "cancelled") await this.close(run.id);
+    if (!run.supervised || stopReason === "cancelled") {
+      await this.close(run.id);
+    } else if (run.worktreePath) {
+      // A supervised success defers close() — see above — but doNotTouch
+      // validation must NOT wait for it: this terminal transition is exactly
+      // the one the supervising seat reads off `clanker_wait`/result.md to
+      // decide whether to issue a correction turn. Without this call the first
+      // (and possibly only, if the worker is never corrected) terminal state
+      // reported zero violations regardless of what was actually touched.
+      // computeContractViolations recomputes (never accumulates) on every
+      // call, so this is safe to call again from closeRun() once the session
+      // truly closes (after a correction round reaches its own terminal
+      // state, or the idle-TTL reaper finally closes it).
+      await this.computeContractViolations(run);
+    }
     if (stopReason === "cancelled") {
       run.cancelTurn();
     } else {
@@ -1168,13 +1196,24 @@ export class LaneManager {
    * it was cut from (committed AND uncommitted changes — an uncommitted edit
    * to a forbidden path is the same breach as a committed one) and match the
    * touched paths against the caller's patterns. Stored on the run; the wait
-   * payload and result.md read it from there. Fail-silent like every other
-   * diagnostics path: a validation error must never break terminal teardown,
-   * and the run's status is never flipped by a finding.
+   * payload and result.md read it from there.
+   *
+   * Called from more than one terminal transition on a supervised run (the
+   * success path in `finalizeTurn`, then again from `closeRun` once the
+   * session truly closes — possibly after one or more correction rounds), so
+   * this ALWAYS recomputes rather than memoizing on "already set": the set of
+   * violations is a recompute against current worktree state each time, never
+   * an accumulation across calls (a fixed correction's diff must be able to
+   * come back clean on the next terminal state, not carry forward a stale
+   * finding).
+   *
+   * Never fails silently: if the diff itself cannot be computed (e.g. the
+   * worktree HEAD moved to something the diff can't read), that is itself a
+   * fact the supervising seat needs — a validation that could not run must
+   * not read the same as "ran and found nothing".
    */
   private async computeContractViolations(run: LaneRun): Promise<void> {
     if (!run.doNotTouch || run.doNotTouch.length === 0) return;
-    if (run.contractViolations !== undefined) return;
     if (!run.worktreePath || !run.worktreeBaseSha) return;
     if (!fs.existsSync(run.worktreePath)) return;
     try {
@@ -1184,6 +1223,9 @@ export class LaneManager {
       console.error(
         `[clanker] doNotTouch validation failed for '${run.id}': ${errMessage(err)}`,
       );
+      // Fail LOUD into the contract, not just stderr: a validation error is
+      // itself the finding a supervising seat must see, not a silent zero.
+      run.contractViolations = [{ pattern: "(validation-failed)", files: [errMessage(err)] }];
     }
   }
 

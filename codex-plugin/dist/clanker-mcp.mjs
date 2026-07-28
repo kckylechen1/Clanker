@@ -32986,7 +32986,11 @@ async function changedFiles(cwd) {
     if (!line.trim()) continue;
     const rest = line.slice(3);
     const arrow = rest.indexOf(" -> ");
-    files.push(arrow >= 0 ? rest.slice(arrow + 4) : rest);
+    if (arrow >= 0) {
+      files.push(rest.slice(0, arrow), rest.slice(arrow + 4));
+    } else {
+      files.push(rest);
+    }
   }
   return files;
 }
@@ -33024,7 +33028,7 @@ function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
   }
 }
 async function changedFilesSince(worktreePath, base) {
-  const out = await git(worktreePath, ["diff", "--name-only", `${base}...HEAD`]);
+  const out = await git(worktreePath, ["diff", "--name-only", base, "HEAD"]);
   const committed = out.split("\n").filter((line) => line.trim().length > 0);
   const uncommitted = await changedFiles(worktreePath);
   return [.../* @__PURE__ */ new Set([...committed, ...uncommitted])];
@@ -33254,10 +33258,6 @@ var LaneManager = class {
     const lanePrompt = readOnly ? params.prompt : `${WRITE_DISCIPLINE_PREFIX}
 
 ${params.prompt}`;
-    let targetRepo = path9.resolve(this.baseRepo);
-    if (params.worktree && params.cwd) {
-      targetRepo = await resolveTargetRepo(params.cwd);
-    }
     if (params.base !== void 0 && !params.worktree) {
       throw new Error(
         `dispatch base '${params.base}' was supplied without a worktree; a base only names the commit a worktree is cut from, so pass 'worktree' as well or omit 'base'`
@@ -33267,10 +33267,6 @@ ${params.prompt}`;
       throw new Error(
         `doNotTouch was supplied without a worktree; the validation diffs a worktree against the commit it was cut from, so pass 'worktree' as well or omit 'doNotTouch'`
       );
-    }
-    let baseSha;
-    if (params.base !== void 0) {
-      baseSha = await resolveBaseCommit(targetRepo, params.base);
     }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
     const runDir = path9.join(this.runsRoot, id);
@@ -33296,10 +33292,18 @@ ${params.prompt}`;
       geminiRole: params.lane === "gemini" ? minted.profileId : void 0
     };
     let cwd = params.cwd ?? this.baseRepo;
+    let targetRepo = path9.resolve(this.baseRepo);
+    let baseSha;
     let worktreePath;
     let worktreeBaseSha;
     let spec;
     try {
+      if (params.worktree && params.cwd) {
+        targetRepo = await resolveTargetRepo(params.cwd);
+      }
+      if (params.base !== void 0) {
+        baseSha = await resolveBaseCommit(targetRepo, params.base);
+      }
       spec = this.resolveSpec(params.lane, requestOpts, runDir);
       if (params.worktree) {
         assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree), targetRepo);
@@ -33405,7 +33409,10 @@ ${params.prompt}`;
         `session for '${id}' is gone \u2014 a finished session is closed by the idle-TTL reaper after ${this.sessionTtlMs}ms (CLANKER_SESSION_TTL_MS). The worker cannot be corrected; report the blocker instead of starting a fresh dispatch on your own.`
       );
     }
-    const drive = this.driveContinuation(run, conn, prompt, correction);
+    const turnPrompt = run.readOnly ? prompt : `${WRITE_DISCIPLINE_PREFIX}
+
+${prompt}`;
+    const drive = this.driveContinuation(run, conn, turnPrompt, correction);
     this.trackDrive(id, drive);
     return { id, status: run.turnStatus };
   }
@@ -33614,7 +33621,11 @@ ${grokDetail}` : "";
     }
     const touched = dedupe([...gitTouched, ...run.toolTouchedFiles()]);
     run.setFinalTouched(touched);
-    if (!run.supervised || stopReason === "cancelled") await this.close(run.id);
+    if (!run.supervised || stopReason === "cancelled") {
+      await this.close(run.id);
+    } else if (run.worktreePath) {
+      await this.computeContractViolations(run);
+    }
     if (stopReason === "cancelled") {
       run.cancelTurn();
     } else {
@@ -33827,13 +33838,24 @@ ${grokDetail}` : "";
    * it was cut from (committed AND uncommitted changes — an uncommitted edit
    * to a forbidden path is the same breach as a committed one) and match the
    * touched paths against the caller's patterns. Stored on the run; the wait
-   * payload and result.md read it from there. Fail-silent like every other
-   * diagnostics path: a validation error must never break terminal teardown,
-   * and the run's status is never flipped by a finding.
+   * payload and result.md read it from there.
+   *
+   * Called from more than one terminal transition on a supervised run (the
+   * success path in `finalizeTurn`, then again from `closeRun` once the
+   * session truly closes — possibly after one or more correction rounds), so
+   * this ALWAYS recomputes rather than memoizing on "already set": the set of
+   * violations is a recompute against current worktree state each time, never
+   * an accumulation across calls (a fixed correction's diff must be able to
+   * come back clean on the next terminal state, not carry forward a stale
+   * finding).
+   *
+   * Never fails silently: if the diff itself cannot be computed (e.g. the
+   * worktree HEAD moved to something the diff can't read), that is itself a
+   * fact the supervising seat needs — a validation that could not run must
+   * not read the same as "ran and found nothing".
    */
   async computeContractViolations(run) {
     if (!run.doNotTouch || run.doNotTouch.length === 0) return;
-    if (run.contractViolations !== void 0) return;
     if (!run.worktreePath || !run.worktreeBaseSha) return;
     if (!fs8.existsSync(run.worktreePath)) return;
     try {
@@ -33843,6 +33865,7 @@ ${grokDetail}` : "";
       console.error(
         `[clanker] doNotTouch validation failed for '${run.id}': ${errMessage(err)}`
       );
+      run.contractViolations = [{ pattern: "(validation-failed)", files: [errMessage(err)] }];
     }
   }
   /** Close a session: dispose ACP session, kill subprocess, clean worktree. */
