@@ -101,6 +101,16 @@ function driftDetail(): string {
   if (theirs !== null && theirs === ours) {
     return `PATH ${PATH_NODE} is ${probed}, same major as this server's ${process.version} — degraded but consistent.`;
   }
+  // Knowingly kept as warn-and-proceed, against package.json's `engines.node
+  // >=24`. PR #40's cold review (run codex-62e86) raised it as a CONCERN with a
+  // real bad case: a minimal PATH resolves `node` to an old major, and a write
+  // lane mutates a worktree before dying on an unsupported runtime. The ruling
+  // stands — a diagnosable degradation beats denial of service — and it rests
+  // on the classifier fix landed in the same review: a spawn that then dies
+  // with ENOENT is tagged CLANKER-ENV-DRIFT (failure-classifier.ts's
+  // SPAWN_FAILURE_PATTERNS) instead of being mislabelled a billing or auth
+  // rejection, so the operator is pointed at the machine. Degrading loudly is
+  // only defensible while the noise it makes is read correctly.
   return (
     `MAJOR VERSION MISMATCH: PATH ${PATH_NODE} is ${probed}, this server runs ${process.version}. ` +
     `Spawning anyway — a lane on a different major beats no lane at all — but sidecars are NO LONGER on the ` +
