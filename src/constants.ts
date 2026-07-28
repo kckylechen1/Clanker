@@ -77,8 +77,9 @@ export const WORKTREES_ROOT =
  * directory Claude Code started it in. This is only the FALLBACK cut point for
  * a worktree dispatch that carries no cwd — a dispatch with a cwd is cut from
  * the repo that cwd belongs to instead (#12, see manager.ts / worktree.ts). The
- * base ref is resolved per target repo (origin/HEAD → origin/main →
- * origin/master → local HEAD), not hardcoded to origin/main.
+ * base ref is resolved per target repo (that repo's own HEAD → origin/HEAD →
+ * origin/main → origin/master, see worktree.ts resolveBaseRef / #33), not
+ * hardcoded to origin/main.
  */
 export const BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 
