@@ -14696,11 +14696,14 @@ var TurnProjection = class {
    * A repeated delta is indistinguishable from a recap BY CONTENT; only the
    * field the CLI actually varies can tell them apart.
    *
-   * Content equality survives as a narrow second guard on the recap branch
-   * only: a recap that does not match what we streamed is a stream we
-   * mis-tracked, and relaying it would be the doubling this exists to prevent.
-   * The no-flag case still works — nothing streamed yet, so the single
-   * recap-shaped event is relayed.
+   * Content equality is GONE, not demoted — the second half of the guard
+   * (`this.streamed !== ""`) is the empty-stream exception, not a content
+   * check: without `--stream-partial-output` the only assistant event is
+   * itself timestamp-less, and nothing has streamed yet, so it must be
+   * relayed rather than swallowed as a recap of nothing. (Round-2 review
+   * codex-9678d caught this paragraph still describing the deleted rule — a
+   * stale comment in a load-bearing spot is how the next maintainer restores
+   * the bug it documents.)
    */
   assistant(text, isRecap) {
     if (!text) return;
