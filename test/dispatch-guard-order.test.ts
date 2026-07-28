@@ -22,8 +22,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LaneManager } from "../src/manager.js";
-import { deriveWorktreePath } from "../src/worktree.js";
-import { fakeResolver, until } from "./helpers.js";
+import { fakeResolver, until, worktreesForBranch } from "./helpers.js";
 
 function git(cwd: string, args: string[]): void {
   execFileSync("git", args, {
@@ -86,10 +85,9 @@ test("C1: a resolveSpec rejection (opencode, no model) leaves a closed-out telem
     assert.match(stub.error ?? "", /opencode lane requires an explicit model id/);
     assert.equal(stub.terminal_reason, "rejected");
 
-    const wtPath = deriveWorktreePath(branch);
-    assert.equal(
-      fs.existsSync(wtPath),
-      false,
+    assert.deepEqual(
+      worktreesForBranch(branch),
+      [],
       "resolveSpec's rejection must fire before createWorktree ever runs — no orphan worktree",
     );
   } finally {

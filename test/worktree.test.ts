@@ -46,25 +46,32 @@ function makeNoRemoteRepo(): string {
   return repo;
 }
 
+/** A run id shaped like the manager's (`<lane>-<counter><hex>`), unique per call. */
+const runId = (tag: string) => `codex-${tag}${Math.random().toString(36).slice(2, 8)}`;
+
 test("worktree lifecycle: create from origin/main, detect changes, remove when clean", async () => {
   const base = makeBaseRepo();
   const branch = `lane-test-${Math.random().toString(36).slice(2, 8)}`;
+  const run = runId("lifecycle");
 
-  const wtPath = await createWorktree(branch, base);
+  const wtPath = await createWorktree(branch, run, base);
   assert.ok(fs.existsSync(wtPath), "worktree dir created");
   assert.equal(await isGitWorkTree(wtPath), true);
+  // Clean despite the `.clanker-owner` marker sitting in it (#3): the marker is
+  // the server's governance, not the worker's change, and a tree that reads
+  // dirty because of it could never be reclaimed.
   assert.deepEqual(await changedFiles(wtPath), [], "fresh worktree is clean");
 
   // Dirty it: removeIfClean must refuse and report retention.
   fs.writeFileSync(path.join(wtPath, "new-file.txt"), "work\n");
   const changed = await changedFiles(wtPath);
   assert.ok(changed.includes("new-file.txt"), `expected new-file.txt in ${JSON.stringify(changed)}`);
-  assert.equal(await removeIfClean(wtPath, base), false, "dirty worktree is retained");
+  assert.equal(await removeIfClean(wtPath, base, undefined, run), false, "dirty worktree is retained");
   assert.ok(fs.existsSync(wtPath), "retained worktree still exists");
 
   // Clean it: removeIfClean now succeeds.
   fs.rmSync(path.join(wtPath, "new-file.txt"));
-  assert.equal(await removeIfClean(wtPath, base), true, "clean worktree removed");
+  assert.equal(await removeIfClean(wtPath, base, undefined, run), true, "clean worktree removed");
   assert.equal(fs.existsSync(wtPath), false, "removed worktree gone");
 });
 
@@ -75,8 +82,9 @@ test("#12: createWorktree cuts a no-remote repo from local HEAD (not hardcoded o
   // fall back to the repo's local HEAD.
   const repo = makeNoRemoteRepo();
   const branch = `lane-noremote-${Math.random().toString(36).slice(2, 8)}`;
+  const run = runId("noremote");
 
-  const wtPath = await createWorktree(branch, repo);
+  const wtPath = await createWorktree(branch, run, repo);
   assert.ok(fs.existsSync(wtPath), "worktree dir created from a no-remote repo");
   assert.equal(await isGitWorkTree(wtPath), true);
   assert.deepEqual(await changedFiles(wtPath), [], "fresh no-remote worktree is clean");
@@ -89,7 +97,11 @@ test("#12: createWorktree cuts a no-remote repo from local HEAD (not hardcoded o
   // encoded the leak: a no-remote branch can NEVER acquire an upstream, so the
   // guard was unsatisfiable and removeIfClean degraded into neverRemove. A tree
   // holding nothing beyond its base ref must be reclaimed.
-  assert.equal(await removeIfClean(wtPath, repo), true, "no-remote worktree holding nothing is reclaimed");
+  assert.equal(
+    await removeIfClean(wtPath, repo, undefined, run),
+    true,
+    "no-remote worktree holding nothing is reclaimed",
+  );
   assert.equal(fs.existsSync(wtPath), false, "reclaimed no-remote worktree is gone");
   fs.rmSync(repo, { recursive: true, force: true });
 });
@@ -101,14 +113,19 @@ test("#17: a no-remote worktree holding its own commit is still retained", async
   // exactly what the base-ref comparison has to keep.
   const repo = makeNoRemoteRepo();
   const branch = `lane-noremote-commit-${Math.random().toString(36).slice(2, 8)}`;
-  const wtPath = await createWorktree(branch, repo);
+  const run = runId("noremotecommit");
+  const wtPath = await createWorktree(branch, run, repo);
 
   fs.writeFileSync(path.join(wtPath, "deliverable.txt"), "the lane's work\n");
   git(wtPath, ["add", "."]);
   git(wtPath, ["commit", "-m", "lane work"]);
 
   assert.deepEqual(await changedFiles(wtPath), [], "committed work leaves a clean tree");
-  assert.equal(await removeIfClean(wtPath, repo), false, "a commit that exists nowhere else must retain the tree");
+  assert.equal(
+    await removeIfClean(wtPath, repo, undefined, run),
+    false,
+    "a commit that exists nowhere else must retain the tree",
+  );
   assert.ok(fs.existsSync(wtPath), "retained worktree still holds the deliverable");
   assert.ok(fs.existsSync(path.join(wtPath, "deliverable.txt")));
 

@@ -7,6 +7,12 @@
  * HEAD → origin/HEAD → origin/main → origin/master, see resolveBaseRef / #33)
  * rather than a hardcoded origin/main, so a repo with a different default
  * branch or no remote at all can still be worktree'd.
+ *
+ * A tree also has an OWNER (#3): its path carries the id of the run it was cut
+ * for, and its root carries a `.clanker-owner` marker naming that run. Both
+ * exist because a tree used to be identified by branch NAME alone, which two
+ * dispatches can share — and cleanup of the dead one then deleted the live
+ * one's tree out from under it (three lanes killed in one night, 2026-07-16).
  */
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -21,9 +27,47 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout;
 }
 
-export function deriveWorktreePath(branch: string): string {
-  const safe = branch.replace(/[^A-Za-z0-9._-]/g, "-");
-  return path.join(WORKTREES_ROOT, safe);
+/**
+ * Ownership marker written at a worktree's root: one line, `<runId> <ISO
+ * timestamp>`. Lives and dies with the tree.
+ */
+export const OWNER_MARKER = ".clanker-owner";
+
+const sanitize = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, "-");
+
+/**
+ * Where the worktree for `branch`, cut for run `runId`, lives.
+ *
+ * Keyed by branch name AND run id (#3). Branch-name-only paths are shared by
+ * every dispatch that ever reuses the name, and cleanup of a finished run then
+ * removes a DIFFERENT, live run's tree: `…/worktrees/<branch>` was deleted
+ * under three separate lanes in one night, each of which then failed every
+ * subsequent tool call on files it had read minutes earlier. Two dispatches on
+ * one branch name now get two distinct paths and cannot collide at all.
+ *
+ * The BRANCH name is deliberately NOT uniquified: it is the deliverable the
+ * worker pushes and the dispatcher merges, and a run-id suffix would make it
+ * unguessable. A second live dispatch on the same branch name is rejected by
+ * git itself (`worktree add -b <branch>` on an existing branch), loudly, at
+ * creation — which is the correct outcome, not a bug to route around.
+ */
+export function deriveWorktreePath(branch: string, runId: string): string {
+  return path.join(WORKTREES_ROOT, `${sanitize(branch)}-${sanitize(runId).slice(-6)}`);
+}
+
+/**
+ * The run id a worktree claims to belong to, or null when the tree carries no
+ * readable marker (never created by this server, created by an older one, or
+ * the marker was deleted). Null is a REFUSAL input, not a permissive default —
+ * see removeIfClean.
+ */
+export function readWorktreeOwner(worktreePath: string): string | null {
+  try {
+    const first = fs.readFileSync(path.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
+    return first || null;
+  } catch {
+    return null;
+  }
 }
 
 export async function isGitWorkTree(cwd: string): Promise<boolean> {
@@ -152,24 +196,38 @@ export async function headSha(cwd: string): Promise<string> {
 }
 
 /**
- * Create a worktree for `branch`, cut from `targetRepo`'s resolved base ref
- * (see resolveBaseRef). `targetRepo` is the repo the dispatch targets; it
- * defaults to the host BASE_REPO only for callers with no dispatch cwd.
+ * Create a worktree for `branch`, owned by run `runId`, cut from `targetRepo`'s
+ * resolved base ref (see resolveBaseRef). `targetRepo` is the repo the dispatch
+ * targets; it defaults to the host BASE_REPO only for callers with no dispatch
+ * cwd.
  *
  * When `base` is given it wins: the worktree is cut from exactly that ref
  * (already verified server-side via resolveBaseCommit before this call). When
- * omitted, the resolveBaseRef chain runs EXACTLY as before (frozen, #12).
+ * omitted, the resolveBaseRef chain runs (#33).
+ *
+ * `runId` is REQUIRED, and is both half of the path (#3, see
+ * deriveWorktreePath) and the content of the `.clanker-owner` marker written at
+ * the tree's root. The marker is what makes ownership survive outside this
+ * process's memory: `removeIfClean` refuses to delete a tree whose marker does
+ * not name the run asking, so a future caller that bypasses the closeRun
+ * single exit still cannot reclaim somebody else's live tree.
  *
  * @returns the absolute worktree path.
  */
-export async function createWorktree(branch: string, targetRepo = BASE_REPO, base?: string): Promise<string> {
-  const wtPath = deriveWorktreePath(branch);
+export async function createWorktree(
+  branch: string,
+  runId: string,
+  targetRepo = BASE_REPO,
+  base?: string,
+): Promise<string> {
+  const wtPath = deriveWorktreePath(branch, runId);
   if (fs.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
   const baseRef = base ?? (await resolveBaseRef(targetRepo));
   fs.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
+  fs.writeFileSync(path.join(wtPath, OWNER_MARKER), `${runId} ${new Date().toISOString()}\n`);
   return wtPath;
 }
 
@@ -234,10 +292,27 @@ export function parsePorcelainZ(out: string): string[] {
   return files;
 }
 
-/** Porcelain-parsed list of changed paths in `cwd` (tracked + untracked). See `parsePorcelainZ`. */
+/**
+ * Paths belonging to the server's own governance of a tree rather than to the
+ * work done inside it. Only `.clanker-owner` today.
+ *
+ * Excluded everywhere changes are reported or judged, for three separate
+ * reasons: a tree would otherwise be permanently "dirty" and therefore never
+ * reclaimable; the marker would show up in every run's `touched_files` as
+ * though the worker wrote it; and it would count as a doNotTouch violation
+ * against contracts the worker never breached.
+ */
+function isGovernanceFile(file: string): boolean {
+  return file === OWNER_MARKER;
+}
+
+/**
+ * Porcelain-parsed list of changed paths in `cwd` (tracked + untracked), minus
+ * the server's own governance files. See `parsePorcelainZ` / `isGovernanceFile`.
+ */
 export async function changedFiles(cwd: string): Promise<string[]> {
   const out = await git(cwd, ["status", "--porcelain=v1", "-z"]);
-  return parsePorcelainZ(out);
+  return parsePorcelainZ(out).filter((file) => !isGovernanceFile(file));
 }
 
 /**
@@ -340,7 +415,13 @@ export function assertWorktreeOutsideRepo(worktreePath: string, targetRepo: stri
  */
 export async function changedFilesSince(worktreePath: string, base: string): Promise<string[]> {
   const out = await git(worktreePath, ["diff", "--name-only", base, "HEAD"]);
-  const committed = out.split("\n").filter((line) => line.trim().length > 0);
+  // The committed half is filtered too, not just the porcelain half inside
+  // changedFiles: a worker that ran `git add -A` swept the ownership marker
+  // into its own commit, and that is still not a path the worker touched.
+  const committed = out
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .filter((file) => !isGovernanceFile(file));
   const uncommitted = await changedFiles(worktreePath);
   return [...new Set([...committed, ...uncommitted])];
 }
@@ -375,12 +456,39 @@ export function matchDoNotTouch(
  * unmerged-work judgement compare against the tree's REAL cut point instead of
  * re-resolving a ref that may have moved since — see holdsUnmergedWork. Callers
  * with no recorded base keep the previous re-resolving behaviour.
+ *
+ * `runId` is the caller's OWNERSHIP CLAIM (#3), checked against the tree's
+ * `.clanker-owner` marker before anything else. A claim that does not match —
+ * including no claim at all — is refused loudly and nothing is deleted. That is
+ * deliberately fail-closed in both directions: this function used to trust
+ * whatever path it was handed, and a dead run's cleanup deleting a live run's
+ * tree is precisely how three lanes died in one night. The occupancy check
+ * therefore cannot live in the CALLER (a bypassing caller is the failure mode);
+ * it lives here, keyed on a fact that survives on disk.
  */
 export async function removeIfClean(
   worktreePath: string,
   targetRepo = BASE_REPO,
   baseSha?: string,
+  runId?: string,
 ): Promise<boolean> {
+  // The ownership gate applies to trees that are actually THERE. A path that
+  // does not exist is not somebody else's tree, it is a broken cleanup, and the
+  // loud reporting for that already lives downstream (the git call below throws
+  // and closeRun logs it). Answering "not mine" here would demote a real
+  // failure into a quiet refusal.
+  if (fs.existsSync(worktreePath)) {
+    const owner = readWorktreeOwner(worktreePath);
+    if (!runId || owner !== runId) {
+      console.error(
+        `[clanker] refusing to remove worktree '${worktreePath}': it is owned by ` +
+          `${owner === null ? `no readable ${OWNER_MARKER} marker` : `run '${owner}'`}, ` +
+          `and the caller claims ${runId === undefined ? "no run id at all" : `run '${runId}'`} ` +
+          `(a worktree is only ever reclaimed by the run it was created for — issue #3)`,
+      );
+      return false;
+    }
+  }
   const changes = await changedFiles(worktreePath);
   if (changes.length > 0) return false;
   // A clean tree can still hold UNPUSHED commits (the lane committed its
@@ -416,10 +524,41 @@ export async function removeIfClean(
     // a branch whose commits are already merged into it counts zero.
     if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return false;
   }
+  // Drop the ownership marker only now, with every retention question already
+  // answered. Leaving it in place would make the plain `git worktree remove`
+  // below fail on EVERY reclamation ("contains untracked files") and route all
+  // of them through the --force fallback, quietly retiring a guard that is
+  // still doing real work. If the removal fails anyway the marker goes back:
+  // a retained tree must not be left unowned, or the next caller — the very
+  // bypassing caller this check exists for — would find it unprotected.
+  const markerPath = path.join(worktreePath, OWNER_MARKER);
+  const marker = (() => {
+    try {
+      return fs.readFileSync(markerPath, "utf8");
+    } catch {
+      return null;
+    }
+  })();
   try {
-    await git(targetRepo, ["worktree", "remove", worktreePath]);
+    fs.rmSync(markerPath, { force: true });
   } catch {
-    await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
+    /* nothing to drop; the removal below decides the outcome either way */
+  }
+  try {
+    try {
+      await git(targetRepo, ["worktree", "remove", worktreePath]);
+    } catch {
+      await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
+    }
+  } catch (err) {
+    if (marker !== null && fs.existsSync(worktreePath)) {
+      try {
+        fs.writeFileSync(markerPath, marker);
+      } catch {
+        /* best effort: the loud throw below is the report that matters */
+      }
+    }
+    throw err;
   }
   return true;
 }

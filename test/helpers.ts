@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { WORKTREES_ROOT } from "../src/constants.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "../src/types.js";
 
 const FAKE_AGENT = fileURLToPath(new URL("./fake-acp-agent.mjs", import.meta.url));
@@ -86,6 +87,24 @@ export async function loadMutantModule<M>(
     fs.writeFileSync(target, before.replace(mutation.find, mutation.replace));
   }
   return (await import(pathToFileURL(path.join(root, "src", entry)).href)) as M;
+}
+
+/**
+ * Every existing worktree directory belonging to `branch`, whichever run
+ * created it.
+ *
+ * A worktree path is `<sanitized branch>-<run id tail>` (#3), so a test that
+ * wants to assert "no tree was created for this branch" can no longer name the
+ * path in advance — and asserting on ONE derived path would pass while a tree
+ * for a different run id sat right next to it.
+ */
+export function worktreesForBranch(branch: string): string[] {
+  const safe = branch.replace(/[^A-Za-z0-9._-]/g, "-");
+  if (!fs.existsSync(WORKTREES_ROOT)) return [];
+  return fs
+    .readdirSync(WORKTREES_ROOT)
+    .filter((entry) => entry === safe || entry.startsWith(safe + "-"))
+    .map((entry) => path.join(WORKTREES_ROOT, entry));
 }
 
 /** Delete a mutant tree once its test is done (best-effort). */

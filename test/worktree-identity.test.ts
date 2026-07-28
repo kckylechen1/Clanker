@@ -17,8 +17,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LaneManager } from "../src/manager.js";
-import { createWorktree, removeIfClean } from "../src/worktree.js";
-import { fakeResolver, loadMutantModule, dropMutant, until } from "./helpers.js";
+import {
+  OWNER_MARKER,
+  changedFilesSince,
+  createWorktree,
+  deriveWorktreePath,
+  readWorktreeOwner,
+  removeIfClean,
+} from "../src/worktree.js";
+import { fakeResolver, loadMutantManager, loadMutantModule, dropMutant, until } from "./helpers.js";
 
 type WorktreeModule = typeof import("../src/worktree.js");
 
@@ -75,6 +82,8 @@ function makeManager(baseRepo: string): LaneManager {
 }
 
 const uniq = (tag: string) => `clanker/wt-id-${tag}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+/** A run id shaped like the manager's own (`<lane>-<counter><hex>`). */
+const runId = (tag: string) => `codex-${tag}${Math.random().toString(36).slice(2, 8)}`;
 
 // ---- #33 A1: the default cut point follows the dispatch cwd ----------------
 
@@ -132,7 +141,7 @@ test("#33 A1 mutation: restoring the origin-first order cuts from the wrong comm
     ],
     "worktree.ts",
   );
-  const wt = await mutated.createWorktree(uniq("a1-mutant"), repo.base);
+  const wt = await mutated.createWorktree(uniq("a1-mutant"), runId("a1m"), repo.base);
   try {
     assert.equal(
       gitIn(wt, ["rev-parse", "HEAD"]),
@@ -217,7 +226,8 @@ test("#33 A2: cleanup judges against the SHA recorded at creation, not a base th
   // this went from a low-probability drift to the normal case.
   const repo = makeFeatureBranchRepo();
   const branch = uniq("a2");
-  const wt = await createWorktree(branch, repo.base);
+  const run = runId("a2");
+  const wt = await createWorktree(branch, run, repo.base);
   try {
     const cutSha = gitIn(wt, ["rev-parse", "HEAD"]);
     assert.equal(cutSha, repo.featureSha, "the tree was cut from the dispatcher's HEAD");
@@ -229,14 +239,14 @@ test("#33 A2: cleanup judges against the SHA recorded at creation, not a base th
     gitIn(repo.base, ["checkout", "--detach", repo.mainSha]);
 
     assert.equal(
-      await removeIfClean(wt, repo.base),
+      await removeIfClean(wt, repo.base, undefined, run),
       false,
       "re-resolving the base now counts the tree 1 ahead of a commit it was never cut from — retained",
     );
     assert.ok(fs.existsSync(wt), "the wrongly-judged tree is still on disk");
 
     assert.equal(
-      await removeIfClean(wt, repo.base, cutSha),
+      await removeIfClean(wt, repo.base, cutSha, run),
       true,
       "against the RECORDED cut point the tree holds nothing of its own and is reclaimed",
     );
@@ -250,14 +260,15 @@ test("#33 A2: a tree that really does hold its own commit is still retained agai
   // The half that must not regress (2026-07-10): the recorded SHA must not
   // turn the unmerged-work guard into a rubber stamp.
   const repo = makeFeatureBranchRepo();
-  const wt = await createWorktree(uniq("a2-holds"), repo.base);
+  const run = runId("a2holds");
+  const wt = await createWorktree(uniq("a2-holds"), run, repo.base);
   try {
     const cutSha = gitIn(wt, ["rev-parse", "HEAD"]);
     fs.writeFileSync(path.join(wt, "deliverable.txt"), "the lane's work\n");
     gitIn(wt, ["add", "."]);
     gitIn(wt, ["commit", "-m", "lane work"]);
     assert.equal(
-      await removeIfClean(wt, repo.base, cutSha),
+      await removeIfClean(wt, repo.base, cutSha, run),
       false,
       "a commit that exists nowhere else must retain the tree",
     );
@@ -282,17 +293,306 @@ test("#33 A2 mutation: dropping the recorded SHA re-resolves the drifted base an
     ],
     "worktree.ts",
   );
-  const wt = await mutated.createWorktree(uniq("a2-mutant"), repo.base);
+  const run = runId("a2m");
+  const wt = await mutated.createWorktree(uniq("a2-mutant"), run, repo.base);
   try {
     const cutSha = gitIn(wt, ["rev-parse", "HEAD"]);
     gitIn(repo.base, ["checkout", "--detach", repo.mainSha]);
     assert.equal(
-      await mutated.removeIfClean(wt, repo.base, cutSha),
+      await mutated.removeIfClean(wt, repo.base, cutSha, run),
       false,
       "the mutant ignores the recorded SHA and misjudges the drifted base — so the assertion above has teeth",
     );
   } finally {
     gitIn(repo.base, ["worktree", "remove", "--force", wt]);
+    dropMutant(name);
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+// ---- #3 B1: one branch name, two runs, two paths ---------------------------
+
+test("#3 B1: two dispatches on ONE branch name get two different paths, and the second is refused by git — not by deleting the first", async () => {
+  // The kill sequence: worktree paths keyed by branch NAME alone meant a second
+  // dispatch on a reused name landed on the first one's path, and the first
+  // one's cleanup then deleted a live tree (three lanes, one night). Keying the
+  // path on the run id makes the collision impossible; the branch name stays
+  // exactly what the caller asked for, so a second live dispatch on it is
+  // refused by git's own branch check — loudly, at creation, harming nothing.
+  const repo = makeFeatureBranchRepo();
+  const m = makeManager(repo.base);
+  const branch = uniq("b1");
+  try {
+    assert.notEqual(
+      deriveWorktreePath(branch, "codex-aaaaa1"),
+      deriveWorktreePath(branch, "codex-bbbbb2"),
+      "two runs on one branch name derive two different paths",
+    );
+
+    const first = await m.dispatchStart({
+      lane: "codex",
+      prompt: "CANCELME",
+      readOnly: false,
+      worktree: branch,
+      cwd: repo.base,
+    });
+    await until(() => m.status(first.id).tool_calls > 0, 4_000);
+    const liveTree = m.status(first.id).worktree;
+    assert.ok(liveTree && fs.existsSync(liveTree), "the first dispatch has a live tree");
+    assert.ok(
+      path.basename(liveTree!).endsWith(first.id.slice(-6)),
+      `the path carries the owning run id: ${path.basename(liveTree!)} vs run ${first.id}`,
+    );
+
+    await assert.rejects(
+      () =>
+        m.dispatchStart({
+          lane: "codex",
+          prompt: "CANCELME",
+          readOnly: false,
+          worktree: branch,
+          cwd: repo.base,
+        }),
+      (e: Error) => {
+        assert.ok(e.message.includes(branch), `the refusal names the branch: ${e.message}`);
+        assert.match(e.message, /already exists/, "git's own duplicate-branch refusal, not a path collision");
+        return true;
+      },
+    );
+
+    assert.ok(fs.existsSync(liveTree!), "the LIVE tree is untouched by the refused second dispatch");
+    assert.equal(gitIn(liveTree!, ["rev-parse", "HEAD"]), repo.featureSha, "and still holds its own checkout");
+    await m.cancel(first.id);
+  } finally {
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("#3 B1 mutation: dropping the run id from the path puts the second dispatch back on the first one's tree", async () => {
+  const repo = makeFeatureBranchRepo();
+  const name = "wt-b1-path-without-run-id";
+  const { LaneManager: Mutated } = await loadMutantManager(name, [
+    {
+      file: "worktree.ts",
+      find: "  return path.join(WORKTREES_ROOT, `${sanitize(branch)}-${sanitize(runId).slice(-6)}`);",
+      replace: "  return path.join(WORKTREES_ROOT, sanitize(branch));",
+    },
+  ]);
+  const m = new Mutated({ resolveSpec: fakeResolver, disableReaper: true, baseRepo: repo.base });
+  const branch = uniq("b1-mutant");
+  try {
+    const first = await m.dispatchStart({
+      lane: "codex",
+      prompt: "CANCELME",
+      readOnly: false,
+      worktree: branch,
+      cwd: repo.base,
+    });
+    await until(() => m.status(first.id).tool_calls > 0, 4_000);
+    await assert.rejects(
+      () =>
+        m.dispatchStart({
+          lane: "codex",
+          prompt: "CANCELME",
+          readOnly: false,
+          worktree: branch,
+          cwd: repo.base,
+        }),
+      /worktree path already exists/,
+      "under the mutant the two runs really do share one path — so the test above observes the run-id suffix",
+    );
+    await m.cancel(first.id);
+  } finally {
+    await m.shutdown();
+    dropMutant(name);
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+// ---- #3 B2: the ownership marker ------------------------------------------
+
+/** Run `fn` with console.error captured (the only channel a stdio MCP server has). */
+async function withCapturedConsoleError<T>(fn: () => Promise<T>): Promise<[T, string]> {
+  const original = console.error;
+  const lines: string[] = [];
+  console.error = (...args: unknown[]) => {
+    lines.push(args.map((a) => String(a)).join(" "));
+  };
+  try {
+    const result = await fn();
+    return [result, lines.join("\n")];
+  } finally {
+    console.error = original;
+  }
+}
+
+test("#3 B2: removeIfClean refuses — loudly — to delete a tree that belongs to another run, or to nobody", async () => {
+  const repo = makeFeatureBranchRepo();
+  const owner = runId("b2owner");
+  const stranger = runId("b2stranger");
+  const wt = await createWorktree(uniq("b2"), owner, repo.base);
+  const markerPath = path.join(wt, OWNER_MARKER);
+  try {
+    assert.equal(readWorktreeOwner(wt), owner, "creation stamps the tree with its run");
+    assert.match(
+      fs.readFileSync(markerPath, "utf8"),
+      new RegExp(`^${owner} \\d{4}-\\d{2}-\\d{2}T`),
+      "the marker is `<runId> <ISO timestamp>`",
+    );
+
+    // The #3 sequence: a DIFFERENT run's cleanup points at this path.
+    const [refused, loud] = await withCapturedConsoleError(() =>
+      removeIfClean(wt, repo.base, undefined, stranger),
+    );
+    assert.equal(refused, false, "a stranger's cleanup must not remove this tree");
+    assert.ok(fs.existsSync(wt), "the tree is still there");
+    assert.match(loud, /refusing to remove worktree/, "and the refusal is not silent");
+    assert.ok(loud.includes(owner) && loud.includes(stranger), `the refusal names both runs: ${loud}`);
+
+    // A caller with no claim at all is a stranger too — this is the bypassing
+    // caller the marker exists for.
+    const [noClaim] = await withCapturedConsoleError(() => removeIfClean(wt, repo.base));
+    assert.equal(noClaim, false, "no ownership claim means no removal");
+    assert.ok(fs.existsSync(wt));
+
+    // No readable marker: refuse even for the run that really did create it.
+    // Fail-closed — an unmarked tree may be somebody's live work.
+    fs.rmSync(markerPath);
+    const [unmarked, unmarkedLoud] = await withCapturedConsoleError(() =>
+      removeIfClean(wt, repo.base, undefined, owner),
+    );
+    assert.equal(unmarked, false, "a tree with no readable marker is never deleted");
+    assert.match(unmarkedLoud, new RegExp(`no readable ${OWNER_MARKER} marker`));
+
+    // The owner, with the marker in place, reclaims its own clean tree.
+    fs.writeFileSync(markerPath, `${owner} ${new Date().toISOString()}\n`);
+    assert.equal(await removeIfClean(wt, repo.base, undefined, owner), true, "the owner reclaims its own tree");
+    assert.equal(fs.existsSync(wt), false, "and the tree is gone");
+  } finally {
+    if (fs.existsSync(wt)) gitIn(repo.base, ["worktree", "remove", "--force", wt]);
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("#3 B2: a failed removal puts the ownership marker back rather than leaving the retained tree unowned", async () => {
+  // The marker is dropped just before `git worktree remove` (leaving it there
+  // would push every reclamation through the --force fallback). If the removal
+  // then fails, an unowned tree is left on disk — deletable by the next
+  // stranger, which is the exact hole the marker exists to close. Reaching that
+  // branch needs the removal itself to fail, so it is fault-injected here.
+  const repo = makeFeatureBranchRepo();
+  const name = "wt-b2-removal-always-fails";
+  const mutated = await loadMutantModule<WorktreeModule>(
+    name,
+    [
+      {
+        file: "worktree.ts",
+        find:
+          '    try {\n      await git(targetRepo, ["worktree", "remove", worktreePath]);\n' +
+          '    } catch {\n      await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);\n    }',
+        replace:
+          '    try {\n      await git(targetRepo, ["worktree", "not-a-subcommand", worktreePath]);\n' +
+          '    } catch {\n      await git(targetRepo, ["worktree", "not-a-subcommand", "--force", worktreePath]);\n    }',
+      },
+    ],
+    "worktree.ts",
+  );
+  const owner = runId("b2restore");
+  const wt = await mutated.createWorktree(uniq("b2-restore"), owner, repo.base);
+  try {
+    await assert.rejects(
+      () => mutated.removeIfClean(wt, repo.base, undefined, owner),
+      "a removal that cannot run must throw, not report a clean reclamation",
+    );
+    assert.ok(fs.existsSync(wt), "the tree survived the failed removal");
+    assert.equal(
+      mutated.readWorktreeOwner(wt),
+      owner,
+      "and it is still owned — a retained tree left unowned would be deletable by the next stranger",
+    );
+  } finally {
+    gitIn(repo.base, ["worktree", "remove", "--force", wt]);
+    dropMutant(name);
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("#3 B2: the ownership marker is invisible to change detection — not touched, not a violation, not 'dirty'", async () => {
+  const repo = makeFeatureBranchRepo();
+  const m = makeManager(repo.base);
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "codex",
+      prompt: "WRITEFILE src/forbidden.ts",
+      readOnly: false,
+      worktree: uniq("b2-invisible"),
+      cwd: repo.base,
+      // The marker's own path is declared forbidden: if it ever reached the
+      // touched set it would be reported as a breach the worker never made.
+      doNotTouch: [OWNER_MARKER, "src/"],
+    });
+    await until(() => m.status(id).status !== "running", 6_000);
+    const w = await m.wait(id, 200);
+    assert.deepEqual(
+      w.contract_violations,
+      [{ pattern: "src/", files: ["src/forbidden.ts"] }],
+      "only the worker's real write is a violation; the server's own marker is not",
+    );
+    assert.deepEqual(
+      w.touched_files?.filter((f) => f.includes(OWNER_MARKER)),
+      [],
+      "and the marker never appears in touched_files",
+    );
+  } finally {
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("#3 B2: a worker that commits everything (git add -A) still does not 'touch' the marker", async () => {
+  // The committed half of changedFilesSince: `git add -A` sweeps the untracked
+  // marker into the worker's own commit, where a diff-based check would see it.
+  const repo = makeFeatureBranchRepo();
+  const run = runId("b2commit");
+  const wt = await createWorktree(uniq("b2-committed"), run, repo.base);
+  try {
+    const cutSha = gitIn(wt, ["rev-parse", "HEAD"]);
+    fs.writeFileSync(path.join(wt, "src", "worker-wrote-this.ts"), "work\n");
+    gitIn(wt, ["add", "-A"]);
+    gitIn(wt, ["commit", "-m", "worker commits everything in sight"]);
+    const touched = await changedFilesSince(wt, cutSha);
+    assert.deepEqual(touched, ["src/worker-wrote-this.ts"], `unexpected touched set: ${JSON.stringify(touched)}`);
+  } finally {
+    gitIn(repo.base, ["worktree", "remove", "--force", wt]);
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("#3 B2 mutation: without the ownership check, a stranger's cleanup deletes the live tree — the original kill", async () => {
+  const repo = makeFeatureBranchRepo();
+  const name = "wt-b2-no-ownership-check";
+  const mutated = await loadMutantModule<WorktreeModule>(
+    name,
+    [
+      {
+        file: "worktree.ts",
+        find: "  if (fs.existsSync(worktreePath)) {\n    const owner = readWorktreeOwner(worktreePath);",
+        replace: "  if (false) {\n    const owner = readWorktreeOwner(worktreePath);",
+      },
+    ],
+    "worktree.ts",
+  );
+  const wt = await mutated.createWorktree(uniq("b2-mutant"), runId("b2m-owner"), repo.base);
+  try {
+    assert.equal(
+      await mutated.removeIfClean(wt, repo.base, undefined, runId("b2m-stranger")),
+      true,
+      "the mutant lets a stranger reclaim the tree — so the refusal above is really the marker's doing",
+    );
+    assert.equal(fs.existsSync(wt), false, "and the live tree is gone: 2026-07-16, reproduced");
+  } finally {
+    if (fs.existsSync(wt)) gitIn(repo.base, ["worktree", "remove", "--force", wt]);
     dropMutant(name);
     fs.rmSync(repo.root, { recursive: true, force: true });
   }

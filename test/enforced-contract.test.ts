@@ -12,9 +12,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LaneManager, type WaitResult } from "../src/manager.js";
-import { changedFiles, changedFilesSince, deriveWorktreePath, parsePorcelainZ } from "../src/worktree.js";
+import { changedFiles, changedFilesSince, parsePorcelainZ } from "../src/worktree.js";
 import { RUNS_ROOT, WRITE_DISCIPLINE_PREFIX } from "../src/constants.js";
-import { fakeResolver, until } from "./helpers.js";
+import { fakeResolver, until, worktreesForBranch } from "./helpers.js";
 
 /**
  * A real (origin + clone) repo with TWO commits on main, so an explicit `base`
@@ -139,7 +139,7 @@ test("base: a ref that does not resolve rejects the dispatch, quotes the caller 
         return true;
       },
     );
-    assert.equal(fs.existsSync(deriveWorktreePath(branch)), false, "no worktree was created for a rejected base");
+    assert.deepEqual(worktreesForBranch(branch), [], "no worktree was created for a rejected base");
 
     // A rejected dispatch must still leave a READABLE terminal stub (#35 / C1):
     // resolveBaseCommit rejects before any worktree exists, but the run
