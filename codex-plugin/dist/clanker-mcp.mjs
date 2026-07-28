@@ -31832,7 +31832,10 @@ var LaneRun = class {
    * Violations found while the worktree still existed (closeRun runs before
    * the terminal status flip, and a clean tree may be removed there — so the
    * result is stored here for buildWaitResult / writeResultFileOnce to read
-   * afterwards). Set at most once, only when doNotTouch was declared.
+   * afterwards). Recomputed-and-overwritten on every validation pass — a
+   * supervised run validates at its first terminal AND again on close after a
+   * correction round, and the later pass must replace the earlier verdict,
+   * never accumulate with it. Only set when doNotTouch was declared.
    */
   contractViolations;
   readOnly;
@@ -31892,6 +31895,8 @@ var LaneRun = class {
   finalTouchedFiles = [];
   toolCallCount = 0;
   toolCallTitles = /* @__PURE__ */ new Map();
+  /** Last known ToolCall.kind per toolCallId — updates may omit it (see tool_call_update above). */
+  toolCallKinds = /* @__PURE__ */ new Map();
   touchedFromTools = /* @__PURE__ */ new Set();
   touchedFromWrites = /* @__PURE__ */ new Set();
   currentTurnMessage = "";
@@ -32033,12 +32038,14 @@ var LaneRun = class {
       case "tool_call": {
         this.toolCallCount += 1;
         this.toolCallTitles.set(update.toolCallId, update.title);
+        if (update.kind != null) this.toolCallKinds.set(update.toolCallId, update.kind);
         this.collectLocations(update.locations, update.kind);
         this.pushDigest(`\u{1F527} ${truncate(update.title, 120)}`);
         break;
       }
       case "tool_call_update": {
-        this.collectLocations(update.locations, update.kind);
+        if (update.kind != null) this.toolCallKinds.set(update.toolCallId, update.kind);
+        this.collectLocations(update.locations, update.kind ?? this.toolCallKinds.get(update.toolCallId));
         if (update.status === "failed") {
           const title = this.toolCallTitles.get(update.toolCallId) ?? update.toolCallId;
           this.pushDigest(`\u26A0 tool failed: ${truncate(title, 100)}`, true);

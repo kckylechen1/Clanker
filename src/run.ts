@@ -123,7 +123,10 @@ export class LaneRun {
    * Violations found while the worktree still existed (closeRun runs before
    * the terminal status flip, and a clean tree may be removed there — so the
    * result is stored here for buildWaitResult / writeResultFileOnce to read
-   * afterwards). Set at most once, only when doNotTouch was declared.
+   * afterwards). Recomputed-and-overwritten on every validation pass — a
+   * supervised run validates at its first terminal AND again on close after a
+   * correction round, and the later pass must replace the earlier verdict,
+   * never accumulate with it. Only set when doNotTouch was declared.
    */
   contractViolations?: ContractViolation[];
   readonly readOnly: boolean;
@@ -185,6 +188,8 @@ export class LaneRun {
   private finalTouchedFiles: string[] = [];
   private toolCallCount = 0;
   private toolCallTitles = new Map<string, string>();
+  /** Last known ToolCall.kind per toolCallId — updates may omit it (see tool_call_update above). */
+  private toolCallKinds = new Map<string, ToolKind>();
   private touchedFromTools = new Set<string>();
   private touchedFromWrites = new Set<string>();
   private currentTurnMessage = "";
@@ -361,12 +366,21 @@ export class LaneRun {
       case "tool_call": {
         this.toolCallCount += 1;
         this.toolCallTitles.set(update.toolCallId, update.title);
+        if (update.kind != null) this.toolCallKinds.set(update.toolCallId, update.kind);
         this.collectLocations(update.locations, update.kind);
         this.pushDigest(`🔧 ${truncate(update.title, 120)}`);
         break;
       }
       case "tool_call_update": {
-        this.collectLocations(update.locations, update.kind);
+        // Effective kind, not this event's kind (round-3 review, codex-4f911):
+        // ToolCallUpdate.kind is optional and agents legitimately send the
+        // kind only on the opening tool_call — an update carrying locations
+        // but no kind would otherwise fall back to the inclusive default and
+        // record a READ location as touched, resurrecting the exact false
+        // positive the per-kind filter exists to kill. A kind that was never
+        // sent on any event still keeps the inclusive (fail-closed) behavior.
+        if (update.kind != null) this.toolCallKinds.set(update.toolCallId, update.kind);
+        this.collectLocations(update.locations, update.kind ?? this.toolCallKinds.get(update.toolCallId));
         if (update.status === "failed") {
           const title = this.toolCallTitles.get(update.toolCallId) ?? update.toolCallId;
           this.pushDigest(`⚠ tool failed: ${truncate(title, 100)}`, true);

@@ -269,6 +269,17 @@ async function runPrompt(id, sessionId, promptText) {
       status: "completed",
       locations: [{ path: `${cwd}/${rel}` }],
     });
+    // Split-event shape (round-3 review): a follow-up update on the SAME read
+    // tool call carrying a location but NO kind — ToolCallUpdate.kind is
+    // optional and real agents send kind only on the opening tool_call. The
+    // effective kind must come from the opener, or this location leaks into
+    // touched_files.
+    update(sessionId, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-read",
+      status: "completed",
+      locations: [{ path: `${cwd}/${rel}` }],
+    });
     update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock(`read ${rel}`) });
     respond(id, { stopReason: "end_turn" });
     return;
