@@ -212,6 +212,13 @@ interface TelemetryStub {
   lane: LaneName;
   profileId: string;
   cwd: string;
+  /**
+   * The server process that minted this dispatch (#32). Written here — in the
+   * stub, before a LaneRun or a worker exists — because "whose session is this"
+   * is a question a dispatch that died at a fail-closed gate still has to
+   * answer; RunTelemetry.server_pid carries the same value afterwards.
+   */
+  server_pid: number;
   created_at: string;
   requested_model?: string;
   /** Present only once the dispatch has been rejected before spawning. */
@@ -470,6 +477,7 @@ export class LaneManager {
       lane: params.lane,
       profileId: profile,
       cwd: params.cwd ?? this.baseRepo,
+      server_pid: process.pid,
       created_at: new Date().toISOString(),
       requested_model: params.model,
     };
@@ -778,6 +786,10 @@ export class LaneManager {
         handshakeTimeoutMs: this.handshakeTimeoutMs,
         terminateGraceMs: this.processTerminateGraceMs,
         signal: controller.signal,
+        // #32: persist the worker's identity at spawn time, not after the
+        // handshake — the durable record has to name a process that may still
+        // be alive when this server is not.
+        onSpawn: ({ pid, startedAt }) => run.noteWorkerSpawned(pid, startedAt),
       });
     } catch (e) {
       if (run.cancellationRequested || this.shuttingDown) {

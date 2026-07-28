@@ -183,6 +183,9 @@ export class LaneRun {
   private sessionUsage?: RunTelemetry["session_usage"];
   private observedModel: string | null = null;
   private observedEffort: string | null = null;
+  /** Live worker identity (#32): pid — which is also its pgid — and the ms epoch it was spawned. */
+  private workerPid?: number;
+  private workerStartedAt?: number;
 
   private plan: PlanState = EMPTY_PLAN;
   private finalTouchedFiles: string[] = [];
@@ -586,6 +589,23 @@ export class LaneRun {
     }
     this.persistTelemetry();
   }
+  /**
+   * Record the worker this run is currently driven by, and flush it to disk
+   * immediately (#32).
+   *
+   * Called from the spawn itself, not from the post-handshake path: the
+   * unrecorded window has to be as close to zero as the syscall allows, or a
+   * server that dies during a 30s handshake leaves a live, unkillable worker
+   * on disk with no pid next to it.
+   *
+   * A capacity retry respawns, and overwrites both fields — the pid that
+   * matters is the one that is running now, not the one that already died.
+   */
+  noteWorkerSpawned(pid: number, startedAt: number): void {
+    this.workerPid = pid;
+    this.workerStartedAt = startedAt;
+    this.persistTelemetry();
+  }
   observeConfigOptions(options: SessionConfigOption[] | null | undefined): void {
     for (const option of options ?? []) {
       if (option.category === "model") this.observedModel = String(option.currentValue);
@@ -605,6 +625,13 @@ export class LaneRun {
       backend: this.lane, read_only: this.readOnly, sandbox: this.requestOpts.sandbox,
       ...(this.baseSha !== undefined ? { base_sha: this.baseSha } : {}),
       ...(this.turnTimeoutMs !== undefined ? { turn_timeout_ms: this.turnTimeoutMs } : {}),
+      // Process identity (#32): server_pid is unconditional — every persisted
+      // record names the process that owns it — while the worker pair appears
+      // only once a worker really exists, so "no pid on disk" keeps meaning
+      // "nothing was spawned" rather than "spawned, pid unknown".
+      server_pid: process.pid,
+      ...(this.workerPid !== undefined ? { worker_pid: this.workerPid } : {}),
+      ...(this.workerStartedAt !== undefined ? { worker_started_at: this.workerStartedAt } : {}),
       created_at: new Date(this.createdAt).toISOString(),
       ...(this.startedAt ? { started_at: new Date(this.startedAt).toISOString() } : {}),
       ...(this.terminalAt ? { terminal_at: new Date(this.terminalAt).toISOString(), duration_ms: this.terminalAt - (this.startedAt ?? this.createdAt) } : {}),

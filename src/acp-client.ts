@@ -133,6 +133,17 @@ export interface LaneConnectionOptions {
   terminateGraceMs?: number;
   /** Cancels a subprocess that is still completing the ACP handshake. */
   signal?: AbortSignal;
+  /**
+   * Invoked the instant `spawn` hands back a pid, BEFORE the handshake (#32).
+   *
+   * The handshake can take up to HANDSHAKE_TIMEOUT_MS, and a worker is a real,
+   * running, grandchild-growing process for every millisecond of it. If this
+   * server dies in that window, whoever finds the leftovers can only kill them
+   * with a pid that was written down — so the pid is published here rather
+   * than on the success path. `pid` is also the worker's process GROUP id (the
+   * spawn is detached; see signalWorkerGroup).
+   */
+  onSpawn?: (info: { pid: number; startedAt: number }) => void;
 }
 
 /**
@@ -268,6 +279,10 @@ export class LaneConnection {
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams;
+    const spawnedAt = Date.now();
+    // No pid means spawn itself failed; the 'error' event below is the honest
+    // report of that, and there is no process to publish.
+    if (child.pid !== undefined) options.onSpawn?.({ pid: child.pid, startedAt: spawnedAt });
 
     let stderrTail = "";
     child.stderr.setEncoding("utf8");

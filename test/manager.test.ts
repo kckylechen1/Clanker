@@ -128,6 +128,44 @@ test("plan events project into status + touched_files from tool locations", asyn
   }
 });
 
+/**
+ * #32: the durable record has to name the processes involved, or a later
+ * session that finds an in-flight run on disk can see it and still not touch
+ * it. The three fields are written by exactly two places — the dispatch stub
+ * (server_pid, manager.ts) and the spawn hook (worker pair, run.ts
+ * noteWorkerSpawned) — and, this segment, read by nobody: the adoption
+ * protocol that consumes them is a separate change. So the assertion has to be
+ * that they are on disk, live, and true, while the worker is still running.
+ */
+test("#32: telemetry.json names the server pid and the live worker's pid/start time", async () => {
+  const m = makeManager();
+  try {
+    // STALL never answers, so the worker is guaranteed alive while we look at it.
+    const { id } = await m.dispatchStart({ lane: "codex", prompt: "STALL forever", cwd: os.tmpdir(), readOnly: true });
+    const telemetryPath = path.join(process.env.CLANKER_RUNS_ROOT!, id, "telemetry.json");
+    const read = () => JSON.parse(fs.readFileSync(telemetryPath, "utf8"));
+    await until(() => read().worker_pid !== undefined, 5_000);
+
+    const t = read();
+    assert.equal(t.server_pid, process.pid, "server_pid must be THIS process — the one holding the worker's stdio");
+    assert.ok(Number.isInteger(t.worker_pid) && t.worker_pid > 0, `worker_pid must be a real pid, got ${t.worker_pid}`);
+    assert.notEqual(t.worker_pid, process.pid, "the worker is a separate process, not the server");
+    // The pid on disk must be the process that is actually running the lane,
+    // not merely a number of the right shape.
+    assert.doesNotThrow(() => process.kill(t.worker_pid, 0), "worker_pid must name a process that is alive right now");
+
+    const createdAtMs = Date.parse(t.created_at);
+    assert.ok(Number.isFinite(createdAtMs), "created_at must parse");
+    assert.ok(
+      Math.abs(t.worker_started_at - createdAtMs) < 60_000,
+      `worker_started_at (${t.worker_started_at}) must be ms-epoch near created_at (${createdAtMs})`,
+    );
+    assert.ok(t.worker_started_at <= Date.now(), "worker_started_at must not be in the future");
+  } finally {
+    await m.shutdown();
+  }
+});
+
 test("a read-only run's touched_files does NOT pick up a tool_call's read-kind location", async () => {
   // codex-212e2 (a read-only cold-review dispatch) reported a pile of `src/`
   // files as touched_files on a tree with ZERO actual diff: the ACP
