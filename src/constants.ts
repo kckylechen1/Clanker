@@ -83,7 +83,7 @@ export const WORKTREES_ROOT =
 export const BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 
 export const SERVER_NAME = "clanker-mcp-server";
-export const SERVER_VERSION = "0.3.5";
+export const SERVER_VERSION = "0.3.6";
 
 /**
  * Load-bearing default: without an explicit override, the codex lane must
@@ -99,6 +99,34 @@ export const SERVER_VERSION = "0.3.5";
  */
 export const DEFAULT_CODEX_MODEL = "gpt-5.5";
 export const DEFAULT_CODEX_EFFORT = "xhigh";
+
+/**
+ * Workspace-discipline prefix prepended server-side to the prompt of every
+ * WRITE-class dispatch (manager.ts, exactly one place, after the final
+ * readOnly is computed — so read-only dispatches, and gemini which is forced
+ * read-only, never see it). Until this existed, the discipline below lived
+ * only in the dispatcher's prose request to the worker: a lane that dropped
+ * or paraphrased it faced no structural consequence. The server now owns the
+ * injection, so the words the worker is held to are the words it was handed.
+ * Kept byte-stable: tests compare the lane-visible prompt against it verbatim.
+ */
+export const WRITE_DISCIPLINE_PREFIX = `Workspace discipline, enforced by the dispatching contract — these override any
+convenience you would otherwise prefer:
+
+- Stage precise paths. Never \`git add -A\`: a single sweep once pulled three
+  sibling worktrees and another session's untracked WIP into one 62,000-line
+  commit. After committing, read the change summary and confirm nothing rode in.
+- Run side-effecting steps one command at a time and read each output. Never
+  chain them with \`&&\`: when the first link fails the rest are skipped silently,
+  and that is how "verified" gets reported for work that never ran.
+- Commit inside your worktree. Do not push, do not open a pull request — opening
+  a PR is the adjudicator's act, not yours.
+- Never weaken a frozen assertion. If an acceptance check cannot pass, STOP and
+  report back; do not edit the test, add a skip, or relax the assertion to reach
+  green.
+- Deliver evidence, not claims: paste the verbatim command output. If you could
+  not obtain something, say so plainly — "I could not get this" is a valid
+  delivery; composing a plausible result is the worst failure mode there is.`;
 
 /**
  * Single source of truth for opencode model shortnames (mirrors the /oc-dispatch

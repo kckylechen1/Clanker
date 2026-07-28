@@ -1,6 +1,6 @@
 {
   "name": "clanker-mcp-server",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Thin MCP job controller for Codex, OpenCode, Grok, and Gemini over ACP",
   "type": "module",
   "main": "dist/index.js",

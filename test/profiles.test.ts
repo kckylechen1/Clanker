@@ -642,8 +642,8 @@ test("#19-F6b: the runtime checks have teeth — each broken dimension flips the
       name: "f6b-declared-worktree-never-created",
       mutations: [{
         file: "manager.ts",
-        find: "      worktreePath = await createWorktree(params.worktree, targetRepo);",
-        replace: "      worktreePath = readOnly ? deriveWorktreePath(params.worktree) : await createWorktree(params.worktree, targetRepo);",
+        find: "      worktreePath = await createWorktree(params.worktree, targetRepo, baseSha);",
+        replace: "      worktreePath = readOnly ? deriveWorktreePath(params.worktree) : await createWorktree(params.worktree, targetRepo, baseSha);",
       }],
       probe: "codex-review",
       expect: /does not exist on disk/,

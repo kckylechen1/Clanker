@@ -97,35 +97,121 @@ export async function resolveBaseRef(targetRepo: string): Promise<string> {
 }
 
 /**
+ * Verify a caller-supplied `base` against `targetRepo` and return the full
+ * commit SHA it resolves to. This is the server-side half of the `base`
+ * dispatch parameter: the dispatcher may NAME the commit a worktree is cut
+ * from, but whether that name means anything is decided here, not by the
+ * worker. A base that does not resolve to a commit is a loud rejection that
+ * quotes the caller's original string verbatim — never a silent fallback to
+ * the repo's default base, which would let a typo'd ref quietly produce a
+ * worktree cut from somewhere the dispatcher did not ask for.
+ */
+export async function resolveBaseCommit(targetRepo: string, base: string): Promise<string> {
+  try {
+    const sha = (await git(targetRepo, ["rev-parse", "--verify", `${base}^{commit}`])).trim();
+    if (sha) return sha;
+  } catch {
+    /* fall through to the loud error */
+  }
+  throw new Error(
+    `dispatch base '${base}' does not resolve to a commit in target repo '${targetRepo}'; ` +
+      `refusing to fall back to the repo's default base (the worktree would be cut from a ` +
+      `commit the dispatcher did not name)`,
+  );
+}
+
+/** Full SHA of `cwd`'s current HEAD commit (the cut point of a fresh worktree). */
+export async function headSha(cwd: string): Promise<string> {
+  return (await git(cwd, ["rev-parse", "--verify", "HEAD"])).trim();
+}
+
+/**
  * Create a worktree for `branch`, cut from `targetRepo`'s resolved base ref
  * (see resolveBaseRef). `targetRepo` is the repo the dispatch targets; it
  * defaults to the host BASE_REPO only for callers with no dispatch cwd.
  *
+ * When `base` is given it wins: the worktree is cut from exactly that ref
+ * (already verified server-side via resolveBaseCommit before this call). When
+ * omitted, the resolveBaseRef chain runs EXACTLY as before (frozen, #12).
+ *
  * @returns the absolute worktree path.
  */
-export async function createWorktree(branch: string, targetRepo = BASE_REPO): Promise<string> {
+export async function createWorktree(branch: string, targetRepo = BASE_REPO, base?: string): Promise<string> {
   const wtPath = deriveWorktreePath(branch);
   if (fs.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
-  const baseRef = await resolveBaseRef(targetRepo);
+  const baseRef = base ?? (await resolveBaseRef(targetRepo));
   fs.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
   return wtPath;
 }
 
-/** Porcelain-parsed list of changed paths in `cwd` (tracked + untracked). */
-export async function changedFiles(cwd: string): Promise<string[]> {
-  const out = await git(cwd, ["status", "--porcelain"]);
+/**
+ * Parse the byte-exact output of `git status --porcelain=v1 -z` into a flat
+ * list of touched paths.
+ *
+ * This replaces a naive `indexOf(" -> ")` split on `--porcelain` (no `-z`)
+ * text, which was wrong for two independent reasons: (1) `--porcelain` text
+ * mode quotes/escapes paths with unusual characters (quotes, control bytes)
+ * per `core.quotePath`, which a raw split never undoes; and (2) an ORDINARY
+ * (non-rename) path whose name literally contains the substring `" -> "`
+ * (e.g. `src/a -> b.ts`) is indistinguishable, under string splitting, from a
+ * real rename record — silently corrupting doNotTouch matching for that file.
+ * `-z` sidesteps both: it NUL-delimits records and never quotes or escapes a
+ * path, so `" -> "` inside a filename can never be confused with the
+ * delimiter this function actually parses on (NUL).
+ *
+ * A `-z` record is `XY<SP><path>\0` for anything ordinary. For a RENAME
+ * record (`R` in either status column) or a COPY record (`C` in either status
+ * column) it is followed by one EXTRA NUL-terminated field holding the
+ * *source* path — verified experimentally against git 2.50: `git mv
+ * src/keep.ts allowed/keep.ts` emits the bytes
+ * `R  allowed/keep.ts\0src/keep.ts\0` — destination FIRST, source SECOND
+ * (the reverse of the "old -> new" reading order `--porcelain` text uses).
+ *
+ * Semantics returned to the caller (this is where rename and copy diverge):
+ *   - RENAME: both paths are reported. The source was touched exactly as
+ *     much as the destination — "removing a file out of a doNotTouch
+ *     directory via `git mv`" IS touching that directory (see
+ *     changedFilesSince below).
+ *   - COPY: only the destination is reported. The source file was never
+ *     modified or removed by a copy; reporting it as touched would be a
+ *     false positive doNotTouch violation on a file nobody changed.
+ * Copy detection is config/similarity-dependent and does not reliably fire
+ * through `git status` in a portable way, so it is exercised by feeding this
+ * pure function a hand-built `-z` byte string directly rather than by trying
+ * to coax real `git status` into emitting a `C` record (see the unit test).
+ */
+export function parsePorcelainZ(out: string): string[] {
+  const entries = out.split("\0");
+  // `-z` NUL-TERMINATES every record, so splitting on NUL leaves one trailing
+  // empty string that is not a record at all.
+  if (entries.length > 0 && entries[entries.length - 1] === "") entries.pop();
   const files: string[] = [];
-  for (const line of out.split("\n")) {
-    if (!line.trim()) continue;
-    // Format: "XY <path>" or "XY <old> -> <new>" for renames.
-    const rest = line.slice(3);
-    const arrow = rest.indexOf(" -> ");
-    files.push(arrow >= 0 ? rest.slice(arrow + 4) : rest);
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.length < 3) continue; // defensive: too short to hold "XY path"
+    const status = entry.slice(0, 2);
+    const destPath = entry.slice(3);
+    const isRename = status[0] === "R" || status[1] === "R";
+    const isCopy = status[0] === "C" || status[1] === "C";
+    if (isRename || isCopy) {
+      const srcPath = entries[++i]; // the extra NUL field: rename/copy source
+      files.push(destPath);
+      if (isRename && srcPath !== undefined) files.push(srcPath);
+      // copy: source is untouched — deliberately NOT pushed.
+    } else {
+      files.push(destPath);
+    }
   }
   return files;
+}
+
+/** Porcelain-parsed list of changed paths in `cwd` (tracked + untracked). See `parsePorcelainZ`. */
+export async function changedFiles(cwd: string): Promise<string[]> {
+  const out = await git(cwd, ["status", "--porcelain=v1", "-z"]);
+  return parsePorcelainZ(out);
 }
 
 /**
@@ -188,6 +274,54 @@ export function assertWorktreeOutsideRepo(worktreePath: string, targetRepo: stri
         `outside the repo)`,
     );
   }
+}
+
+/**
+ * Every path a worktree run touched relative to the commit it was cut from:
+ * committed changes (`git diff --name-only <base> HEAD`) UNION uncommitted
+ * ones (`git status --porcelain`). The porcelain half is load-bearing, not
+ * defensive: a worker that edits a forbidden file and never commits is the
+ * same contract breach as one that commits it, and a diff-only check would
+ * call the first one clean.
+ *
+ * TWO-dot diff (`<base> HEAD`), not three-dot (`<base>...HEAD`): three-dot
+ * diffs the merge-base of the two, which requires `base` and `HEAD` to share
+ * ancestry. `base` is the frozen SHA the worktree was cut from — normally an
+ * ancestor of HEAD, where two-dot and three-dot agree — but a worker that
+ * rewrites its branch onto an unrelated/orphan HEAD has no merge-base with
+ * that SHA at all, and three-dot then fails outright, leaving the terminal
+ * validation silently unable to see anything (the exact failure this
+ * function's caller must not treat as "nothing touched" — see the catch in
+ * `computeContractViolations`, manager.ts). Two-dot performs a direct tree
+ * comparison and needs no common ancestor, so it still finds real violations
+ * on a HEAD that three-dot could not even diff against.
+ */
+export async function changedFilesSince(worktreePath: string, base: string): Promise<string[]> {
+  const out = await git(worktreePath, ["diff", "--name-only", base, "HEAD"]);
+  const committed = out.split("\n").filter((line) => line.trim().length > 0);
+  const uncommitted = await changedFiles(worktreePath);
+  return [...new Set([...committed, ...uncommitted])];
+}
+
+/**
+ * Match touched paths against `doNotTouch` patterns. A pattern matches a file
+ * when the file equals it, or when the file sits under it as a directory
+ * prefix — so "src/" and "src" both match "src/foo.ts", and "src" does NOT
+ * match "src2/foo.ts" (the prefix boundary is a path separator, not a string
+ * prefix, or one directory's contract would swallow its sibling).
+ */
+export function matchDoNotTouch(
+  patterns: readonly string[],
+  files: readonly string[],
+): { pattern: string; files: string[] }[] {
+  const violations: { pattern: string; files: string[] }[] = [];
+  for (const pattern of patterns) {
+    const dir = pattern.replace(/\/+$/, "");
+    if (!dir) continue;
+    const matched = files.filter((file) => file === dir || file.startsWith(dir + "/"));
+    if (matched.length > 0) violations.push({ pattern, files: matched });
+  }
+  return violations;
 }
 
 /**

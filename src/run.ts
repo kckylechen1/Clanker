@@ -16,6 +16,7 @@ import type {
   SessionConfigOption,
   SessionUpdate,
   ToolCallLocation,
+  ToolKind,
 } from "@agentclientprotocol/sdk";
 import { DIGEST_CHAR_BUDGET, FINAL_MESSAGE_CHAR_BUDGET, resolveOcModel } from "./constants.js";
 import { appendLedgerRow } from "./ledger.js";
@@ -27,6 +28,7 @@ import type {
   RunStatus,
   RunTelemetry,
   PromptUsageTelemetry,
+  ContractViolation,
 } from "./types.js";
 import type { ClankerHost } from "./host.js";
 
@@ -97,6 +99,36 @@ export class LaneRun {
    * baseRepo, or it silently no-ops on the wrong repo and leaks the worktree.
    */
   readonly targetRepo?: string;
+  /**
+   * Full SHA the worktree was cut from when the dispatcher supplied an
+   * explicit `base` (verified server-side in manager.ts before the worktree
+   * was created). Undefined when the repo's default base resolution ran;
+   * surfaced in telemetry as `base_sha`.
+   */
+  readonly baseSha?: string;
+  /**
+   * Full SHA of the commit the worktree was cut from, captured at creation
+   * time regardless of whether the caller named a base. This is the diff base
+   * for `doNotTouch` terminal validation (worktree.ts changedFilesSince).
+   */
+  readonly worktreeBaseSha?: string;
+  /**
+   * Caller-declared paths the worker must not touch, validated server-side at
+   * terminal time (manager.ts computeContractViolations) against the real
+   * worktree diff. Undefined when the dispatcher declared none — in which
+   * case NO validation runs and nothing is reported anywhere.
+   */
+  readonly doNotTouch?: readonly string[];
+  /**
+   * Violations found while the worktree still existed (closeRun runs before
+   * the terminal status flip, and a clean tree may be removed there — so the
+   * result is stored here for buildWaitResult / writeResultFileOnce to read
+   * afterwards). Recomputed-and-overwritten on every validation pass — a
+   * supervised run validates at its first terminal AND again on close after a
+   * correction round, and the later pass must replace the earlier verdict,
+   * never accumulate with it. Only set when doNotTouch was declared.
+   */
+  contractViolations?: ContractViolation[];
   readonly readOnly: boolean;
   readonly runDir: string;
   readonly createdAt = Date.now();
@@ -156,6 +188,8 @@ export class LaneRun {
   private finalTouchedFiles: string[] = [];
   private toolCallCount = 0;
   private toolCallTitles = new Map<string, string>();
+  /** Last known ToolCall.kind per toolCallId — updates may omit it (see tool_call_update above). */
+  private toolCallKinds = new Map<string, ToolKind>();
   private touchedFromTools = new Set<string>();
   private touchedFromWrites = new Set<string>();
   private currentTurnMessage = "";
@@ -184,6 +218,12 @@ export class LaneRun {
     worktreeBranch?: string;
     worktreePath?: string;
     targetRepo?: string;
+    /** Caller-named, server-verified cut commit (telemetry `base_sha`). */
+    baseSha?: string;
+    /** Cut commit captured at creation time (doNotTouch diff base). */
+    worktreeBaseSha?: string;
+    /** Caller-declared forbidden paths for terminal validation. */
+    doNotTouch?: readonly string[];
     requestOpts?: LaneRequestOptions;
     initialPrompt?: string;
     /** Per-profile hard turn ceiling (profiles.ts); undefined falls back to the global default. */
@@ -200,6 +240,9 @@ export class LaneRun {
     this.worktreeBranch = init.worktreeBranch;
     this.worktreePath = init.worktreePath;
     this.targetRepo = init.targetRepo;
+    this.baseSha = init.baseSha;
+    this.worktreeBaseSha = init.worktreeBaseSha;
+    this.doNotTouch = init.doNotTouch;
     this.requestOpts = init.requestOpts ?? {};
     this.initialPrompt = init.initialPrompt ?? "";
     this.turnTimeoutMs = init.turnTimeoutMs;
@@ -323,12 +366,21 @@ export class LaneRun {
       case "tool_call": {
         this.toolCallCount += 1;
         this.toolCallTitles.set(update.toolCallId, update.title);
-        this.collectLocations(update.locations);
+        if (update.kind != null) this.toolCallKinds.set(update.toolCallId, update.kind);
+        this.collectLocations(update.locations, update.kind);
         this.pushDigest(`🔧 ${truncate(update.title, 120)}`);
         break;
       }
       case "tool_call_update": {
-        this.collectLocations(update.locations);
+        // Effective kind, not this event's kind (round-3 review, codex-4f911):
+        // ToolCallUpdate.kind is optional and agents legitimately send the
+        // kind only on the opening tool_call — an update carrying locations
+        // but no kind would otherwise fall back to the inclusive default and
+        // record a READ location as touched, resurrecting the exact false
+        // positive the per-kind filter exists to kill. A kind that was never
+        // sent on any event still keeps the inclusive (fail-closed) behavior.
+        if (update.kind != null) this.toolCallKinds.set(update.toolCallId, update.kind);
+        this.collectLocations(update.locations, update.kind ?? this.toolCallKinds.get(update.toolCallId));
         if (update.status === "failed") {
           const title = this.toolCallTitles.get(update.toolCallId) ?? update.toolCallId;
           this.pushDigest(`⚠ tool failed: ${truncate(title, 100)}`, true);
@@ -380,7 +432,22 @@ export class LaneRun {
     this.pushDigest(`📋 ${this.planSummary()}`, true);
   }
 
-  private collectLocations(locations: ToolCallLocation[] | null | undefined): void {
+  /**
+   * ACP's "follow-along" `locations` signal fires on tool_calls of EVERY
+   * kind, reads included: a `Read src/foo.ts` reports a location exactly
+   * like an `Edit` does (see ToolCall.kind in the ACP schema — "read" |
+   * "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" |
+   * "switch_mode" | "other"). Treating any reported location as "touched"
+   * therefore turned a read-only reviewer's own Read calls into
+   * false-positive touched_files entries (observed live in run codex-212e2:
+   * a read-only review dispatch reported a pile of src files touched on a
+   * tree with zero actual diff). Only a `read` kind is excluded here — an
+   * absent `kind` (optional per the ACP schema) keeps the prior, inclusive
+   * behavior rather than guessing, and every other kind (including the
+   * write-class ones this signal exists for) is unaffected.
+   */
+  private collectLocations(locations: ToolCallLocation[] | null | undefined, kind?: ToolKind | null): void {
+    if (kind === "read") return;
     for (const loc of locations ?? []) {
       if (loc.path) {
         this.touchedFromTools.add(loc.path);
@@ -536,6 +603,7 @@ export class LaneRun {
       observed_model: this.observedModel, requested_effort: this.requestOpts.effort,
       observed_effort: this.observedEffort, lane: this.lane, transport: "acp-stdio",
       backend: this.lane, read_only: this.readOnly, sandbox: this.requestOpts.sandbox,
+      ...(this.baseSha !== undefined ? { base_sha: this.baseSha } : {}),
       ...(this.turnTimeoutMs !== undefined ? { turn_timeout_ms: this.turnTimeoutMs } : {}),
       created_at: new Date(this.createdAt).toISOString(),
       ...(this.startedAt ? { started_at: new Date(this.startedAt).toISOString() } : {}),
@@ -627,6 +695,17 @@ export class LaneRun {
     if (this.error) {
       lines.push("## error", "", this.error, "");
       if (this.failureClass) lines.push(`failure_class: ${this.failureClass}`, "");
+    }
+    // doNotTouch breaches are reported, never silently absorbed — and never a
+    // status flip: the run's outcome stands, the contract violation is listed
+    // alongside it with the concrete offending paths.
+    if (this.contractViolations && this.contractViolations.length > 0) {
+      lines.push("## contract_violations", "");
+      for (const violation of this.contractViolations) {
+        lines.push(`- pattern \`${violation.pattern}\`:`);
+        for (const file of violation.files) lines.push(`  - ${file}`);
+      }
+      lines.push("");
     }
     // Last section, deliberately: a reader (or `tail`) that stops early still
     // ends on the verdict itself rather than on metadata.

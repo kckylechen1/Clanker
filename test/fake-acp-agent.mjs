@@ -26,9 +26,16 @@
  *   TRICKLE  -> emit a trivial tool_call, delay, then a significant plan update,
  *               delay, then end_turn — for clanker_wait quiet-mode debounce tests
  *               (the tool_call must not cut a wait short; the plan update must).
+ *   WRITEFILE <relpath> -> write a real (uncommitted) file at <cwd>/<relpath>,
+ *               then end_turn — for server-side doNotTouch validation tests
+ *               (the porcelain half of the diff must catch it).
+ *   COMMITFILE <relpath> -> write AND `git add`+`git commit` the file, then
+ *               end_turn — the committed half of the same validation.
  *   <other>  -> emit one agent_message_chunk equal to the prompt, then end_turn.
  */
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 import readline from "node:readline";
 
 if (process.env.CLANKER_TEST_IGNORE_SIGTERM === "1") process.on("SIGTERM", () => {});
@@ -82,6 +89,29 @@ function textBlock(text) {
 
 async function runPrompt(id, sessionId, promptText) {
   const p = promptText.toUpperCase();
+
+  const writeMatch = promptText.match(/\b(WRITEFILE|COMMITFILE)\s+(\S+)/i);
+  if (writeMatch) {
+    // Write a REAL file into the session cwd (a worktree in the doNotTouch
+    // tests) so the server's terminal validation diffs actual git state, not
+    // an ACP signal. COMMITFILE also commits it, covering the committed half.
+    const rel = writeMatch[2];
+    const target = path.join(cwd, rel);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `written by fake agent: ${rel}\n`);
+    if (writeMatch[1].toUpperCase() === "COMMITFILE") {
+      const gitEnv = {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t",
+        GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t",
+      };
+      execFileSync("git", ["add", rel], { cwd, env: gitEnv });
+      execFileSync("git", ["commit", "-m", `fake agent writes ${rel}`], { cwd, env: gitEnv });
+    }
+    update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock(`wrote ${rel}`) });
+    respond(id, { stopReason: "end_turn" });
+    return;
+  }
 
   if (p.includes("TELEMETRY")) {
     update(sessionId, { sessionUpdate: "config_option_update", configOptions: [
@@ -221,6 +251,37 @@ async function runPrompt(id, sessionId, promptText) {
         respond(id, { stopReason: "end_turn" });
       },
     );
+    return;
+  }
+
+  if (p.includes("READTOOL")) {
+    // Emit a tool_call with kind "read" and a location — the same
+    // "follow-along" signal a real Read/Grep tool produces. Used to prove a
+    // read-only run's touched_files does NOT pick up read locations (only
+    // write-class kinds may report a path as touched).
+    const relMatch = promptText.match(/READTOOL\s+(\S+)/i);
+    const rel = relMatch ? relMatch[1] : "src/looked-at.ts";
+    update(sessionId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-read",
+      title: `read ${rel}`,
+      kind: "read",
+      status: "completed",
+      locations: [{ path: `${cwd}/${rel}` }],
+    });
+    // Split-event shape (round-3 review): a follow-up update on the SAME read
+    // tool call carrying a location but NO kind — ToolCallUpdate.kind is
+    // optional and real agents send kind only on the opening tool_call. The
+    // effective kind must come from the opener, or this location leaks into
+    // touched_files.
+    update(sessionId, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-read",
+      status: "completed",
+      locations: [{ path: `${cwd}/${rel}` }],
+    });
+    update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock(`read ${rel}`) });
+    respond(id, { stopReason: "end_turn" });
     return;
   }
 

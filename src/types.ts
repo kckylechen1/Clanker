@@ -112,6 +112,12 @@ export interface RunTelemetry {
   requested_effort?: string; observed_effort?: string | null;
   lane: LaneName; transport: "acp-stdio"; backend: string; read_only: boolean;
   sandbox?: CodexSandboxMode;
+  /**
+   * Full SHA the worktree was cut from when the dispatcher supplied an
+   * explicit `base` (verified server-side, worktree.ts resolveBaseCommit).
+   * Absent when the repo's default base resolution was used.
+   */
+  base_sha?: string;
   /** Hard per-turn ceiling actually in force for this run (per-profile, see profiles.ts). */
   turn_timeout_ms?: number;
   created_at: string; started_at?: string;
@@ -139,6 +145,17 @@ export interface PromptUsageTelemetry {
   thoughtTokens?: number | null;
   cachedReadTokens?: number | null;
   cachedWriteTokens?: number | null;
+}
+
+/**
+ * One `doNotTouch` pattern that a finished run violated, with the concrete
+ * file paths that matched it. Surfaced on the terminal wait payload as
+ * `contract_violations` and written into `result.md`; never flips the run's
+ * status — the violation is reported, not re-adjudicated.
+ */
+export interface ContractViolation {
+  pattern: string;
+  files: string[];
 }
 
 /** Result payload attached once a run reaches a terminal state. */
