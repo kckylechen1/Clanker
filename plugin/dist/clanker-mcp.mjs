@@ -32033,12 +32033,12 @@ var LaneRun = class {
       case "tool_call": {
         this.toolCallCount += 1;
         this.toolCallTitles.set(update.toolCallId, update.title);
-        this.collectLocations(update.locations);
+        this.collectLocations(update.locations, update.kind);
         this.pushDigest(`\u{1F527} ${truncate(update.title, 120)}`);
         break;
       }
       case "tool_call_update": {
-        this.collectLocations(update.locations);
+        this.collectLocations(update.locations, update.kind);
         if (update.status === "failed") {
           const title = this.toolCallTitles.get(update.toolCallId) ?? update.toolCallId;
           this.pushDigest(`\u26A0 tool failed: ${truncate(title, 100)}`, true);
@@ -32086,7 +32086,22 @@ var LaneRun = class {
     this.plan = next;
     this.pushDigest(`\u{1F4CB} ${this.planSummary()}`, true);
   }
-  collectLocations(locations) {
+  /**
+   * ACP's "follow-along" `locations` signal fires on tool_calls of EVERY
+   * kind, reads included: a `Read src/foo.ts` reports a location exactly
+   * like an `Edit` does (see ToolCall.kind in the ACP schema — "read" |
+   * "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" |
+   * "switch_mode" | "other"). Treating any reported location as "touched"
+   * therefore turned a read-only reviewer's own Read calls into
+   * false-positive touched_files entries (observed live in run codex-212e2:
+   * a read-only review dispatch reported a pile of src files touched on a
+   * tree with zero actual diff). Only a `read` kind is excluded here — an
+   * absent `kind` (optional per the ACP schema) keeps the prior, inclusive
+   * behavior rather than guessing, and every other kind (including the
+   * write-class ones this signal exists for) is unaffected.
+   */
+  collectLocations(locations, kind) {
+    if (kind === "read") return;
     for (const loc of locations ?? []) {
       if (loc.path) {
         this.touchedFromTools.add(loc.path);
@@ -32979,20 +32994,30 @@ async function createWorktree(branch, targetRepo = BASE_REPO, base) {
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
   return wtPath;
 }
-async function changedFiles(cwd) {
-  const out = await git(cwd, ["status", "--porcelain"]);
+function parsePorcelainZ(out) {
+  const entries = out.split("\0");
+  if (entries.length > 0 && entries[entries.length - 1] === "") entries.pop();
   const files = [];
-  for (const line of out.split("\n")) {
-    if (!line.trim()) continue;
-    const rest = line.slice(3);
-    const arrow = rest.indexOf(" -> ");
-    if (arrow >= 0) {
-      files.push(rest.slice(0, arrow), rest.slice(arrow + 4));
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.length < 3) continue;
+    const status = entry.slice(0, 2);
+    const destPath = entry.slice(3);
+    const isRename = status[0] === "R" || status[1] === "R";
+    const isCopy = status[0] === "C" || status[1] === "C";
+    if (isRename || isCopy) {
+      const srcPath = entries[++i];
+      files.push(destPath);
+      if (isRename && srcPath !== void 0) files.push(srcPath);
     } else {
-      files.push(rest);
+      files.push(destPath);
     }
   }
   return files;
+}
+async function changedFiles(cwd) {
+  const out = await git(cwd, ["status", "--porcelain=v1", "-z"]);
+  return parsePorcelainZ(out);
 }
 async function holdsUnmergedWork(worktreePath, targetRepo) {
   try {
@@ -33856,8 +33881,24 @@ ${grokDetail}` : "";
    */
   async computeContractViolations(run) {
     if (!run.doNotTouch || run.doNotTouch.length === 0) return;
-    if (!run.worktreePath || !run.worktreeBaseSha) return;
-    if (!fs8.existsSync(run.worktreePath)) return;
+    if (!run.worktreePath) {
+      run.contractViolations = [
+        { pattern: "(validation-failed)", files: ["no worktree path recorded for this run"] }
+      ];
+      return;
+    }
+    if (!run.worktreeBaseSha) {
+      run.contractViolations = [
+        { pattern: "(validation-failed)", files: ["no worktree base SHA recorded for this run"] }
+      ];
+      return;
+    }
+    if (!fs8.existsSync(run.worktreePath)) {
+      run.contractViolations = [
+        { pattern: "(validation-failed)", files: [`worktree path '${run.worktreePath}' no longer exists`] }
+      ];
+      return;
+    }
     try {
       const touched = await changedFilesSince(run.worktreePath, run.worktreeBaseSha);
       run.contractViolations = matchDoNotTouch(run.doNotTouch, touched);

@@ -1214,8 +1214,33 @@ export class LaneManager {
    */
   private async computeContractViolations(run: LaneRun): Promise<void> {
     if (!run.doNotTouch || run.doNotTouch.length === 0) return;
-    if (!run.worktreePath || !run.worktreeBaseSha) return;
-    if (!fs.existsSync(run.worktreePath)) return;
+    // Below this line the run DID declare a doNotTouch contract, so a
+    // recompute that cannot even run the diff must say so LOUDLY — same
+    // reasoning as the try/catch below, just for the two conditions that
+    // used to return silently and leave a PRIOR call's violations (or no
+    // violations at all) stale on the run. This function recomputes on every
+    // terminal transition (see the doc comment above), so a supervised run
+    // that reported a real violation on its first terminal state and then
+    // loses its worktree/base before the session truly closes must not be
+    // read as "the violation went away".
+    if (!run.worktreePath) {
+      run.contractViolations = [
+        { pattern: "(validation-failed)", files: ["no worktree path recorded for this run"] },
+      ];
+      return;
+    }
+    if (!run.worktreeBaseSha) {
+      run.contractViolations = [
+        { pattern: "(validation-failed)", files: ["no worktree base SHA recorded for this run"] },
+      ];
+      return;
+    }
+    if (!fs.existsSync(run.worktreePath)) {
+      run.contractViolations = [
+        { pattern: "(validation-failed)", files: [`worktree path '${run.worktreePath}' no longer exists`] },
+      ];
+      return;
+    }
     try {
       const touched = await changedFilesSince(run.worktreePath, run.worktreeBaseSha);
       run.contractViolations = matchDoNotTouch(run.doNotTouch, touched);

@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LaneManager, type WaitResult } from "../src/manager.js";
-import { changedFilesSince, deriveWorktreePath } from "../src/worktree.js";
+import { changedFiles, changedFilesSince, deriveWorktreePath, parsePorcelainZ } from "../src/worktree.js";
 import { RUNS_ROOT, WRITE_DISCIPLINE_PREFIX } from "../src/constants.js";
 import { fakeResolver, until } from "./helpers.js";
 
@@ -408,6 +408,50 @@ test("doNotTouch: a rename OUT of a forbidden directory still reports the SOURCE
   }
 });
 
+test("changedFiles: an untracked file literally named with ' -> ' is reported WHOLE, never split at the arrow", async () => {
+  // A string-split parser (`indexOf(" -> ")`) cannot tell this file's name
+  // apart from an actual rename record. `-z` sidesteps the ambiguity
+  // entirely (no quoting/escaping, NUL-delimited), so this must survive
+  // as a single, unsplit path.
+  const repo = makeTwoCommitRepo();
+  fs.writeFileSync(path.join(repo.base, "src", "a -> b.ts"), "x\n");
+  const files = await changedFiles(repo.base);
+  assert.deepEqual(files, ["src/a -> b.ts"], "the literal arrow filename must survive whole, unsplit");
+});
+
+test("changedFiles: a git-mv rename reports BOTH the destination and the source path", async () => {
+  const repo = makeTwoCommitRepo();
+  fs.mkdirSync(path.join(repo.base, "allowed"), { recursive: true });
+  execFileSync("git", ["mv", "src/keep.ts", "allowed/keep.ts"], { cwd: repo.base, stdio: "pipe" });
+  const files = await changedFiles(repo.base);
+  assert.ok(files.includes("src/keep.ts"), "rename source must be reported");
+  assert.ok(files.includes("allowed/keep.ts"), "rename destination must be reported");
+});
+
+test("parsePorcelainZ: a RENAME record reports both paths, a COPY record reports ONLY the destination", () => {
+  // Hand-built `-z` byte stream in the exact wire shape git emits (verified
+  // experimentally against git 2.50: `R  <dest>\0<src>\0`, destination
+  // before source). Copy detection is config/similarity-dependent and does
+  // not reliably fire through `git status` in a test fixture, so copy
+  // semantics are pinned here directly at the parsing function instead.
+  const record = (...fields: string[]) => fields.join("\0");
+  const buf =
+    record("R  allowed/keep.ts", "src/keep.ts") +
+    "\0" +
+    record("C  dst/copy.ts", "src/orig.ts") +
+    "\0" +
+    record(" M src/plain.ts") +
+    "\0" +
+    record("?? src/untracked.ts") +
+    "\0";
+  const files = parsePorcelainZ(buf);
+  assert.deepEqual(
+    files,
+    ["allowed/keep.ts", "src/keep.ts", "dst/copy.ts", "src/plain.ts", "src/untracked.ts"],
+    "rename: destination AND source; copy: destination ONLY (source was never touched); plain/untracked: unaffected",
+  );
+});
+
 test("changedFilesSince: a two-dot diff still finds real violations when HEAD is rewritten onto an unrelated/orphan history", async () => {
   // Direct unit test of the worktree.ts fix: a three-dot diff against `base`
   // requires a merge-base with HEAD, which an orphan branch never has —
@@ -460,6 +504,50 @@ test("doNotTouch: a validation failure itself is reported, never silently swallo
       "a validation failure must surface, never vanish into zero violations",
     );
     assert.equal(w.contract_violations?.[0]?.pattern, "(validation-failed)");
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("doNotTouch: a recompute against a worktree that has VANISHED replaces stale violations with (validation-failed), never carries them forward", async () => {
+  // computeContractViolations() recomputes on every terminal transition
+  // (finalizeTurn's success path, then again from closeRun). If the worktree
+  // itself is gone by the time a later recompute runs, the earlier real
+  // violation must NOT survive unexamined — the recompute did not run, so it
+  // cannot vouch for either "still violating" or "now clean".
+  const repo = makeTwoCommitRepo();
+  const m = makeManager(repo.base);
+  const branch = `clanker/dnt-worktree-vanished-${Date.now()}`;
+  try {
+    const { id } = await m.dispatchProfile({
+      profile: "oc-glm-write",
+      prompt: "WRITEFILE src/forbidden.ts",
+      worktree: branch,
+      cwd: repo.base,
+      doNotTouch: ["src/"],
+    });
+    await until(() => m.status(id).status !== "running", 6_000);
+    // Confirm the FIRST terminal state carries the real violation (sanity:
+    // proves the stale value we're about to blow away was genuine).
+    const first = await m.wait(id, 200);
+    assert.deepEqual(
+      first.contract_violations,
+      [{ pattern: "src/", files: ["src/forbidden.ts"] }],
+      "sanity: a real violation is present before the worktree vanishes",
+    );
+    const wt = m.status(id).worktree;
+    assert.ok(wt, "worktree path present");
+    fs.rmSync(wt!, { recursive: true, force: true });
+    // The supervised session is still open; close() is what the idle-TTL
+    // reaper (or an explicit correction-round close) eventually does, and it
+    // is the point closeRun re-invokes computeContractViolations.
+    await m.close(id);
+    const after = await m.wait(id, 200);
+    assert.deepEqual(
+      after.contract_violations,
+      [{ pattern: "(validation-failed)", files: [`worktree path '${wt}' no longer exists`] }],
+      "a recompute against a vanished worktree must overwrite stale violations with (validation-failed), not preserve them",
+    );
   } finally {
     await m.shutdown();
   }

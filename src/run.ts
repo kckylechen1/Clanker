@@ -16,6 +16,7 @@ import type {
   SessionConfigOption,
   SessionUpdate,
   ToolCallLocation,
+  ToolKind,
 } from "@agentclientprotocol/sdk";
 import { DIGEST_CHAR_BUDGET, FINAL_MESSAGE_CHAR_BUDGET, resolveOcModel } from "./constants.js";
 import { appendLedgerRow } from "./ledger.js";
@@ -360,12 +361,12 @@ export class LaneRun {
       case "tool_call": {
         this.toolCallCount += 1;
         this.toolCallTitles.set(update.toolCallId, update.title);
-        this.collectLocations(update.locations);
+        this.collectLocations(update.locations, update.kind);
         this.pushDigest(`🔧 ${truncate(update.title, 120)}`);
         break;
       }
       case "tool_call_update": {
-        this.collectLocations(update.locations);
+        this.collectLocations(update.locations, update.kind);
         if (update.status === "failed") {
           const title = this.toolCallTitles.get(update.toolCallId) ?? update.toolCallId;
           this.pushDigest(`⚠ tool failed: ${truncate(title, 100)}`, true);
@@ -417,7 +418,22 @@ export class LaneRun {
     this.pushDigest(`📋 ${this.planSummary()}`, true);
   }
 
-  private collectLocations(locations: ToolCallLocation[] | null | undefined): void {
+  /**
+   * ACP's "follow-along" `locations` signal fires on tool_calls of EVERY
+   * kind, reads included: a `Read src/foo.ts` reports a location exactly
+   * like an `Edit` does (see ToolCall.kind in the ACP schema — "read" |
+   * "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" |
+   * "switch_mode" | "other"). Treating any reported location as "touched"
+   * therefore turned a read-only reviewer's own Read calls into
+   * false-positive touched_files entries (observed live in run codex-212e2:
+   * a read-only review dispatch reported a pile of src files touched on a
+   * tree with zero actual diff). Only a `read` kind is excluded here — an
+   * absent `kind` (optional per the ACP schema) keeps the prior, inclusive
+   * behavior rather than guessing, and every other kind (including the
+   * write-class ones this signal exists for) is unaffected.
+   */
+  private collectLocations(locations: ToolCallLocation[] | null | undefined, kind?: ToolKind | null): void {
+    if (kind === "read") return;
     for (const loc of locations ?? []) {
       if (loc.path) {
         this.touchedFromTools.add(loc.path);

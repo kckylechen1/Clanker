@@ -148,30 +148,70 @@ export async function createWorktree(branch: string, targetRepo = BASE_REPO, bas
 }
 
 /**
- * Porcelain-parsed list of changed paths in `cwd` (tracked + untracked).
+ * Parse the byte-exact output of `git status --porcelain=v1 -z` into a flat
+ * list of touched paths.
  *
- * A rename line (`XY <old> -> <new>`) reports BOTH the source and destination
- * path, not just the destination: moving `src/keep.ts` to `allowed/keep.ts`
- * touches `src/keep.ts` exactly as much as editing or deleting it would —
- * "removing a file out of a doNotTouch directory" IS touching that directory.
- * A destination-only report let a rename silently launder a forbidden-path
- * edit into an unrelated one.
+ * This replaces a naive `indexOf(" -> ")` split on `--porcelain` (no `-z`)
+ * text, which was wrong for two independent reasons: (1) `--porcelain` text
+ * mode quotes/escapes paths with unusual characters (quotes, control bytes)
+ * per `core.quotePath`, which a raw split never undoes; and (2) an ORDINARY
+ * (non-rename) path whose name literally contains the substring `" -> "`
+ * (e.g. `src/a -> b.ts`) is indistinguishable, under string splitting, from a
+ * real rename record — silently corrupting doNotTouch matching for that file.
+ * `-z` sidesteps both: it NUL-delimits records and never quotes or escapes a
+ * path, so `" -> "` inside a filename can never be confused with the
+ * delimiter this function actually parses on (NUL).
+ *
+ * A `-z` record is `XY<SP><path>\0` for anything ordinary. For a RENAME
+ * record (`R` in either status column) or a COPY record (`C` in either status
+ * column) it is followed by one EXTRA NUL-terminated field holding the
+ * *source* path — verified experimentally against git 2.50: `git mv
+ * src/keep.ts allowed/keep.ts` emits the bytes
+ * `R  allowed/keep.ts\0src/keep.ts\0` — destination FIRST, source SECOND
+ * (the reverse of the "old -> new" reading order `--porcelain` text uses).
+ *
+ * Semantics returned to the caller (this is where rename and copy diverge):
+ *   - RENAME: both paths are reported. The source was touched exactly as
+ *     much as the destination — "removing a file out of a doNotTouch
+ *     directory via `git mv`" IS touching that directory (see
+ *     changedFilesSince below).
+ *   - COPY: only the destination is reported. The source file was never
+ *     modified or removed by a copy; reporting it as touched would be a
+ *     false positive doNotTouch violation on a file nobody changed.
+ * Copy detection is config/similarity-dependent and does not reliably fire
+ * through `git status` in a portable way, so it is exercised by feeding this
+ * pure function a hand-built `-z` byte string directly rather than by trying
+ * to coax real `git status` into emitting a `C` record (see the unit test).
  */
-export async function changedFiles(cwd: string): Promise<string[]> {
-  const out = await git(cwd, ["status", "--porcelain"]);
+export function parsePorcelainZ(out: string): string[] {
+  const entries = out.split("\0");
+  // `-z` NUL-TERMINATES every record, so splitting on NUL leaves one trailing
+  // empty string that is not a record at all.
+  if (entries.length > 0 && entries[entries.length - 1] === "") entries.pop();
   const files: string[] = [];
-  for (const line of out.split("\n")) {
-    if (!line.trim()) continue;
-    // Format: "XY <path>" or "XY <old> -> <new>" for renames.
-    const rest = line.slice(3);
-    const arrow = rest.indexOf(" -> ");
-    if (arrow >= 0) {
-      files.push(rest.slice(0, arrow), rest.slice(arrow + 4));
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.length < 3) continue; // defensive: too short to hold "XY path"
+    const status = entry.slice(0, 2);
+    const destPath = entry.slice(3);
+    const isRename = status[0] === "R" || status[1] === "R";
+    const isCopy = status[0] === "C" || status[1] === "C";
+    if (isRename || isCopy) {
+      const srcPath = entries[++i]; // the extra NUL field: rename/copy source
+      files.push(destPath);
+      if (isRename && srcPath !== undefined) files.push(srcPath);
+      // copy: source is untouched — deliberately NOT pushed.
     } else {
-      files.push(rest);
+      files.push(destPath);
     }
   }
   return files;
+}
+
+/** Porcelain-parsed list of changed paths in `cwd` (tracked + untracked). See `parsePorcelainZ`. */
+export async function changedFiles(cwd: string): Promise<string[]> {
+  const out = await git(cwd, ["status", "--porcelain=v1", "-z"]);
+  return parsePorcelainZ(out);
 }
 
 /**

@@ -128,6 +128,31 @@ test("plan events project into status + touched_files from tool locations", asyn
   }
 });
 
+test("a read-only run's touched_files does NOT pick up a tool_call's read-kind location", async () => {
+  // codex-212e2 (a read-only cold-review dispatch) reported a pile of `src/`
+  // files as touched_files on a tree with ZERO actual diff: the ACP
+  // "follow-along" `locations` signal fires on reads exactly like writes
+  // (kind: "read" vs "edit"), and toolTouchedFiles() used to union in every
+  // reported location regardless of kind. A read-only dispatch never has a
+  // real write signal to report, so its touched_files must come back empty
+  // even though the fake agent below reports a location (see READTOOL in
+  // fake-acp-agent.mjs, kind: "read").
+  const m = makeManager();
+  try {
+    const { id } = await m.dispatchStart({
+      lane: "codex",
+      prompt: "READTOOL src/looked-at.ts",
+      cwd: os.tmpdir(),
+      readOnly: true,
+    });
+    const r = await waitTerminal(m, id);
+    assert.equal(r.status, "done");
+    assert.deepEqual(r.touched_files, [], "a read-kind location must never surface as touched_files");
+  } finally {
+    await m.shutdown();
+  }
+});
+
 test("clanker_wait returns early on event arrival (long-poll wakes on events)", async () => {
   const m = makeManager();
   try {

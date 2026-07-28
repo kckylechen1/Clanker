@@ -254,6 +254,26 @@ async function runPrompt(id, sessionId, promptText) {
     return;
   }
 
+  if (p.includes("READTOOL")) {
+    // Emit a tool_call with kind "read" and a location — the same
+    // "follow-along" signal a real Read/Grep tool produces. Used to prove a
+    // read-only run's touched_files does NOT pick up read locations (only
+    // write-class kinds may report a path as touched).
+    const relMatch = promptText.match(/READTOOL\s+(\S+)/i);
+    const rel = relMatch ? relMatch[1] : "src/looked-at.ts";
+    update(sessionId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-read",
+      title: `read ${rel}`,
+      kind: "read",
+      status: "completed",
+      locations: [{ path: `${cwd}/${rel}` }],
+    });
+    update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock(`read ${rel}`) });
+    respond(id, { stopReason: "end_turn" });
+    return;
+  }
+
   if (p.includes("PLAN")) {
     update(sessionId, {
       sessionUpdate: "plan",
