@@ -69,6 +69,23 @@ export async function loadMutantModule<M>(
   mutations: SrcMutation[],
   entry: string,
 ): Promise<M> {
+  const root = materializeMutant(name, mutations);
+  return (await import(pathToFileURL(path.join(root, "src", entry)).href)) as M;
+}
+
+/**
+ * The same mutated `src/` tree, WITHOUT importing anything — the form the
+ * sidecars need.
+ *
+ * `cursor-acp.ts` / `gemini-acp.ts` are standalone executables that connect an
+ * ACP stream to stdio the moment they are imported, so a mutation harness
+ * cannot reach them through `import`. It can SPAWN them: materialize the tree,
+ * point a SpawnSpec at `<root>/src/<sidecar>.ts`, and run the same end-to-end
+ * assertions against the broken build.
+ *
+ * Returns the mutant root; the caller joins `src/<file>` onto it.
+ */
+export function materializeMutant(name: string, mutations: SrcMutation[]): string {
   if (mutations.length === 0) throw new Error(`mutant '${name}' declares no mutation`);
   const root = path.join(MUTANTS_ROOT, name);
   fs.rmSync(root, { recursive: true, force: true });
@@ -86,7 +103,7 @@ export async function loadMutantModule<M>(
     }
     fs.writeFileSync(target, before.replace(mutation.find, mutation.replace));
   }
-  return (await import(pathToFileURL(path.join(root, "src", entry)).href)) as M;
+  return root;
 }
 
 /**
