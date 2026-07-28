@@ -282,6 +282,19 @@ test("Gemini ACP cancellation terminates agy and returns cancelled", { skip: !wo
       if (update.kind === "stop") break;
     }
     assert.equal((await turn).stopReason, "cancelled");
+    // 15s, not the 2s default (#29). This is the only wait in the file whose
+    // subject is the OS reaping a process GROUP rather than this process
+    // writing a file, and the fake agy sits in `trap ... TERM` + `sleep 30`:
+    // the signal has to be delivered, the trap has to run, and the group has
+    // to be torn down, none of which this process schedules. Under load — a
+    // full suite on a busy machine — that measured 1 red in 6 runs against a
+    // 2s budget, i.e. a test that fails for being on a slow machine, and CI
+    // treats it as a product regression.
+    //
+    // The budget is an upper bound, not a sleep: waitUntil returns the moment
+    // the group is gone, so a healthy machine pays nothing for the headroom.
+    // Raising it weakens nothing — the assertion is still "the group dies",
+    // never "the group dies fast".
     await waitUntil(() => {
       try {
         process.kill(-agyPid, 0);
@@ -289,7 +302,7 @@ test("Gemini ACP cancellation terminates agy and returns cancelled", { skip: !wo
       } catch {
         return true;
       }
-    });
+    }, 15_000);
   } finally {
     conn.close();
   }
