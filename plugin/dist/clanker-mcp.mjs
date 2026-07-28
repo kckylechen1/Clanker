@@ -32757,7 +32757,16 @@ var ENV_DRIFT_PATTERNS = [
   /spawn .+ ENOENT/i
 ];
 var SPAWN_FAILURE_PATTERNS = [
-  /failed to spawn .+ ENOENT/i
+  // Anchored to acp-client's EXACT wrapper (`failed to spawn '<cmd>': ...`,
+  // acp-client.ts spawn-error reject) — anchored at message start, quoted
+  // command, colon. Round-2 review (codex-749a3) proved the previous
+  // substring form was wider than its own prose: a REAL backend 402 whose
+  // text embedded a "failed to spawn helper ENOENT" diagnostic hijacked the
+  // short-circuit and misrouted billing to ENV-DRIFT. Only the wrapper shape
+  // this codebase itself produces may take the pre-billing shortcut; any
+  // spawn-ish text merely quoted inside a backend answer falls through to
+  // the billing/auth/capacity passes below.
+  /^failed to spawn '[^']+':.*\bENOENT\b/i
 ];
 function classifyBackendFailure(message) {
   if (SPAWN_FAILURE_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;

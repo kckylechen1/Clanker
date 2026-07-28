@@ -122,6 +122,14 @@ test("a backend that ANSWERED outranks a mere MENTION of env drift — billing/a
   assert.equal(classifyBackendFailure(billing), BACKEND_BILLING_TAG);
   const auth = "spawn helper ENOENT was logged earlier; 401 unauthorized";
   assert.equal(classifyBackendFailure(auth), BACKEND_AUTH_TAG);
+
+  // Round-2 counterexample (codex-749a3, verified live against the previous
+  // substring pattern): a real 402 whose text embeds the WORDS "failed to
+  // spawn ... ENOENT" mid-sentence. Only acp-client's anchored wrapper shape
+  // may take the pre-billing shortcut; this must stay BILLING.
+  const embedded =
+    "API error (status 402 Payment Required): usage balance exhausted; diagnostic: failed to spawn helper ENOENT";
+  assert.equal(classifyBackendFailure(embedded), BACKEND_BILLING_TAG);
 });
 
 test("a spawn failure under a billing/auth-shaped PATH is ENV-DRIFT — no backend was reached to reject anything", () => {
