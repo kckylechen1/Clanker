@@ -33557,7 +33557,7 @@ function sweepRunStreams(options = {}) {
   const runsRoot = options.runsRoot ?? RUNS_ROOT;
   const ttlMs = options.ttlMs ?? RUN_STREAM_TTL_MS;
   const now = options.now ?? Date.now();
-  const report = { scanned: 0, sweptRuns: 0, sweptFiles: 0, bytesFreed: 0, failures: 0 };
+  const report = { scanned: 0, sweptRuns: 0, sweptFiles: 0, bytesFreed: 0, removedRuns: 0, failures: 0 };
   if (!(ttlMs > 0)) return report;
   let entries;
   try {
@@ -33596,15 +33596,34 @@ function sweepRunStreams(options = {}) {
         report.failures++;
       }
     }
-    if (swept > 0) report.sweptRuns++;
+    if (swept > 0) {
+      report.sweptRuns++;
+      if (isEmptyDir(runDir) && removeDir(runDir)) report.removedRuns++;
+    }
   }
   return report;
+}
+function isEmptyDir(dir) {
+  try {
+    return fs7.readdirSync(dir).length === 0;
+  } catch {
+    return false;
+  }
+}
+function removeDir(dir) {
+  try {
+    fs7.rmdirSync(dir);
+    return true;
+  } catch {
+    return false;
+  }
 }
 function formatSweepReport(report) {
   if (report.sweptFiles === 0 && report.failures === 0) return null;
   const mb = (report.bytesFreed / 1048576).toFixed(1);
+  const removed = report.removedRuns > 0 ? `, ${report.removedRuns} emptied dir(s) removed` : "";
   const failed = report.failures > 0 ? `, ${report.failures} failed` : "";
-  return `retention: reclaimed ${report.sweptFiles} stream file(s) from ${report.sweptRuns} run(s), ${mb} MB${failed} (${report.scanned} scanned)`;
+  return `retention: reclaimed ${report.sweptFiles} stream file(s) from ${report.sweptRuns} run(s), ${mb} MB${removed}${failed} (${report.scanned} scanned)`;
 }
 
 // src/index.ts

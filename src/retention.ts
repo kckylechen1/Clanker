@@ -56,6 +56,8 @@ export interface SweepReport {
   sweptRuns: number;
   sweptFiles: number;
   bytesFreed: number;
+  /** Run directories removed because the sweep left them with nothing at all. */
+  removedRuns: number;
   /** Streams that were past the TTL but could not be unlinked. */
   failures: number;
 }
@@ -75,7 +77,7 @@ export function sweepRunStreams(options: SweepOptions = {}): SweepReport {
   const runsRoot = options.runsRoot ?? RUNS_ROOT;
   const ttlMs = options.ttlMs ?? RUN_STREAM_TTL_MS;
   const now = options.now ?? Date.now();
-  const report: SweepReport = { scanned: 0, sweptRuns: 0, sweptFiles: 0, bytesFreed: 0, failures: 0 };
+  const report: SweepReport = { scanned: 0, sweptRuns: 0, sweptFiles: 0, bytesFreed: 0, removedRuns: 0, failures: 0 };
 
   if (!(ttlMs > 0)) return report;
 
@@ -126,16 +128,47 @@ export function sweepRunStreams(options: SweepOptions = {}): SweepReport {
         report.failures++;
       }
     }
-    if (swept > 0) report.sweptRuns++;
+    if (swept > 0) {
+      report.sweptRuns++;
+      // A run that predates telemetry.json holds NOTHING but the two streams,
+      // so sweeping it leaves a bare directory behind — and unlinking a file
+      // bumps the directory's own mtime, so the leftover also looks brand new.
+      // That is not merely litter: an empty run directory is the only trace a
+      // dispatch that died before its first write leaves behind (manager.ts
+      // mkdirs the run dir before resolveSpec and before any spawn), and the
+      // first real sweep of one operator's cache turned 31 such directories
+      // into 137 freshly-stamped ones. Retention has to leave that signal where
+      // it found it, so a directory the sweep itself emptied is removed;
+      // directories that were ALREADY empty are evidence and stay untouched.
+      if (isEmptyDir(runDir) && removeDir(runDir)) report.removedRuns++;
+    }
   }
 
   return report;
+}
+
+function isEmptyDir(dir: string): boolean {
+  try {
+    return fs.readdirSync(dir).length === 0;
+  } catch {
+    return false;
+  }
+}
+
+function removeDir(dir: string): boolean {
+  try {
+    fs.rmdirSync(dir);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Human-readable one-liner for the startup log; `null` when nothing was reclaimed. */
 export function formatSweepReport(report: SweepReport): string | null {
   if (report.sweptFiles === 0 && report.failures === 0) return null;
   const mb = (report.bytesFreed / 1_048_576).toFixed(1);
+  const removed = report.removedRuns > 0 ? `, ${report.removedRuns} emptied dir(s) removed` : "";
   const failed = report.failures > 0 ? `, ${report.failures} failed` : "";
-  return `retention: reclaimed ${report.sweptFiles} stream file(s) from ${report.sweptRuns} run(s), ${mb} MB${failed} (${report.scanned} scanned)`;
+  return `retention: reclaimed ${report.sweptFiles} stream file(s) from ${report.sweptRuns} run(s), ${mb} MB${removed}${failed} (${report.scanned} scanned)`;
 }

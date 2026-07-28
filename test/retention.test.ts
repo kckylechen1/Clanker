@@ -59,10 +59,8 @@ test("a cold run loses both streams and keeps its verdict and telemetry", () => 
   assert.equal(exists(dir, "result.md"), true);
   assert.equal(fs.readFileSync(path.join(dir, "result.md"), "utf8"), "# verdict");
 
-  assert.deepEqual(
-    { scanned: report.scanned, sweptRuns: report.sweptRuns, sweptFiles: report.sweptFiles, bytesFreed: report.bytesFreed, failures: report.failures },
-    { scanned: 1, sweptRuns: 1, sweptFiles: 2, bytesFreed: 1500, failures: 0 },
-  );
+  assert.deepEqual(report, { scanned: 1, sweptRuns: 1, sweptFiles: 2, bytesFreed: 1500, removedRuns: 0, failures: 0 });
+  assert.equal(fs.existsSync(dir), true, "a run that still holds a verdict keeps its directory");
 });
 
 test("a run inside the TTL is untouched", () => {
@@ -113,6 +111,14 @@ test("a legacy run with no telemetry.json is still reclaimed", () => {
   assert.equal(exists(dir, "chunks.log"), false);
   assert.equal(report.sweptFiles, 2);
   assert.equal(report.bytesFreed, 96);
+  // A legacy run holds nothing BUT the streams, so sweeping empties it. The
+  // leftover must not survive: unlinking bumps the directory's mtime, so a bare
+  // freshly-stamped directory would be indistinguishable from a dispatch that
+  // died before its first write — the one thing an empty run dir is supposed to
+  // mean. The first real sweep of one operator's cache manufactured 106 of
+  // these before this was fixed.
+  assert.equal(fs.existsSync(dir), false, "a directory the sweep itself emptied must be removed");
+  assert.equal(report.removedRuns, 1);
 });
 
 test("ttl 0 disables the sweep entirely", () => {
@@ -126,7 +132,7 @@ test("ttl 0 disables the sweep entirely", () => {
 
   assert.equal(exists(dir, "events.jsonl"), true);
   assert.equal(exists(dir, "chunks.log"), true);
-  assert.deepEqual(report, { scanned: 0, sweptRuns: 0, sweptFiles: 0, bytesFreed: 0, failures: 0 });
+  assert.deepEqual(report, { scanned: 0, sweptRuns: 0, sweptFiles: 0, bytesFreed: 0, removedRuns: 0, failures: 0 });
 });
 
 test("a missing runs root is not an error", () => {
@@ -135,7 +141,7 @@ test("a missing runs root is not an error", () => {
     ttlMs: TTL,
     now: NOW,
   });
-  assert.deepEqual(report, { scanned: 0, sweptRuns: 0, sweptFiles: 0, bytesFreed: 0, failures: 0 });
+  assert.deepEqual(report, { scanned: 0, sweptRuns: 0, sweptFiles: 0, bytesFreed: 0, removedRuns: 0, failures: 0 });
 });
 
 test("stray non-directory entries and empty run dirs are skipped without throwing", () => {
@@ -150,13 +156,22 @@ test("stray non-directory entries and empty run dirs are skipped without throwin
 
   assert.equal(exists(dir, "events.jsonl"), false);
   assert.equal(fs.existsSync(path.join(root, "stray.txt")), true, "a non-directory entry must not be swept");
-  assert.equal(fs.existsSync(path.join(root, "codex-empty")), true, "an empty run dir is evidence, not garbage");
+  // The asymmetry that keeps the pre-spawn-failure signal readable: a directory
+  // that was ALREADY empty is the only evidence such a dispatch leaves and is
+  // never touched; a directory the sweep emptied itself is removed.
+  assert.equal(
+    fs.existsSync(path.join(root, "codex-empty")),
+    true,
+    "an already-empty run dir is evidence of a dispatch that died before its first write, not garbage",
+  );
+  assert.equal(fs.existsSync(dir), false, "the dir the sweep emptied is removed");
   assert.equal(report.scanned, 2, "only directories count as scanned runs");
   assert.equal(report.sweptRuns, 1);
+  assert.equal(report.removedRuns, 1);
 });
 
 test("the startup line is silent when nothing was reclaimed and specific when something was", () => {
-  assert.equal(formatSweepReport({ scanned: 12, sweptRuns: 0, sweptFiles: 0, bytesFreed: 0, failures: 0 }), null);
-  const line = formatSweepReport({ scanned: 12, sweptRuns: 3, sweptFiles: 5, bytesFreed: 3_145_728, failures: 1 });
-  assert.match(line ?? "", /5 stream file\(s\) from 3 run\(s\), 3\.0 MB, 1 failed \(12 scanned\)/);
+  assert.equal(formatSweepReport({ scanned: 12, sweptRuns: 0, sweptFiles: 0, bytesFreed: 0, removedRuns: 0, failures: 0 }), null);
+  const line = formatSweepReport({ scanned: 12, sweptRuns: 3, sweptFiles: 5, bytesFreed: 3_145_728, removedRuns: 2, failures: 1 });
+  assert.match(line ?? "", /5 stream file\(s\) from 3 run\(s\), 3\.0 MB, 2 emptied dir\(s\) removed, 1 failed \(12 scanned\)/);
 });
