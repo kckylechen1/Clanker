@@ -792,7 +792,16 @@ test("cancel during handshake waits for child exit and cannot publish a late con
       CLANKER_TEST_HANDSHAKE_DELAY_MS: "250", CLANKER_TEST_PID_FILE: pidFile,
       CLANKER_TEST_EXIT_MARKER: exitMarker,
     }),
-    disableReaper: true, baseRepo: os.tmpdir(), processTerminateGraceMs: 40,
+    // 500ms, not 40 (#29 pattern; CI macOS red 2026-07-29). The fixture
+    // deliberately takes 20ms AFTER SIGTERM to write its exit marker —
+    // that delay is the whole point, it proves cancel WAITS for the child
+    // instead of resolving on the signal. A 40ms grace left a 2x margin
+    // over a setTimeout + fs write on a loaded runner, so SIGKILL beat the
+    // fixture's own timer and the marker never appeared: a green-machine
+    // test that fails for being on a busy one. The grace is an upper
+    // bound — a child that exits promptly still resolves promptly, and
+    // what is asserted (the marker exists) is unchanged.
+    disableReaper: true, baseRepo: os.tmpdir(), processTerminateGraceMs: 500,
   });
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "too late", cwd: os.tmpdir(), readOnly: true });
