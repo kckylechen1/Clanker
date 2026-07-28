@@ -1192,7 +1192,24 @@ export class LaneManager {
   async cancel(id: string): Promise<{ id: string; status: RunStatus }> {
     const run = this.runs.get(id);
     if (!run) this.throwUnknownRun(id);
-    if (run.turnStatus !== "running") return { id, status: run.turnStatus };
+    // A run whose turn is already terminal has no turn to cancel — but it can
+    // still be HOLDING things. The supervised profile deliberately keeps its
+    // session (and therefore its worktree) alive past a successful turn so a
+    // correction turn stays possible, until the idle-TTL reaper closes it
+    // minutes later. In that window `clanker_cancel` used to return without
+    // doing anything at all, so a seat that had decided "no correction needed"
+    // could not give the tree back and had to wait the TTL out — the one
+    // remaining window where a live tree is held by nothing but a timer (#3).
+    //
+    // Cancel here means RECLAIM THE SESSION AND THE TREE, not "undo the work":
+    // the work already finished and its terminal status is the truth of what
+    // happened, so that status is reported back unchanged (a done run stays
+    // done; it is never rewritten to cancelled). An already-closed run keeps
+    // returning immediately — there is nothing left to hand back.
+    if (run.turnStatus !== "running") {
+      if (!run.sessionClosed) await this.close(id);
+      return { id, status: run.turnStatus };
+    }
     run.requestCancellation();
     const pending = this.pendingConnects.get(id);
     if (pending) {

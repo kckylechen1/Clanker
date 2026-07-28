@@ -597,3 +597,111 @@ test("#3 B2 mutation: without the ownership check, a stranger's cleanup deletes 
     fs.rmSync(repo.root, { recursive: true, force: true });
   }
 });
+
+// ---- #3 B3: cancel gives back an idle session's tree ------------------------
+
+test("#3 B3: cancelling a FINISHED supervised run hands back the session and the tree, without rewriting its verdict", async () => {
+  // The one window #3's mechanism still lived in: a supervised profile keeps
+  // its session — and its worktree — open after a successful turn so the
+  // supervising seat can issue a correction. `clanker_cancel` used to no-op in
+  // that window (turnStatus !== "running"), leaving a live tree held by nothing
+  // but the idle-TTL timer, with no way to give it back early.
+  const repo = makeFeatureBranchRepo();
+  const m = makeManager(repo.base);
+  try {
+    const { id } = await m.dispatchProfile({
+      profile: "oc-glm-write",
+      prompt: "implement the frozen spec",
+      worktree: uniq("b3"),
+      cwd: repo.base,
+    });
+    await until(() => m.status(id).status !== "running", 6_000);
+    assert.equal(m.status(id).status, "done", "fixture: the supervised turn succeeded");
+    const wt = m.status(id).worktree;
+    assert.ok(wt && fs.existsSync(wt), "fixture: the success deliberately holds its tree open");
+
+    const cancelled = await m.cancel(id);
+    assert.equal(
+      cancelled.status,
+      "done",
+      "cancel reclaims the session; it does not rewrite a verdict for work that already finished",
+    );
+    assert.equal(fs.existsSync(wt!), false, "the clean tree is reclaimed now, not after the idle TTL");
+    await assert.rejects(
+      () => m.promptExisting(id, "too late", true),
+      /session for '.+' is (gone|already closed)/,
+      "the session really was closed, not just reported as such",
+    );
+  } finally {
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("#3 B3: the reclaim still obeys the retention rules — a finished run that left work keeps its tree", async () => {
+  const repo = makeFeatureBranchRepo();
+  const m = makeManager(repo.base);
+  try {
+    const { id } = await m.dispatchProfile({
+      profile: "oc-glm-write",
+      prompt: "WRITEFILE src/the-deliverable.ts",
+      worktree: uniq("b3-dirty"),
+      cwd: repo.base,
+    });
+    await until(() => m.status(id).status !== "running", 6_000);
+    const wt = m.status(id).worktree;
+    assert.ok(wt && fs.existsSync(wt));
+
+    const cancelled = await m.cancel(id);
+    assert.equal(cancelled.status, "done");
+    assert.ok(fs.existsSync(wt!), "a tree holding uncommitted work is retained, cancel or not");
+    assert.ok(
+      fs.existsSync(path.join(wt!, "src", "the-deliverable.ts")),
+      "and the work itself is still there",
+    );
+    const w = await m.wait(id, 200);
+    assert.equal(w.worktree_retained, wt, "the retention is reported, not silent");
+  } finally {
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("#3 B3 mutation: the old no-op leaves the session open and the tree standing", async () => {
+  const repo = makeFeatureBranchRepo();
+  const name = "mgr-b3-cancel-noop-on-idle";
+  const { LaneManager: Mutated } = await loadMutantManager(name, [
+    {
+      file: "manager.ts",
+      find:
+        '    if (run.turnStatus !== "running") {\n      if (!run.sessionClosed) await this.close(id);\n' +
+        "      return { id, status: run.turnStatus };\n    }",
+      replace: '    if (run.turnStatus !== "running") return { id, status: run.turnStatus };',
+    },
+  ]);
+  const m = new Mutated({ resolveSpec: fakeResolver, disableReaper: true, baseRepo: repo.base });
+  try {
+    const { id } = await m.dispatchProfile({
+      profile: "oc-glm-write",
+      prompt: "implement the frozen spec",
+      worktree: uniq("b3-mutant"),
+      cwd: repo.base,
+    });
+    await until(() => m.status(id).status !== "running", 6_000);
+    const wt = m.status(id).worktree;
+    assert.ok(wt && fs.existsSync(wt));
+    await m.cancel(id);
+    assert.ok(
+      fs.existsSync(wt!),
+      "under the mutant cancel really is a no-op — so the assertions above observe the release",
+    );
+    // And the proof that the session was never closed: a correction turn is
+    // still accepted on a run the caller believes it cancelled.
+    await m.promptExisting(id, "still steerable after 'cancel'", true);
+    await until(() => m.status(id).status !== "running", 6_000);
+  } finally {
+    await m.shutdown();
+    dropMutant(name);
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
