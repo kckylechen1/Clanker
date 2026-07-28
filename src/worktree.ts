@@ -3,10 +3,10 @@
  * and cleanup so worktrees no longer scatter across lane-run / companion / hand
  * git. A worktree is cut from the repository its dispatch *targets* (resolved
  * from the dispatch cwd — see manager.ts / issue #12), never from an unrelated
- * host checkout, and its base ref is resolved per target repo (origin/HEAD →
- * origin/main → origin/master → the repo's local HEAD) rather than a hardcoded
- * origin/main, so a repo with a different default branch or no remote at all can
- * still be worktree'd.
+ * host checkout, and its base ref is resolved per target repo (that repo's own
+ * HEAD → origin/HEAD → origin/main → origin/master, see resolveBaseRef / #33)
+ * rather than a hardcoded origin/main, so a repo with a different default
+ * branch or no remote at all can still be worktree'd.
  */
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -57,17 +57,18 @@ export async function resolveTargetRepo(cwd: string): Promise<string> {
   );
 }
 
-/**
- * Resolve the base ref a worktree for `targetRepo` should be cut from. Order:
- *   1. origin/HEAD  — the remote's default branch, whatever it is named
- *   2. origin/main  — preserves Clanker's own historical cut point
- *   3. origin/master
- *   4. the repo's current local HEAD commit — for repos with no remote at all
- *      (e.g. DispatchLedger), which previously could not be worktree'd because
- *      the base ref was hardcoded to origin/main.
- * Only throws when the repo has zero commits (nothing to cut from).
- */
-export async function resolveBaseRef(targetRepo: string): Promise<string> {
+/** The target repo's current HEAD commit, or null when HEAD resolves to nothing. */
+async function localHeadRef(targetRepo: string): Promise<string | null> {
+  try {
+    const head = (await git(targetRepo, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
+    return head || null;
+  } catch {
+    return null; // unborn branch / zero-commit repo
+  }
+}
+
+/** origin/HEAD → origin/main → origin/master, or null when the repo has none of them. */
+async function remoteDefaultRef(targetRepo: string): Promise<string | null> {
   try {
     const head = (
       await git(targetRepo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
@@ -84,15 +85,40 @@ export async function resolveBaseRef(targetRepo: string): Promise<string> {
       /* ref absent; keep looking */
     }
   }
-  try {
-    const head = (await git(targetRepo, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
-    if (head) return head;
-  } catch {
-    /* no commits at all */
-  }
+  return null;
+}
+
+/**
+ * Resolve the base ref a worktree for `targetRepo` should be cut from when the
+ * dispatcher named no explicit `base` (an explicit `base` still wins over all
+ * of this — see resolveBaseCommit / createWorktree).
+ *
+ * Order — the DISPATCH CWD's own commit first, the remote's default branch only
+ * as a fallback:
+ *   1. the target repo's current local HEAD commit
+ *   2. origin/HEAD → origin/main → origin/master, reached only when HEAD
+ *      resolves to nothing (a repo whose current branch has no commits yet)
+ *
+ * This order is the reverse of the original, and the reversal is the fix for
+ * issue #33. A dispatcher writes its dispatch while looking at ITS OWN
+ * checkout; when that checkout sits on a feature branch, cutting from
+ * origin/HEAD hands the isolated worker a tree that does not contain the code
+ * the dispatch is about. That misfired twice for real: once a worker stopped
+ * 11s in because the symbols it was pointed at did not exist in its tree, once
+ * a worker spent 7 minutes and built its own off-books worktree to get around
+ * it. The remote's default branch is a guess about intent that is only right
+ * when the dispatcher happens to be standing on it; HEAD is not a guess.
+ *
+ * Only throws when the repo has no commit anywhere (nothing to cut from).
+ */
+export async function resolveBaseRef(targetRepo: string): Promise<string> {
+  const head = await localHeadRef(targetRepo);
+  if (head) return head;
+  const remote = await remoteDefaultRef(targetRepo);
+  if (remote) return remote;
   throw new Error(
-    `target repo '${targetRepo}' has no origin/HEAD, origin/main, origin/master, or local ` +
-      `HEAD commit to cut a worktree from (a repo with zero commits cannot be worktree'd)`,
+    `target repo '${targetRepo}' has no local HEAD commit, origin/HEAD, origin/main, or ` +
+      `origin/master to cut a worktree from (a repo with zero commits cannot be worktree'd)`,
   );
 }
 
@@ -220,10 +246,26 @@ export async function changedFiles(cwd: string): Promise<string[]> {
  * Fallback judge for branches with no upstream (#17). `true` also on any error:
  * if we cannot prove the tree holds nothing, we must not remove it — a leaked
  * worktree costs disk, a wrongly removed one costs a deliverable (2026-07-10).
+ *
+ * `baseSha` is the commit the tree was RECORDED as being cut from at creation
+ * time (run.worktreeBaseSha). Prefer it over re-resolving: resolving the base
+ * twice — once when the tree was created, once here when it is reclaimed — asks
+ * a moving ref the same question at two different moments, and anything that
+ * moved the ref in between (a fetch advancing origin/HEAD, or, now that #33
+ * cuts from the dispatcher's own HEAD, simply the dispatcher committing or
+ * switching branches) makes the ahead-count answer about the wrong base. Both
+ * error directions are real: a tree judged ahead is retained forever, a tree
+ * judged level can be removed while it still holds the only copy of its
+ * commits. Re-resolution stays only as the fallback for callers that recorded
+ * no base.
  */
-async function holdsUnmergedWork(worktreePath: string, targetRepo: string): Promise<boolean> {
+async function holdsUnmergedWork(
+  worktreePath: string,
+  targetRepo: string,
+  baseSha?: string,
+): Promise<boolean> {
   try {
-    const baseRef = await resolveBaseRef(targetRepo);
+    const baseRef = baseSha ?? (await resolveBaseRef(targetRepo));
     const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseRef}..HEAD`])).trim();
     return ahead !== "0";
   } catch {
@@ -327,8 +369,18 @@ export function matchDoNotTouch(
 /**
  * Remove a worktree if it has no changes. Returns true if removed, false if it
  * was retained because of local changes.
+ *
+ * `baseSha` is the commit this tree was cut from, as recorded on the run at
+ * creation time (manager.ts passes `run.worktreeBaseSha`). Passing it makes the
+ * unmerged-work judgement compare against the tree's REAL cut point instead of
+ * re-resolving a ref that may have moved since — see holdsUnmergedWork. Callers
+ * with no recorded base keep the previous re-resolving behaviour.
  */
-export async function removeIfClean(worktreePath: string, targetRepo = BASE_REPO): Promise<boolean> {
+export async function removeIfClean(
+  worktreePath: string,
+  targetRepo = BASE_REPO,
+  baseSha?: string,
+): Promise<boolean> {
   const changes = await changedFiles(worktreePath);
   if (changes.length > 0) return false;
   // A clean tree can still hold UNPUSHED commits (the lane committed its
@@ -357,11 +409,12 @@ export async function removeIfClean(worktreePath: string, targetRepo = BASE_REPO
     // work behind", which was never true.
     //
     // Ask the question the upstream probe was really asking — does this tree
-    // hold commits that exist nowhere else? — against the ref the tree was CUT
-    // from, resolved exactly as `createWorktree` resolved it. That works with
+    // hold commits that exist nowhere else? — against the commit the tree was
+    // CUT from: the SHA recorded at creation when the caller has one, and only
+    // otherwise a fresh resolution. That works with
     // no remote at all, and it stays correct when the base has since advanced:
     // a branch whose commits are already merged into it counts zero.
-    if (await holdsUnmergedWork(worktreePath, targetRepo)) return false;
+    if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return false;
   }
   try {
     await git(targetRepo, ["worktree", "remove", worktreePath]);

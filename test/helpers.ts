@@ -52,6 +52,22 @@ export async function loadMutantManager(
   name: string,
   mutations: SrcMutation[],
 ): Promise<typeof import("../src/manager.js")> {
+  return loadMutantModule<typeof import("../src/manager.js")>(name, mutations, "manager.ts");
+}
+
+/**
+ * The same harness, entered at any module under `src/` rather than only
+ * `manager.ts` — so a fix that lives in `worktree.ts` (base-ref order,
+ * ownership marker) can be attacked at the exact function it changed instead of
+ * only through the whole dispatch path. `entry` is the module the caller wants
+ * back; the whole mutated `src/` tree is on disk either way, so relative
+ * imports inside it resolve to mutated siblings.
+ */
+export async function loadMutantModule<M>(
+  name: string,
+  mutations: SrcMutation[],
+  entry: string,
+): Promise<M> {
   if (mutations.length === 0) throw new Error(`mutant '${name}' declares no mutation`);
   const root = path.join(MUTANTS_ROOT, name);
   fs.rmSync(root, { recursive: true, force: true });
@@ -69,7 +85,7 @@ export async function loadMutantManager(
     }
     fs.writeFileSync(target, before.replace(mutation.find, mutation.replace));
   }
-  return import(pathToFileURL(path.join(root, "src", "manager.ts")).href);
+  return (await import(pathToFileURL(path.join(root, "src", entry)).href)) as M;
 }
 
 /** Delete a mutant tree once its test is done (best-effort). */

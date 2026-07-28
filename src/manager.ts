@@ -1296,7 +1296,15 @@ export class LaneManager {
         run.worktreeRetained = run.worktreePath;
       } else {
         try {
-          const removed = await removeIfClean(run.worktreePath, run.targetRepo ?? this.baseRepo);
+          // Pass the cut point this run RECORDED (#33): cleanup must judge
+          // "does this tree hold commits that exist nowhere else" against the
+          // commit the tree was really cut from, not against a re-resolution of
+          // a ref that has been free to move since the tree was created.
+          const removed = await removeIfClean(
+            run.worktreePath,
+            run.targetRepo ?? this.baseRepo,
+            run.worktreeBaseSha,
+          );
           if (!removed) run.worktreeRetained = run.worktreePath;
         } catch (err) {
           // Never let cleanup failure vanish silently — this is a stdio MCP
