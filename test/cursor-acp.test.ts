@@ -402,6 +402,68 @@ test("`plan` is a read-only mode too, and carries the read-only flag set", async
 
 // ---- 4. the projection ------------------------------------------------------
 
+/**
+ * The counterexample cold review (codex-8b2b3) killed the content-equality
+ * dedupe with: a genuine delta whose text equals everything streamed so far.
+ * `"a"`, `"a"`, `"b"` → result `"aab"`. Under content equality the second
+ * delta was deleted as a recap and the result-line repair could not put it
+ * back (`"aab"` is not prefixed by `"ab"`) — a real answer silently truncated.
+ */
+const REPEATED_DELTA_STREAM = [
+  `{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/tmp","session_id":"${SESSION}","model":"Composer 2.5","permissionMode":"default"}`,
+  `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a"}]},"session_id":"${SESSION}","timestamp_ms":3}`,
+  `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a"}]},"session_id":"${SESSION}","timestamp_ms":4}`,
+  `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"b"}]},"session_id":"${SESSION}","timestamp_ms":5}`,
+  `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"aab"}]},"session_id":"${SESSION}"}`,
+  `{"type":"result","subtype":"success","duration_ms":10,"duration_api_ms":10,"is_error":false,"result":"aab","session_id":"${SESSION}","request_id":"req-r","usage":{"inputTokens":1,"outputTokens":1,"cacheReadTokens":0,"cacheWriteTokens":0}}`,
+];
+
+test("a repeated delta is NOT mistaken for the recap — the discriminator is structural, not content", async () => {
+  const { dir, path: capture } = tmpFile("project-repeat");
+  try {
+    const facts = await runTurn(sidecarSpec(fakeCursor(emitLines(REPEATED_DELTA_STREAM)), capture));
+    assert.equal(facts.message, "aab", "every genuine delta survives; only the timestamp-less recap is dropped");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a flag-shaped model is refused before it can reach argv as a flag", async () => {
+  // cursor-review's argv IS its write boundary (the CLI takes `--mode ask
+  // --force` silently), and unknown model ids pass through by design — so the
+  // one place that can refuse a `--force`-shaped model is the argv builder.
+  const { dir, path: capture } = tmpFile("model-flag");
+  try {
+    await assert.rejects(
+      () => runTurn(sidecarSpec(fakeCursor(emitLines(PARTIAL_STREAM)), capture, { CLANKER_CURSOR_MODEL: "--force" })),
+      /starts with '-'|would reach cursor-agent as a flag/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed tool call carries ACP's failed status, so the poller can see it", async () => {
+  const { dir, path: capture } = tmpFile("tool-failed");
+  const stream = [
+    `{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/tmp","session_id":"${SESSION}","model":"Composer 2.5","permissionMode":"default"}`,
+    `{"type":"tool_call","subtype":"started","call_id":"tc-1","tool_call":{"readToolCall":{"args":{"path":"src/x.ts"}}},"session_id":"${SESSION}","timestamp_ms":1}`,
+    `{"type":"tool_call","subtype":"failed","call_id":"tc-1","session_id":"${SESSION}","timestamp_ms":2}`,
+    `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"session_id":"${SESSION}"}`,
+    `{"type":"result","subtype":"success","duration_ms":10,"duration_api_ms":10,"is_error":false,"result":"done","session_id":"${SESSION}","request_id":"req-f","usage":{"inputTokens":1,"outputTokens":1,"cacheReadTokens":0,"cacheWriteTokens":0}}`,
+  ];
+  try {
+    const facts = await runTurn(sidecarSpec(fakeCursor(emitLines(stream)), capture));
+    assert.deepEqual(
+      facts.toolUpdates,
+      ["tc-1:failed"],
+      `a failed tool call must reach ACP as status "failed", not statusless: ${JSON.stringify(facts.toolUpdates)}`,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("the partial-output recap is dropped, so the answer is delivered exactly once", async () => {
   const { dir, path: capture } = tmpFile("project-partial");
   try {
@@ -614,10 +676,37 @@ test("cancelling a cursor turn kills cursor-agent, settles as cancelled, and lea
 // Each mutation breaks exactly one measured fact. If the assertion above it
 // stays green against the broken build, it was never observing that fact.
 
+test("mutation: content-equality dedupe silently truncates a repeated delta", async () => {
+  // The exact form cold review killed. Kept as a resident mutant so the
+  // structural rule cannot quietly regress into the content one.
+  const root = materializeMutant("cursor-recap-by-content", [{
+    file: "cursor-acp.ts",
+    find: "    if (isRecap && this.streamed !== \"\") return;",
+    replace: "    if (this.streamed !== \"\" && text === this.streamed) return;",
+  }]);
+  const { dir, path: capture } = tmpFile("mutant-repeat");
+  try {
+    const facts = await runTurn(
+      sidecarSpec(fakeCursor(emitLines(REPEATED_DELTA_STREAM)), capture, {}, path.join(root, "src", "cursor-acp.ts")),
+    );
+    // Measured, not predicted: the content rule is worse than "truncating".
+    // It eats the repeated delta (streamed becomes "ab"), and then the recap
+    // "aab" no longer equals what was streamed so it gets relayed too —
+    // the caller receives "abaab": a dropped fragment AND a doubled tail.
+    assert.equal(facts.message, "abaab", "the mutant must mangle the stream — otherwise the structural rule is untested");
+    assert.notEqual(facts.message, "aab");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    dropMutant("cursor-recap-by-content");
+  }
+});
+
 test("mutation: without the recap rule the answer is delivered twice", async () => {
   const root = materializeMutant("cursor-recap-not-dropped", [{
     file: "cursor-acp.ts",
-    find: "    if (this.streamed !== \"\" && text === this.streamed) return;",
+    // Anchor moved with the fix (codex-8b2b3): the rule is now structural
+    // (timestamp-less == recap), so the mutant drops THAT guard.
+    find: "    if (isRecap && this.streamed !== \"\") return;",
     replace: "    // mutant: relay the recap too",
   }]);
   const { dir, path: capture } = tmpFile("mutant-recap");

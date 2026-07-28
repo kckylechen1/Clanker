@@ -14552,6 +14552,11 @@ function printTimeoutMs(mode) {
   return override ? parseDurationMs(override) : DEFAULT_PRINT_TIMEOUT_MS[mode];
 }
 function cursorArgs(mode, model, prompt) {
+  if (model.startsWith("-")) {
+    throw new Error(
+      `Clanker: Cursor model '${model}' starts with '-' and would reach cursor-agent as a flag, not as the value of --model; refusing (the read-only argv is this lane's write boundary)`
+    );
+  }
   const args = ["--print", "--output-format", "stream-json", "--stream-partial-output", "--model", model];
   if (mode === "write") {
     args.push("--force", "--trust");
@@ -14639,7 +14644,7 @@ var TurnProjection = class {
         }
         break;
       case "assistant":
-        this.assistant(contentText(event));
+        this.assistant(contentText(event), event.timestamp_ms === void 0);
         break;
       case "tool_call":
         this.toolCall(event);
@@ -14680,14 +14685,26 @@ var TurnProjection = class {
    * final event is sent.
    *
    * run.ts CONCATENATES every agent_message_chunk into `final_message`, so
-   * relaying both halves hands the caller the answer twice. The discriminator
-   * is content, not the optional timestamp: an event whose text is exactly
-   * everything already streamed is the recap. That also makes the no-flag case
-   * work unchanged (nothing streamed yet, so the single event is relayed).
+   * relaying both halves hands the caller the answer twice.
+   *
+   * The discriminator is STRUCTURAL — `timestamp_ms` present on every live
+   * delta, absent on the end-of-turn recap — not content equality. Cold review
+   * (codex-8b2b3) killed the content-equality form with a three-event stream
+   * `"a"`, `"a"`, `"b"`: the second genuine delta equals everything streamed
+   * so far, got deleted as a recap, and the result-line repair below could no
+   * longer prefix-match to put it back — silent truncation of a real answer.
+   * A repeated delta is indistinguishable from a recap BY CONTENT; only the
+   * field the CLI actually varies can tell them apart.
+   *
+   * Content equality survives as a narrow second guard on the recap branch
+   * only: a recap that does not match what we streamed is a stream we
+   * mis-tracked, and relaying it would be the doubling this exists to prevent.
+   * The no-flag case still works — nothing streamed yet, so the single
+   * recap-shaped event is relayed.
    */
-  assistant(text) {
+  assistant(text, isRecap) {
     if (!text) return;
-    if (this.streamed !== "" && text === this.streamed) return;
+    if (isRecap && this.streamed !== "") return;
     this.streamed += text;
     this.emit({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
   }
@@ -14702,7 +14719,13 @@ var TurnProjection = class {
     this.emit({
       sessionUpdate: "tool_call_update",
       toolCallId,
-      ...event.subtype === "completed" ? { status: "completed" } : {}
+      // ACP has a real "failed" status and run.ts only escalates a tool event
+      // into the digest when it sees exactly that (`status === "failed"`).
+      // Mapping only `completed` left a failed tool call as a statusless
+      // update — invisible to the poller watching for trouble (codex-8b2b3).
+      // Anything else stays statusless: inventing a status for a subtype this
+      // sidecar has not measured would be worse than saying nothing.
+      ...event.subtype === "completed" ? { status: "completed" } : event.subtype === "failed" ? { status: "failed" } : {}
     });
   }
   result(event) {
