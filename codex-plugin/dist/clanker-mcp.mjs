@@ -6873,12 +6873,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs10, exportName) {
+    function addFormats(ajv, list, fs11, exportName) {
       var _a;
       var _b;
       (_a = (_b = ajv.opts.code).formats) !== null && _a !== void 0 ? _a : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs10[f]);
+        ajv.addFormat(f, fs11[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -27761,7 +27761,7 @@ var RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 864e5;
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.3.7";
+var SERVER_VERSION = "0.3.8";
 var DEFAULT_CODEX_MODEL = "gpt-5.5";
 var DEFAULT_CODEX_EFFORT = "xhigh";
 var WRITE_DISCIPLINE_PREFIX = `Workspace discipline, enforced by the dispatching contract \u2014 these override any
@@ -27808,12 +27808,12 @@ function envInt(name, fallback) {
 
 // src/manager.ts
 import crypto from "node:crypto";
-import fs8 from "node:fs";
+import fs9 from "node:fs";
 import path9 from "node:path";
 
 // src/acp-client.ts
 import { spawn } from "node:child_process";
-import fs from "node:fs";
+import fs2 from "node:fs";
 import path2 from "node:path";
 import { Readable, Writable } from "node:stream";
 
@@ -31172,6 +31172,55 @@ var legacyClientNotificationMethods = /* @__PURE__ */ new Set([
   CLIENT_METHODS.elicitation_complete
 ]);
 
+// src/node-binary.ts
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+var PATH_NODE = "node";
+var RESOLVED_NODE = resolveAtStartup();
+function resolveAtStartup() {
+  try {
+    return fs.realpathSync(process.execPath);
+  } catch {
+    return process.execPath;
+  }
+}
+function resolveNodeBinary() {
+  return resolveNodeBinaryFrom(RESOLVED_NODE);
+}
+function resolveNodeBinaryFrom(recorded) {
+  if (fs.existsSync(recorded)) return recorded;
+  console.error(
+    `[clanker] node binary drift (#37): '${recorded}' no longer exists (homebrew revision bump, or an in-place runtime upgrade) \u2014 falling back to '${PATH_NODE}' on PATH. ` + driftDetail()
+  );
+  return PATH_NODE;
+}
+function driftDetail() {
+  const probed = probePathNodeVersion();
+  if (probed === null) {
+    return `Could not run '${PATH_NODE} --version' either \u2014 sidecar spawns will most likely fail with ENOENT (CLANKER-ENV-DRIFT). Restart the MCP server on a node that exists.`;
+  }
+  const theirs = majorOf(probed);
+  const ours = majorOf(process.version);
+  if (theirs !== null && theirs === ours) {
+    return `PATH ${PATH_NODE} is ${probed}, same major as this server's ${process.version} \u2014 degraded but consistent.`;
+  }
+  return `MAJOR VERSION MISMATCH: PATH ${PATH_NODE} is ${probed}, this server runs ${process.version}. Spawning anyway \u2014 a lane on a different major beats no lane at all \u2014 but sidecars are NO LONGER on the server's runtime. Restart the MCP server to get back onto one node.`;
+}
+function probePathNodeVersion() {
+  try {
+    const out = execFileSync(PATH_NODE, ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+function majorOf(version2) {
+  return /^v?(\d+)\./.exec(version2.trim())?.[1] ?? null;
+}
+
 // src/acp-client.ts
 var Deferred = class {
   promise;
@@ -31184,6 +31233,20 @@ var Deferred = class {
     });
   }
 };
+function signalWorkerGroup(child, signal) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform !== "win32" && child.pid !== void 0) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+  }
+}
 function choosePermissionOption(options, readOnly) {
   if (options.length === 0) return { outcome: { outcome: "cancelled" } };
   if (readOnly) {
@@ -31235,9 +31298,9 @@ var LaneConnection = class _LaneConnection {
     } catch {
     }
     if (!this.exitedProcess) {
-      this.child.kill("SIGTERM");
+      signalWorkerGroup(this.child, "SIGTERM");
       setTimeout(() => {
-        if (!this.exitedProcess) this.child.kill("SIGKILL");
+        if (!this.exitedProcess) signalWorkerGroup(this.child, "SIGKILL");
       }, this.terminateGraceMs).unref();
     }
   }
@@ -31270,21 +31333,34 @@ var LaneConnection = class _LaneConnection {
   static async connect(options) {
     const { spec, cwd, readOnly, onFileWritten } = options;
     const handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
-    if (cwd && !fs.existsSync(cwd)) {
+    if (cwd && !fs2.existsSync(cwd)) {
       throw new Error(
         `lane cwd does not exist: ${cwd} (worktree reaped or path typo?) \u2014 refusing to spawn`
       );
     }
-    const nodeBinDir = path2.dirname(process.execPath);
+    const nodeBin = resolveNodeBinary();
+    const nodeBinDir = path2.isAbsolute(nodeBin) ? path2.dirname(nodeBin) + path2.delimiter : "";
     const child = spawn(spec.command, spec.args, {
       cwd,
       env: {
         ...process.env,
         ...spec.env,
-        PATH: `${nodeBinDir}${path2.delimiter}${spec.env?.PATH ?? process.env.PATH ?? ""}`
+        PATH: `${nodeBinDir}${spec.env?.PATH ?? process.env.PATH ?? ""}`
       },
+      // Give every worker its own process group (pgid === worker pid) so the
+      // kill paths above can take down the grandchildren it spawns — see
+      // signalWorkerGroup. `detached` changes NOTHING else here: stdio stays
+      // piped (the ACP transport is these pipes), and the child is
+      // deliberately NOT unref'd — this server must keep waiting on its exit.
+      // The one real consequence is that a worker no longer receives signals
+      // sent to the SERVER's group (e.g. a terminal Ctrl-C); that is handled
+      // by index.ts's SIGINT/SIGTERM handlers, which run manager.shutdown()
+      // and come back through these same kill paths.
+      detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"]
     });
+    const spawnedAt = Date.now();
+    if (child.pid !== void 0) options.onSpawn?.({ pid: child.pid, startedAt: spawnedAt });
     let stderrTail = "";
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => {
@@ -31298,17 +31374,9 @@ var LaneConnection = class _LaneConnection {
     const terminatePending = () => {
       if (resolvedReady) return;
       aborted2 = true;
-      try {
-        child.kill("SIGTERM");
-      } catch {
-      }
+      signalWorkerGroup(child, "SIGTERM");
       const killTimer = setTimeout(() => {
-        if (!resolvedReady) {
-          try {
-            child.kill("SIGKILL");
-          } catch {
-          }
-        }
+        if (!resolvedReady) signalWorkerGroup(child, "SIGKILL");
       }, options.terminateGraceMs ?? PROCESS_TERM_GRACE_MS);
       killTimer.unref?.();
       void exited.promise.finally(() => clearTimeout(killTimer));
@@ -31317,10 +31385,7 @@ var LaneConnection = class _LaneConnection {
     if (aborted2) terminatePending();
     const hsTimer = setTimeout(() => {
       if (!resolvedReady) {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-        }
+        signalWorkerGroup(child, "SIGKILL");
         ready.reject(new Error(`handshake timed out after ${handshakeTimeoutMs}ms for '${spec.command}'`));
       }
     }, handshakeTimeoutMs);
@@ -31351,11 +31416,11 @@ var LaneConnection = class _LaneConnection {
     const output = Readable.toWeb(child.stdout);
     const stream = ndJsonStream(input, output);
     const handlePermission = (params) => choosePermissionOption(params.options ?? [], readOnly);
-    const root = fs.realpathSync(cwd);
+    const root = fs2.realpathSync(cwd);
     const handleReadTextFile = (params) => {
       try {
         const target = resolveContainedReadPath(root, params.path);
-        const content = fs.readFileSync(target, "utf8");
+        const content = fs2.readFileSync(target, "utf8");
         return { content };
       } catch (e) {
         throw new Error(`read_text_file failed for ${params.path}: ${e instanceof Error ? e.message : String(e)}`);
@@ -31395,7 +31460,7 @@ var LaneConnection = class _LaneConnection {
       }
     }).catch((e) => {
       if (!resolvedReady) {
-        if (!child.killed) child.kill("SIGKILL");
+        signalWorkerGroup(child, "SIGKILL");
         ready.reject(e);
       }
     });
@@ -31409,51 +31474,51 @@ function assertContained(root, target, requested) {
   return target;
 }
 function resolveContainedReadPath(root, requested) {
-  const canonicalRoot = fs.realpathSync(root);
+  const canonicalRoot = fs2.realpathSync(root);
   const lexical = path2.resolve(canonicalRoot, requested);
   if (!path2.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
-  return assertContained(canonicalRoot, fs.realpathSync(lexical), requested);
+  return assertContained(canonicalRoot, fs2.realpathSync(lexical), requested);
 }
 function resolveContainedWritePath(root, requested) {
-  const canonicalRoot = fs.realpathSync(root);
+  const canonicalRoot = fs2.realpathSync(root);
   const lexical = path2.resolve(canonicalRoot, requested);
   if (!path2.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
   try {
-    if (fs.lstatSync(lexical).isSymbolicLink()) {
+    if (fs2.lstatSync(lexical).isSymbolicLink()) {
       throw new Error(`filesystem boundary rejection: final write target is a symlink (${requested})`);
     }
   } catch (e) {
     if (e.code !== "ENOENT") throw e;
   }
-  const parent = assertContained(canonicalRoot, fs.realpathSync(path2.dirname(lexical)), requested);
+  const parent = assertContained(canonicalRoot, fs2.realpathSync(path2.dirname(lexical)), requested);
   return assertContained(canonicalRoot, path2.join(parent, path2.basename(lexical)), requested);
 }
 function writeContainedTextFile(target, requested, content) {
-  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW ?? 0);
-  const fd = fs.openSync(target, flags, 438);
+  const flags = fs2.constants.O_WRONLY | fs2.constants.O_CREAT | (fs2.constants.O_NOFOLLOW ?? 0);
+  const fd = fs2.openSync(target, flags, 438);
   try {
-    const stat = fs.fstatSync(fd);
+    const stat = fs2.fstatSync(fd);
     if (stat.nlink > 1) {
       throw new Error(
         `filesystem boundary rejection: write target has ${stat.nlink} hardlinks (${requested})`
       );
     }
-    fs.ftruncateSync(fd, 0);
-    fs.writeFileSync(fd, content);
+    fs2.ftruncateSync(fd, 0);
+    fs2.writeFileSync(fd, content);
   } finally {
-    fs.closeSync(fd);
+    fs2.closeSync(fd);
   }
 }
 
 // src/backends.ts
-import fs3 from "node:fs";
+import fs4 from "node:fs";
 import { createRequire } from "node:module";
 import os3 from "node:os";
 import path4 from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/grok-diagnostics.ts
-import fs2 from "node:fs";
+import fs3 from "node:fs";
 import os2 from "node:os";
 import path3 from "node:path";
 function resolveGrokHome() {
@@ -31463,7 +31528,7 @@ var FAILURE_MSG_PATTERN = /inference_failed|terminal_failure/;
 function grokFailureDetail(turnStartMs, now = Date.now()) {
   try {
     const logPath = path3.join(resolveGrokHome(), "logs", "unified.jsonl");
-    const raw = fs2.readFileSync(logPath, "utf8");
+    const raw = fs3.readFileSync(logPath, "utf8");
     const lines = raw.split("\n");
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i].trim();
@@ -31494,7 +31559,7 @@ function grokFailureDetail(turnStartMs, now = Date.now()) {
 var nodeRequire = createRequire(import.meta.url);
 function resolveCodexAcpEntry() {
   const packagedEntry = fileURLToPath(new URL("./codex-acp.mjs", import.meta.url));
-  if (fs3.existsSync(packagedEntry)) return packagedEntry;
+  if (fs4.existsSync(packagedEntry)) return packagedEntry;
   const pkgJsonPath = nodeRequire.resolve("@agentclientprotocol/codex-acp/package.json");
   return path4.join(path4.dirname(pkgJsonPath), "dist", "index.js");
 }
@@ -31504,7 +31569,7 @@ function resolveGeminiAcpEntry() {
     fileURLToPath(new URL("./gemini-acp.js", import.meta.url)),
     fileURLToPath(new URL("../plugin/dist/gemini-acp.mjs", import.meta.url))
   ];
-  const entry = candidates.find((candidate) => fs3.existsSync(candidate));
+  const entry = candidates.find((candidate) => fs4.existsSync(candidate));
   if (entry) return entry;
   throw new Error("Gemini ACP sidecar is missing; run `npm run bundle` before dispatching Clanker: Gemini");
 }
@@ -31516,7 +31581,7 @@ function requireGeminiWorkspaceSandbox() {
     throw new Error("Clanker: Gemini currently requires macOS sandbox-exec for a fail-closed workspace read-only boundary");
   }
   try {
-    fs3.accessSync("/usr/bin/sandbox-exec", fs3.constants.X_OK);
+    fs4.accessSync("/usr/bin/sandbox-exec", fs4.constants.X_OK);
   } catch {
     throw new Error("Clanker: Gemini requires executable /usr/bin/sandbox-exec for a fail-closed workspace read-only boundary");
   }
@@ -31527,7 +31592,7 @@ function resolveSystemCodexPath() {
     if (!dir) continue;
     const candidate = path4.join(dir, "codex");
     try {
-      fs3.accessSync(candidate, fs3.constants.X_OK);
+      fs4.accessSync(candidate, fs4.constants.X_OK);
       return candidate;
     } catch {
     }
@@ -31541,7 +31606,7 @@ function resolveSystemAgyPath() {
   ];
   for (const candidate of candidates) {
     try {
-      fs3.accessSync(candidate, fs3.constants.X_OK);
+      fs4.accessSync(candidate, fs4.constants.X_OK);
       return candidate;
     } catch {
     }
@@ -31647,7 +31712,9 @@ function buildSpawnSpec(lane, opts, runDir) {
       }
       if (effort) env.CLANKER_GEMINI_EFFORT = effort;
       return wrapWithVaultExec(
-        { command: process.execPath, args: [resolveGeminiAcpEntry()], env, warnings },
+        // resolveNodeBinary(), not process.execPath: this server can outlive
+        // the path it was launched from (#37).
+        { command: resolveNodeBinary(), args: [resolveGeminiAcpEntry()], env, warnings },
         requiredEnvFor(lane, opts)
       );
     }
@@ -31684,7 +31751,7 @@ function buildSpawnSpec(lane, opts, runDir) {
       if (opts.profile !== "kimi-crew") config2.agent = { [profile]: opencodeClankerAgent(opts.readOnly === true) };
       if (model) config2.model = model;
       const cfgPath = path4.join(runDir, "opencode-config.json");
-      fs3.writeFileSync(cfgPath, JSON.stringify(config2, null, 2));
+      fs4.writeFileSync(cfgPath, JSON.stringify(config2, null, 2));
       env.OPENCODE_CONFIG = cfgPath;
       env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config2);
       if (opts.profile !== "kimi-crew") {
@@ -31704,7 +31771,9 @@ function buildSpawnSpec(lane, opts, runDir) {
       env.INITIAL_AGENT_MODE = agentMode;
       env.CODEX_PATH = resolveSystemCodexPath();
       return wrapWithVaultExec(
-        { command: process.execPath, args: [resolveCodexAcpEntry()], env, warnings },
+        // resolveNodeBinary(), not process.execPath: this server can outlive
+        // the path it was launched from (#37).
+        { command: resolveNodeBinary(), args: [resolveCodexAcpEntry()], env, warnings },
         requiredEnvFor(lane, opts)
       );
     }
@@ -31712,15 +31781,15 @@ function buildSpawnSpec(lane, opts, runDir) {
 }
 
 // src/foreign.ts
-import fs6 from "node:fs";
+import fs7 from "node:fs";
 import path7 from "node:path";
 
 // src/run.ts
-import fs5 from "node:fs";
+import fs6 from "node:fs";
 import path6 from "node:path";
 
 // src/ledger.ts
-import fs4 from "node:fs";
+import fs5 from "node:fs";
 import os4 from "node:os";
 import path5 from "node:path";
 var rawLedgerDirEnv = process.env.CLANKER_LEDGER_DIR?.trim();
@@ -31759,17 +31828,17 @@ function buildLedgerRow(input) {
 }
 function appendLedgerRow(input) {
   try {
-    fs4.mkdirSync(LEDGER_DIR, { recursive: true });
-    fs4.appendFileSync(LEDGER_PATH, JSON.stringify(buildLedgerRow(input)) + "\n");
+    fs5.mkdirSync(LEDGER_DIR, { recursive: true });
+    fs5.appendFileSync(LEDGER_PATH, JSON.stringify(buildLedgerRow(input)) + "\n");
   } catch (error40) {
     logHookError(input.id, error40);
   }
 }
 function logHookError(runId, error40) {
   try {
-    fs4.mkdirSync(LEDGER_DIR, { recursive: true });
+    fs5.mkdirSync(LEDGER_DIR, { recursive: true });
     const message = error40 instanceof Error ? error40.stack ?? error40.message : String(error40);
-    fs4.appendFileSync(
+    fs5.appendFileSync(
       HOOK_ERRORS_PATH,
       `[${(/* @__PURE__ */ new Date()).toISOString()}] native-ledger-writer append failed for run '${runId}': ${message}
 `
@@ -31891,6 +31960,9 @@ var LaneRun = class {
   sessionUsage;
   observedModel = null;
   observedEffort = null;
+  /** Live worker identity (#32): pid — which is also its pgid — and the ms epoch it was spawned. */
+  workerPid;
+  workerStartedAt;
   plan = EMPTY_PLAN;
   finalTouchedFiles = [];
   toolCallCount = 0;
@@ -32232,6 +32304,23 @@ var LaneRun = class {
     }
     this.persistTelemetry();
   }
+  /**
+   * Record the worker this run is currently driven by, and flush it to disk
+   * immediately (#32).
+   *
+   * Called from the spawn itself, not from the post-handshake path: the
+   * unrecorded window has to be as close to zero as the syscall allows, or a
+   * server that dies during a 30s handshake leaves a live, unkillable worker
+   * on disk with no pid next to it.
+   *
+   * A capacity retry respawns, and overwrites both fields — the pid that
+   * matters is the one that is running now, not the one that already died.
+   */
+  noteWorkerSpawned(pid, startedAt) {
+    this.workerPid = pid;
+    this.workerStartedAt = startedAt;
+    this.persistTelemetry();
+  }
   observeConfigOptions(options) {
     for (const option of options ?? []) {
       if (option.category === "model") this.observedModel = String(option.currentValue);
@@ -32257,6 +32346,13 @@ var LaneRun = class {
       sandbox: this.requestOpts.sandbox,
       ...this.baseSha !== void 0 ? { base_sha: this.baseSha } : {},
       ...this.turnTimeoutMs !== void 0 ? { turn_timeout_ms: this.turnTimeoutMs } : {},
+      // Process identity (#32): server_pid is unconditional — every persisted
+      // record names the process that owns it — while the worker pair appears
+      // only once a worker really exists, so "no pid on disk" keeps meaning
+      // "nothing was spawned" rather than "spawned, pid unknown".
+      server_pid: process.pid,
+      ...this.workerPid !== void 0 ? { worker_pid: this.workerPid } : {},
+      ...this.workerStartedAt !== void 0 ? { worker_started_at: this.workerStartedAt } : {},
       created_at: new Date(this.createdAt).toISOString(),
       ...this.startedAt ? { started_at: new Date(this.startedAt).toISOString() } : {},
       ...this.terminalAt ? { terminal_at: new Date(this.terminalAt).toISOString(), duration_ms: this.terminalAt - (this.startedAt ?? this.createdAt) } : {},
@@ -32315,7 +32411,7 @@ var LaneRun = class {
    */
   resultBytes() {
     try {
-      return fs5.statSync(this.resultPath()).size;
+      return fs6.statSync(this.resultPath()).size;
     } catch {
       return 0;
     }
@@ -32364,12 +32460,12 @@ var LaneRun = class {
     }
     lines.push(RESULT_FINAL_MESSAGE_HEADING, "", this.lastFinalMessage, "");
     try {
-      fs5.mkdirSync(this.runDir, { recursive: true });
-      fs5.writeFileSync(tmp, lines.join("\n"));
-      fs5.renameSync(tmp, target);
+      fs6.mkdirSync(this.runDir, { recursive: true });
+      fs6.writeFileSync(tmp, lines.join("\n"));
+      fs6.renameSync(tmp, target);
     } catch (error40) {
       try {
-        fs5.rmSync(tmp, { force: true });
+        fs6.rmSync(tmp, { force: true });
       } catch {
       }
       console.error(
@@ -32413,11 +32509,11 @@ var LaneRun = class {
     const target = path6.join(this.runDir, "telemetry.json");
     const tmp = `${target}.${process.pid}.tmp`;
     try {
-      fs5.writeFileSync(tmp, JSON.stringify(this.telemetry(), null, 2));
-      fs5.renameSync(tmp, target);
+      fs6.writeFileSync(tmp, JSON.stringify(this.telemetry(), null, 2));
+      fs6.renameSync(tmp, target);
     } catch (error40) {
       try {
-        fs5.rmSync(tmp, { force: true });
+        fs6.rmSync(tmp, { force: true });
       } catch {
       }
       console.error(`[clanker] telemetry persistence failed for run '${this.id}' at '${target}': ${error40 instanceof Error ? error40.message : String(error40)}`);
@@ -32478,13 +32574,13 @@ var LaneRun = class {
    */
   appendToStream(file2, streamField, line) {
     if (this.sessionClosed) {
-      fs5.mkdirSync(this.runDir, { recursive: true });
-      fs5.appendFileSync(path6.join(this.runDir, file2), line);
+      fs6.mkdirSync(this.runDir, { recursive: true });
+      fs6.appendFileSync(path6.join(this.runDir, file2), line);
       return;
     }
     if (!this[streamField]) {
-      fs5.mkdirSync(this.runDir, { recursive: true });
-      this[streamField] = fs5.createWriteStream(path6.join(this.runDir, file2), { flags: "a" });
+      fs6.mkdirSync(this.runDir, { recursive: true });
+      this[streamField] = fs6.createWriteStream(path6.join(this.runDir, file2), { flags: "a" });
     }
     this[streamField].write(line);
   }
@@ -32560,15 +32656,15 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
   const runDir = path7.join(runsRoot, id);
   let telemetry;
   try {
-    telemetry = JSON.parse(fs6.readFileSync(path7.join(runDir, "telemetry.json"), "utf8"));
+    telemetry = JSON.parse(fs7.readFileSync(path7.join(runDir, "telemetry.json"), "utf8"));
   } catch {
     return null;
   }
   let newestMtimeMs = 0;
   try {
-    for (const entry of fs6.readdirSync(runDir)) {
+    for (const entry of fs7.readdirSync(runDir)) {
       try {
-        newestMtimeMs = Math.max(newestMtimeMs, fs6.statSync(path7.join(runDir, entry)).mtimeMs);
+        newestMtimeMs = Math.max(newestMtimeMs, fs7.statSync(path7.join(runDir, entry)).mtimeMs);
       } catch {
       }
     }
@@ -32576,7 +32672,7 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
   }
   let resultPath;
   try {
-    if (fs6.statSync(path7.join(runDir, RESULT_FILE)).size > 0) resultPath = path7.join(runDir, RESULT_FILE);
+    if (fs7.statSync(path7.join(runDir, RESULT_FILE)).size > 0) resultPath = path7.join(runDir, RESULT_FILE);
   } catch {
   }
   return {
@@ -32601,7 +32697,7 @@ function scanForeignRuns(options = {}) {
   const now = options.now ?? Date.now();
   let ids;
   try {
-    ids = fs6.readdirSync(runsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+    ids = fs7.readdirSync(runsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
   } catch {
     return [];
   }
@@ -32648,15 +32744,22 @@ function isCapacityTransient(message) {
 }
 var BACKEND_BILLING_TAG = "CLANKER-BACKEND-BILLING";
 var BACKEND_AUTH_TAG = "CLANKER-BACKEND-AUTH";
+var ENV_DRIFT_TAG = "CLANKER-ENV-DRIFT";
 var BACKEND_BILLING_PATTERNS = [
   /\b402\b|balance|billing|payment required|usage balance exhausted|insufficient credit/i
 ];
 var BACKEND_AUTH_PATTERNS = [
   /\b40[13]\b|unauthorized|forbidden|invalid api key|authentication/i
 ];
+var ENV_DRIFT_PATTERNS = [
+  // Node's own spawn error text: `spawn <command> ENOENT` (the command may
+  // itself contain spaces, hence `.+` rather than `\S+`).
+  /spawn .+ ENOENT/i
+];
 function classifyBackendFailure(message) {
   if (BACKEND_BILLING_PATTERNS.some((re) => re.test(message))) return BACKEND_BILLING_TAG;
   if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;
+  if (ENV_DRIFT_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   return void 0;
 }
 
@@ -32926,7 +33029,7 @@ function hostLaneBlockedReason(host, lane) {
 
 // src/worktree.ts
 import { execFile } from "node:child_process";
-import fs7 from "node:fs";
+import fs8 from "node:fs";
 import path8 from "node:path";
 import { promisify } from "node:util";
 var exec = promisify(execFile);
@@ -32941,7 +33044,7 @@ function deriveWorktreePath(branch, runId) {
 }
 function readWorktreeOwner(worktreePath) {
   try {
-    const first = fs7.readFileSync(path8.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
+    const first = fs8.readFileSync(path8.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
     return first || null;
   } catch {
     return null;
@@ -33012,13 +33115,13 @@ async function headSha(cwd) {
 }
 async function createWorktree(branch, runId, targetRepo = BASE_REPO, base) {
   const wtPath = deriveWorktreePath(branch, runId);
-  if (fs7.existsSync(wtPath)) {
+  if (fs8.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
   const baseRef = base ?? await resolveBaseRef(targetRepo);
-  fs7.mkdirSync(WORKTREES_ROOT, { recursive: true });
+  fs8.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
-  fs7.writeFileSync(path8.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
+  fs8.writeFileSync(path8.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
 `);
   return wtPath;
 }
@@ -33064,7 +33167,7 @@ function realpathBestEffort(p) {
   const tail = [];
   for (; ; ) {
     try {
-      const real = fs7.realpathSync(cur);
+      const real = fs8.realpathSync(cur);
       return tail.length ? path8.join(real, ...tail) : real;
     } catch {
       const parent = path8.dirname(cur);
@@ -33100,7 +33203,7 @@ function matchDoNotTouch(patterns, files) {
   return violations;
 }
 async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runId) {
-  if (fs7.existsSync(worktreePath)) {
+  if (fs8.existsSync(worktreePath)) {
     const owner = readWorktreeOwner(worktreePath);
     if (!runId || owner !== runId) {
       console.error(
@@ -33120,13 +33223,13 @@ async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runI
   const markerPath = path8.join(worktreePath, OWNER_MARKER);
   const marker = (() => {
     try {
-      return fs7.readFileSync(markerPath, "utf8");
+      return fs8.readFileSync(markerPath, "utf8");
     } catch {
       return null;
     }
   })();
   try {
-    fs7.rmSync(markerPath, { force: true });
+    fs8.rmSync(markerPath, { force: true });
   } catch {
   }
   try {
@@ -33136,9 +33239,9 @@ async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runI
       await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
     }
   } catch (err) {
-    if (marker !== null && fs7.existsSync(worktreePath)) {
+    if (marker !== null && fs8.existsSync(worktreePath)) {
       try {
-        fs7.writeFileSync(markerPath, marker);
+        fs8.writeFileSync(markerPath, marker);
       } catch {
       }
     }
@@ -33233,11 +33336,11 @@ function writeTelemetryStub(runDir, stub) {
   const target = path9.join(runDir, "telemetry.json");
   const tmp = `${target}.${process.pid}.tmp`;
   try {
-    fs8.writeFileSync(tmp, JSON.stringify(stub, null, 2));
-    fs8.renameSync(tmp, target);
+    fs9.writeFileSync(tmp, JSON.stringify(stub, null, 2));
+    fs9.renameSync(tmp, target);
   } catch (error40) {
     try {
-      fs8.rmSync(tmp, { force: true });
+      fs9.rmSync(tmp, { force: true });
     } catch {
     }
     console.error(`[clanker] telemetry stub write failed for run dir '${runDir}': ${errMessage(error40)}`);
@@ -33357,12 +33460,13 @@ ${params.prompt}`;
     }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
     const runDir = path9.join(this.runsRoot, id);
-    fs8.mkdirSync(runDir, { recursive: true });
+    fs9.mkdirSync(runDir, { recursive: true });
     const stub = {
       host: this.host,
       lane: params.lane,
       profileId: profile,
       cwd: params.cwd ?? this.baseRepo,
+      server_pid: process.pid,
       created_at: (/* @__PURE__ */ new Date()).toISOString(),
       requested_model: params.model
     };
@@ -33579,7 +33683,11 @@ ${prompt}`;
         onFileWritten: (p) => run.recordFileWritten(p),
         handshakeTimeoutMs: this.handshakeTimeoutMs,
         terminateGraceMs: this.processTerminateGraceMs,
-        signal: controller.signal
+        signal: controller.signal,
+        // #32: persist the worker's identity at spawn time, not after the
+        // handshake — the durable record has to name a process that may still
+        // be alive when this server is not.
+        onSpawn: ({ pid, startedAt }) => run.noteWorkerSpawned(pid, startedAt)
       });
     } catch (e) {
       if (run.cancellationRequested || this.shuttingDown) {
@@ -33593,7 +33701,7 @@ ${prompt}`;
       }
       await this.computeTouched(run);
       await this.close(run.id);
-      run.failTurn(message);
+      run.failTurn(message, classifyBackendFailure(message));
       return;
     } finally {
       if (this.pendingConnects.get(run.id) === controller) this.pendingConnects.delete(run.id);
@@ -33981,7 +34089,7 @@ ${grokDetail}` : "";
       ];
       return;
     }
-    if (!fs8.existsSync(run.worktreePath)) {
+    if (!fs9.existsSync(run.worktreePath)) {
       run.contractViolations = [
         { pattern: "(validation-failed)", files: [`worktree path '${run.worktreePath}' no longer exists`] }
       ];
@@ -34252,7 +34360,7 @@ function registerTools(server, manager) {
 }
 
 // src/retention.ts
-import fs9 from "node:fs";
+import fs10 from "node:fs";
 import path10 from "node:path";
 function sweepRunStreams(options = {}) {
   const runsRoot = options.runsRoot ?? RUNS_ROOT;
@@ -34262,7 +34370,7 @@ function sweepRunStreams(options = {}) {
   if (!(ttlMs > 0)) return report;
   let entries;
   try {
-    entries = fs9.readdirSync(runsRoot, { withFileTypes: true });
+    entries = fs10.readdirSync(runsRoot, { withFileTypes: true });
   } catch {
     return report;
   }
@@ -34276,7 +34384,7 @@ function sweepRunStreams(options = {}) {
       const file2 = path10.join(runDir, name);
       let stat;
       try {
-        stat = fs9.statSync(file2);
+        stat = fs10.statSync(file2);
       } catch {
         continue;
       }
@@ -34289,7 +34397,7 @@ function sweepRunStreams(options = {}) {
     let swept = 0;
     for (const stream of streams) {
       try {
-        fs9.rmSync(stream.file);
+        fs10.rmSync(stream.file);
         report.sweptFiles++;
         report.bytesFreed += stream.size;
         swept++;
@@ -34306,14 +34414,14 @@ function sweepRunStreams(options = {}) {
 }
 function isEmptyDir(dir) {
   try {
-    return fs9.readdirSync(dir).length === 0;
+    return fs10.readdirSync(dir).length === 0;
   } catch {
     return false;
   }
 }
 function removeDir(dir) {
   try {
-    fs9.rmdirSync(dir);
+    fs10.rmdirSync(dir);
     return true;
   } catch {
     return false;

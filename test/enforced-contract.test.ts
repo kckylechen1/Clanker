@@ -66,7 +66,11 @@ function makeManager(baseRepo: string): LaneManager {
   });
 }
 
-async function waitTerminal(m: LaneManager, id: string, timeoutMs = 5000): Promise<WaitResult> {
+// 15s, not 5s (#29 pattern): these cases run real git against a worktree under
+// suite-wide parallel load — an A/B on cb6e849 measured 8/12 red at 5s on a
+// busy machine, base and branch alike. The budget is an upper bound, not a
+// sleep; a healthy machine pays nothing.
+async function waitTerminal(m: LaneManager, id: string, timeoutMs = 15_000): Promise<WaitResult> {
   const deadline = Date.now() + timeoutMs;
   let last!: WaitResult;
   while (Date.now() < deadline) {
