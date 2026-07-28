@@ -19,6 +19,7 @@ import path from "node:path";
 import { LaneManager } from "../src/manager.js";
 import {
   OWNER_MARKER,
+  changedFiles,
   changedFilesSince,
   createWorktree,
   deriveWorktreePath,
@@ -238,12 +239,17 @@ test("#33 A2: cleanup judges against the SHA recorded at creation, not a base th
     gitIn(repo.base, ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/nope"]);
     gitIn(repo.base, ["checkout", "--detach", repo.mainSha]);
 
+    // No frozen SHA → retained unconditionally (PR #38 cold review). The
+    // earlier shape re-resolved resolveBaseRef here, which judged the tree
+    // against a ref it was never cut from — the create/cleanup drift bug in
+    // fallback clothing. A tree that cannot prove its cut point cannot prove
+    // it is merged, and unprovable is retained; cleanup never re-resolves.
     assert.equal(
       await removeIfClean(wt, repo.base, undefined, run),
       false,
-      "re-resolving the base now counts the tree 1 ahead of a commit it was never cut from — retained",
+      "no frozen cut point — unprovable, retained without consulting any live ref",
     );
-    assert.ok(fs.existsSync(wt), "the wrongly-judged tree is still on disk");
+    assert.ok(fs.existsSync(wt), "the unprovable tree is still on disk");
 
     assert.equal(
       await removeIfClean(wt, repo.base, cutSha, run),
@@ -467,7 +473,9 @@ test("#3 B2: removeIfClean refuses — loudly — to delete a tree that belongs 
 
     // The owner, with the marker in place, reclaims its own clean tree.
     fs.writeFileSync(markerPath, `${owner} ${new Date().toISOString()}\n`);
-    assert.equal(await removeIfClean(wt, repo.base, undefined, owner), true, "the owner reclaims its own tree");
+    // The frozen cut point is mandatory for deletion now (PR #38 review):
+    // no SHA = unprovable = retained, so the happy path must present one.
+    assert.equal(await removeIfClean(wt, repo.base, gitIn(wt, ["rev-parse", "HEAD"]), owner), true, "the owner reclaims its own tree");
     assert.equal(fs.existsSync(wt), false, "and the tree is gone");
   } finally {
     if (fs.existsSync(wt)) gitIn(repo.base, ["worktree", "remove", "--force", wt]);
@@ -502,7 +510,7 @@ test("#3 B2: a failed removal puts the ownership marker back rather than leaving
   const wt = await mutated.createWorktree(uniq("b2-restore"), owner, repo.base);
   try {
     await assert.rejects(
-      () => mutated.removeIfClean(wt, repo.base, undefined, owner),
+      () => mutated.removeIfClean(wt, repo.base, gitIn(wt, ["rev-parse", "HEAD"]), owner),
       "a removal that cannot run must throw, not report a clean reclamation",
     );
     assert.ok(fs.existsSync(wt), "the tree survived the failed removal");
@@ -550,9 +558,12 @@ test("#3 B2: the ownership marker is invisible to change detection — not touch
   }
 });
 
-test("#3 B2: a worker that commits everything (git add -A) still does not 'touch' the marker", async () => {
-  // The committed half of changedFilesSince: `git add -A` sweeps the untracked
-  // marker into the worker's own commit, where a diff-based check would see it.
+test("#3 B2: a worker that COMMITS the marker is caught — tampering with the governance file is touching it", async () => {
+  // Reversed by the PR #38 cold review. The marker's legitimate state is
+  // untracked (which is why the porcelain half ignores it, or every tree would
+  // read dirty forever) — but a marker inside the COMMITTED diff got there
+  // because the worker swept it into a commit, and blinding the doNotTouch
+  // report to that is exactly how governance tampering goes invisible.
   const repo = makeFeatureBranchRepo();
   const run = runId("b2commit");
   const wt = await createWorktree(uniq("b2-committed"), run, repo.base);
@@ -562,7 +573,20 @@ test("#3 B2: a worker that commits everything (git add -A) still does not 'touch
     gitIn(wt, ["add", "-A"]);
     gitIn(wt, ["commit", "-m", "worker commits everything in sight"]);
     const touched = await changedFilesSince(wt, cutSha);
-    assert.deepEqual(touched, ["src/worker-wrote-this.ts"], `unexpected touched set: ${JSON.stringify(touched)}`);
+    assert.deepEqual(
+      touched.sort(),
+      [".clanker-owner", "src/worker-wrote-this.ts"],
+      `the committed marker must surface as touched: ${JSON.stringify(touched)}`,
+    );
+    // The porcelain half keeps ignoring the marker in its legitimate
+    // (untracked) state: a tree whose only oddity is its own governance file
+    // is still clean.
+    const fresh = await createWorktree(uniq("b2-untracked"), runId("b2u"), repo.base);
+    try {
+      assert.deepEqual(await changedFiles(fresh), [], "an untracked marker alone does not dirty the tree");
+    } finally {
+      gitIn(repo.base, ["worktree", "remove", "--force", fresh]);
+    }
   } finally {
     gitIn(repo.base, ["worktree", "remove", "--force", wt]);
     fs.rmSync(repo.root, { recursive: true, force: true });
@@ -586,7 +610,7 @@ test("#3 B2 mutation: without the ownership check, a stranger's cleanup deletes 
   const wt = await mutated.createWorktree(uniq("b2-mutant"), runId("b2m-owner"), repo.base);
   try {
     assert.equal(
-      await mutated.removeIfClean(wt, repo.base, undefined, runId("b2m-stranger")),
+      await mutated.removeIfClean(wt, repo.base, gitIn(wt, ["rev-parse", "HEAD"]), runId("b2m-stranger")),
       true,
       "the mutant lets a stranger reclaim the tree — so the refusal above is really the marker's doing",
     );
@@ -673,10 +697,13 @@ test("#3 B3 mutation: the old no-op leaves the session open and the tree standin
   const { LaneManager: Mutated } = await loadMutantManager(name, [
     {
       file: "manager.ts",
-      find:
-        '    if (run.turnStatus !== "running") {\n      if (!run.sessionClosed) await this.close(id);\n' +
-        "      return { id, status: run.turnStatus };\n    }",
-      replace: '    if (run.turnStatus !== "running") return { id, status: run.turnStatus };',
+      // Anchor kept minimal on purpose: the reclaim block grew a richer
+      // return (worktree_retained/run_dir, PR #38 review) and an exact-text
+      // anchor on the whole block would go stale on every wording change.
+      // Flipping the guard to `false` turns the reclaim into the old no-op
+      // while the fall-through `return { id, status }` keeps compiling.
+      find: '      if (!run.sessionClosed) {\n        await this.close(id);',
+      replace: '      if (false) {\n        await this.close(id);',
     },
   ]);
   const m = new Mutated({ resolveSpec: fakeResolver, disableReaper: true, baseRepo: repo.base });

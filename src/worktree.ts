@@ -339,9 +339,19 @@ async function holdsUnmergedWork(
   targetRepo: string,
   baseSha?: string,
 ): Promise<boolean> {
+  // NO RE-RESOLVE FALLBACK (PR #38 cold review, codex-58298). The earlier
+  // shape fell back to resolveBaseRef(targetRepo) when the frozen SHA was
+  // missing — which is the create/cleanup double-resolution drift all over
+  // again, made WORSE by the local-HEAD-first ordering: the dispatcher's
+  // checkout moving between creation and cleanup changes the answer in
+  // exactly the case that reaches the fallback. A tree whose cut point was
+  // never captured cannot PROVE it holds nothing unmerged, and unprovable is
+  // retained, same as every other guard in this file. The cost is that a
+  // capture-failed tree waits for manual reclaim; the alternative cost is
+  // judging a deliverable against a ref it was never cut from.
+  if (!baseSha) return true;
   try {
-    const baseRef = baseSha ?? (await resolveBaseRef(targetRepo));
-    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseRef}..HEAD`])).trim();
+    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseSha}..HEAD`])).trim();
     return ahead !== "0";
   } catch {
     return true;
@@ -415,13 +425,15 @@ export function assertWorktreeOutsideRepo(worktreePath: string, targetRepo: stri
  */
 export async function changedFilesSince(worktreePath: string, base: string): Promise<string[]> {
   const out = await git(worktreePath, ["diff", "--name-only", base, "HEAD"]);
-  // The committed half is filtered too, not just the porcelain half inside
-  // changedFiles: a worker that ran `git add -A` swept the ownership marker
-  // into its own commit, and that is still not a path the worker touched.
-  const committed = out
-    .split("\n")
-    .filter((line) => line.trim().length > 0)
-    .filter((file) => !isGovernanceFile(file));
+  // The committed half is deliberately NOT filtered through isGovernanceFile
+  // (PR #38 cold review, codex-58298). The marker's LEGITIMATE state is
+  // untracked — that is why the porcelain half inside changedFiles ignores it,
+  // or every tree would read dirty forever. But a marker that shows up in the
+  // COMMITTED diff got there because the worker swept it into a commit
+  // (`git add -A`), and a worker committing the governance file is precisely
+  // the tampering the doNotTouch report must not blind itself to. Ignore the
+  // marker where it belongs; surface it where it does not.
+  const committed = out.split("\n").filter((line) => line.trim().length > 0);
   const uncommitted = await changedFiles(worktreePath);
   return [...new Set([...committed, ...uncommitted])];
 }

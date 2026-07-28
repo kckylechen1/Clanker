@@ -6,8 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { changedFiles, createWorktree, isGitWorkTree, removeIfClean, resolveTargetRepo } from "../src/worktree.js";
 
-function git(cwd: string, args: string[]): void {
-  execFileSync("git", args, {
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", args, {
     cwd,
     stdio: "pipe",
     env: {
@@ -17,7 +17,7 @@ function git(cwd: string, args: string[]): void {
       GIT_COMMITTER_NAME: "t",
       GIT_COMMITTER_EMAIL: "t@t",
     },
-  });
+  }).toString().trim();
 }
 
 /** Build a base repo that has an origin/main remote-tracking ref. */
@@ -66,12 +66,13 @@ test("worktree lifecycle: create from origin/main, detect changes, remove when c
   fs.writeFileSync(path.join(wtPath, "new-file.txt"), "work\n");
   const changed = await changedFiles(wtPath);
   assert.ok(changed.includes("new-file.txt"), `expected new-file.txt in ${JSON.stringify(changed)}`);
-  assert.equal(await removeIfClean(wtPath, base, undefined, run), false, "dirty worktree is retained");
+  const cutSha = git(wtPath, ["rev-parse", "HEAD"]);
+  assert.equal(await removeIfClean(wtPath, base, cutSha, run), false, "dirty worktree is retained");
   assert.ok(fs.existsSync(wtPath), "retained worktree still exists");
 
   // Clean it: removeIfClean now succeeds.
   fs.rmSync(path.join(wtPath, "new-file.txt"));
-  assert.equal(await removeIfClean(wtPath, base, undefined, run), true, "clean worktree removed");
+  assert.equal(await removeIfClean(wtPath, base, cutSha, run), true, "clean worktree removed");
   assert.equal(fs.existsSync(wtPath), false, "removed worktree gone");
 });
 
@@ -98,7 +99,7 @@ test("#12: createWorktree cuts a no-remote repo from local HEAD (not hardcoded o
   // guard was unsatisfiable and removeIfClean degraded into neverRemove. A tree
   // holding nothing beyond its base ref must be reclaimed.
   assert.equal(
-    await removeIfClean(wtPath, repo, undefined, run),
+    await removeIfClean(wtPath, repo, git(wtPath, ["rev-parse", "HEAD"]), run),
     true,
     "no-remote worktree holding nothing is reclaimed",
   );
@@ -115,6 +116,7 @@ test("#17: a no-remote worktree holding its own commit is still retained", async
   const branch = `lane-noremote-commit-${Math.random().toString(36).slice(2, 8)}`;
   const run = runId("noremotecommit");
   const wtPath = await createWorktree(branch, run, repo);
+  const cutShaBefore = git(wtPath, ["rev-parse", "HEAD"]);
 
   fs.writeFileSync(path.join(wtPath, "deliverable.txt"), "the lane's work\n");
   git(wtPath, ["add", "."]);
@@ -122,7 +124,7 @@ test("#17: a no-remote worktree holding its own commit is still retained", async
 
   assert.deepEqual(await changedFiles(wtPath), [], "committed work leaves a clean tree");
   assert.equal(
-    await removeIfClean(wtPath, repo, undefined, run),
+    await removeIfClean(wtPath, repo, cutShaBefore, run),
     false,
     "a commit that exists nowhere else must retain the tree",
   );

@@ -33051,9 +33051,9 @@ async function changedFiles(cwd) {
   return parsePorcelainZ(out).filter((file2) => !isGovernanceFile(file2));
 }
 async function holdsUnmergedWork(worktreePath, targetRepo, baseSha) {
+  if (!baseSha) return true;
   try {
-    const baseRef = baseSha ?? await resolveBaseRef(targetRepo);
-    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseRef}..HEAD`])).trim();
+    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseSha}..HEAD`])).trim();
     return ahead !== "0";
   } catch {
     return true;
@@ -33085,7 +33085,7 @@ function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
 }
 async function changedFilesSince(worktreePath, base) {
   const out = await git(worktreePath, ["diff", "--name-only", base, "HEAD"]);
-  const committed = out.split("\n").filter((line) => line.trim().length > 0).filter((file2) => !isGovernanceFile(file2));
+  const committed = out.split("\n").filter((line) => line.trim().length > 0);
   const uncommitted = await changedFiles(worktreePath);
   return [.../* @__PURE__ */ new Set([...committed, ...uncommitted])];
 }
@@ -33896,7 +33896,15 @@ ${grokDetail}` : "";
     const run = this.runs.get(id);
     if (!run) this.throwUnknownRun(id);
     if (run.turnStatus !== "running") {
-      if (!run.sessionClosed) await this.close(id);
+      if (!run.sessionClosed) {
+        await this.close(id);
+        return {
+          id,
+          status: run.turnStatus,
+          run_dir: run.runDir,
+          ...run.worktreeRetained ? { worktree_retained: run.worktreeRetained } : {}
+        };
+      }
       return { id, status: run.turnStatus };
     }
     run.requestCancellation();

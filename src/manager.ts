@@ -1189,7 +1189,7 @@ export class LaneManager {
 
   // ---- cancel / close -----------------------------------------------------
 
-  async cancel(id: string): Promise<{ id: string; status: RunStatus }> {
+  async cancel(id: string): Promise<{ id: string; status: RunStatus; worktree_retained?: string; run_dir?: string }> {
     const run = this.runs.get(id);
     if (!run) this.throwUnknownRun(id);
     // A run whose turn is already terminal has no turn to cancel — but it can
@@ -1207,7 +1207,22 @@ export class LaneManager {
     // done; it is never rewritten to cancelled). An already-closed run keeps
     // returning immediately — there is nothing left to hand back.
     if (run.turnStatus !== "running") {
-      if (!run.sessionClosed) await this.close(id);
+      if (!run.sessionClosed) {
+        await this.close(id);
+        // The close above may have retained the tree (dirty / unmerged /
+        // capture-failed). Report that HERE, on cancel's own return — the
+        // packaged supervisor delivers fields off the last result it holds,
+        // and a seat that already decided "no correction needed" has no
+        // reason to issue another wait just to learn what this call already
+        // knows (PR #38 cold review: a cancel-then-report seat handed back
+        // stale pre-close evidence).
+        return {
+          id,
+          status: run.turnStatus,
+          run_dir: run.runDir,
+          ...(run.worktreeRetained ? { worktree_retained: run.worktreeRetained } : {}),
+        };
+      }
       return { id, status: run.turnStatus };
     }
     run.requestCancellation();
