@@ -146,6 +146,68 @@ test("#33 A1 mutation: restoring the origin-first order cuts from the wrong comm
   }
 });
 
+// ---- #33 A3: a dirty dispatch cwd is said out loud -------------------------
+
+test("#33 A3: dispatching from a dirty checkout warns that the uncommitted work is NOT in the tree — and dispatches anyway", async () => {
+  const repo = makeFeatureBranchRepo();
+  const m = makeManager(repo.base);
+  try {
+    // Control: a clean checkout must not produce the advisory, or it would be
+    // noise nobody reads by the second dispatch.
+    const clean = await m.dispatchStart({
+      lane: "codex",
+      prompt: "CANCELME",
+      readOnly: false,
+      worktree: uniq("a3-clean"),
+      cwd: repo.base,
+    });
+    assert.equal(
+      clean.warnings.some((w) => w.includes("uncommitted change")),
+      false,
+      `a clean checkout must dispatch without the advisory, got ${JSON.stringify(clean.warnings)}`,
+    );
+    await m.cancel(clean.id);
+
+    fs.writeFileSync(path.join(repo.base, "src", "keep.ts"), "edited, never committed\n");
+    fs.writeFileSync(path.join(repo.base, "src", "uncommitted.ts"), "brand new, never committed\n");
+
+    const { id, warnings } = await m.dispatchStart({
+      lane: "codex",
+      prompt: "CANCELME",
+      readOnly: false,
+      worktree: uniq("a3-dirty"),
+      cwd: repo.base,
+    });
+    const advisory = warnings.find((w) => w.includes("uncommitted change"));
+    assert.ok(advisory, `expected a dirty-checkout advisory, got ${JSON.stringify(warnings)}`);
+    assert.match(advisory!, /2 uncommitted change\(s\)/, "it counts the real changes (one modified, one untracked)");
+    assert.ok(
+      advisory!.includes(repo.featureSha.slice(0, 7)),
+      `the advisory names the commit actually cut from: ${advisory}`,
+    );
+
+    // Advisory, not a gate: the dispatch really ran.
+    await until(() => m.status(id).tool_calls > 0, 4_000);
+    const wt = m.status(id).worktree;
+    assert.ok(wt && fs.existsSync(wt), "the dispatch was not blocked — its worktree exists");
+    assert.equal(
+      fs.existsSync(path.join(wt!, "src", "uncommitted.ts")),
+      false,
+      "and the advisory is TRUE: the uncommitted file is absent from the worker's tree",
+    );
+
+    const w = await m.wait(id, 200);
+    assert.ok(
+      w.warnings?.some((x) => x.includes("uncommitted change")),
+      "the advisory also rides the wait payload, not just the dispatch return",
+    );
+    await m.cancel(id);
+  } finally {
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
 // ---- #33 A2: cleanup consumes the recorded cut point ------------------------
 
 test("#33 A2: cleanup judges against the SHA recorded at creation, not a base that has drifted since", async () => {

@@ -511,6 +511,13 @@ export class LaneManager {
     let baseSha: string | undefined;
     let worktreePath: string | undefined;
     let worktreeBaseSha: string | undefined;
+    /**
+     * Dispatch-time advisories the SPEC knows nothing about (the dispatcher's
+     * checkout state, #33 A3). Kept separate from `spec.warnings` so a resolver
+     * that hands back a shared/cached spec object cannot accumulate one run's
+     * advisories onto the next run's dispatch.
+     */
+    const dispatchWarnings: string[] = [];
     let spec: SpawnSpec;
     try {
       if (params.worktree && params.cwd) {
@@ -552,6 +559,31 @@ export class LaneManager {
             worktreeBaseSha = undefined;
           }
         }
+        // #33 A3: a worktree is cut from a COMMIT, so anything the dispatcher
+        // has not committed in its own checkout is simply not in the worker's
+        // tree. Now that the default cut point follows the dispatch cwd (A1),
+        // that gap sits exactly where a dispatcher's current work is — say it
+        // out loud at dispatch time instead of letting the worker discover it
+        // as a file that mysteriously does not exist. TELLING, NOT GATING: a
+        // dirty checkout is a normal state to dispatch from, and refusing here
+        // would only push dispatchers into off-books worktrees (the very
+        // behaviour #33 recorded a worker resorting to).
+        try {
+          const dirty = await changedFiles(targetRepo);
+          if (dirty.length > 0) {
+            const cutFrom = params.base !== undefined ? `base '${params.base}'` : "HEAD";
+            dispatchWarnings.push(
+              `worktree cut from ${cutFrom} ${(worktreeBaseSha ?? "(unknown)").slice(0, 7)}; ` +
+                `${dirty.length} uncommitted change(s) in ${targetRepo} are NOT included`,
+            );
+          }
+        } catch (err) {
+          // A check that could not run must not read as "nothing to report".
+          dispatchWarnings.push(
+            `could not inspect ${targetRepo} for uncommitted changes (${errMessage(err)}); ` +
+              `any uncommitted work there is NOT in the worktree`,
+          );
+        }
       }
     } catch (e) {
       // Leave a readable failure record instead of a silent gap: foreign.ts's
@@ -565,7 +597,8 @@ export class LaneManager {
       });
       throw e;
     }
-    this.warningsById.set(id, spec.warnings);
+    const warnings = [...spec.warnings, ...dispatchWarnings];
+    this.warningsById.set(id, warnings);
 
     const run = new LaneRun({
       id,
@@ -589,7 +622,7 @@ export class LaneManager {
 
     const drive = this.driveNewSession(run, spec, lanePrompt);
     this.trackDrive(id, drive);
-    return { id, warnings: spec.warnings };
+    return { id, warnings };
   }
 
   private trackDrive(id: string, drive: Promise<void>): void {
