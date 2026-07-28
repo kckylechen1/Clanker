@@ -33,12 +33,25 @@
  *               end_turn — the committed half of the same validation.
  *   <other>  -> emit one agent_message_chunk equal to the prompt, then end_turn.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 
 if (process.env.CLANKER_TEST_IGNORE_SIGTERM === "1") process.on("SIGTERM", () => {});
+/**
+ * Grow a grandchild, the way every real lane does (codex-acp spawns `codex
+ * app-server`; opencode/grok start helpers of their own). No `detached`, so it
+ * stays in THIS process's group — which is the whole point: a group kill
+ * (#32) reaches it, a single-pid kill of the worker does not. It idles until
+ * signaled and is unref'd so it never holds this agent open, then its pid is
+ * published for the test to poll.
+ */
+if (process.env.CLANKER_TEST_GRANDCHILD_PID_FILE) {
+  const grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  grandchild.unref();
+  fs.writeFileSync(process.env.CLANKER_TEST_GRANDCHILD_PID_FILE, String(grandchild.pid));
+}
 if (process.env.CLANKER_TEST_PID_FILE) fs.writeFileSync(process.env.CLANKER_TEST_PID_FILE, String(process.pid));
 if (process.env.CLANKER_TEST_ATTEMPT_COUNTER) {
   const counter = process.env.CLANKER_TEST_ATTEMPT_COUNTER;

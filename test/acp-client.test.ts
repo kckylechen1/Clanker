@@ -9,7 +9,90 @@ import {
   resolveContainedWritePath,
   writeContainedTextFile,
 } from "../src/acp-client.js";
-import { fakeSpec } from "./helpers.js";
+import { dropMutant, fakeSpec, loadMutantModule, until } from "./helpers.js";
+
+type AcpClientModule = typeof import("../src/acp-client.js");
+
+/** Is this pid still signalable? (`kill(pid, 0)` — no signal delivered.) */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Connect a fake agent that has grown a grandchild of its own, and hand back
+ * both the connection and the grandchild's pid once it is published.
+ */
+async function connectWithGrandchild(
+  connect: AcpClientModule["LaneConnection"]["connect"],
+): Promise<{ conn: LaneConnection; grandchildPid: number }> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-grandchild-"));
+  const pidFile = path.join(dir, "grandchild.pid");
+  const conn = await connect({
+    spec: fakeSpec({ CLANKER_TEST_GRANDCHILD_PID_FILE: pidFile }),
+    cwd: os.tmpdir(),
+    readOnly: true,
+    terminateGraceMs: 50,
+  });
+  await until(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8").length > 0);
+  const grandchildPid = Number(fs.readFileSync(pidFile, "utf8"));
+  assert.ok(grandchildPid > 0, "fake agent must publish its grandchild's pid");
+  assert.ok(alive(grandchildPid), "the grandchild must be running before the kill under test");
+  return { conn, grandchildPid };
+}
+
+/**
+ * #32: a worker is spawned `detached` (its own process group) and every kill
+ * path signals `-pid`, so the grandchildren a real lane grows — codex-acp's
+ * `codex app-server` above all — die with it instead of surviving as orphans
+ * that still hold the worktree. The mutant below proves this assertion is
+ * really observing the group kill and not just the worker's own exit.
+ */
+test("close kills the worker's whole process group, grandchildren included", async () => {
+  const { conn, grandchildPid } = await connectWithGrandchild(LaneConnection.connect);
+  try {
+    conn.close();
+    await conn.exited;
+    await until(() => !alive(grandchildPid), 4000);
+  } finally {
+    if (alive(grandchildPid)) process.kill(grandchildPid, "SIGKILL");
+  }
+});
+
+test("mutant: a single-pid kill leaves the grandchild alive (proves the test above)", async () => {
+  const name = "acp-single-pid-kill";
+  const mutated = await loadMutantModule<AcpClientModule>(
+    name,
+    [
+      {
+        // Drop the group kill; every call site then falls through to the
+        // single-pid `child.kill()` exactly as the code did before #32.
+        file: "acp-client.ts",
+        find: "      process.kill(-child.pid, signal);\n      return;",
+        replace: "      /* mutant: no group kill */",
+      },
+    ],
+    "acp-client.ts",
+  );
+  const { conn, grandchildPid } = await connectWithGrandchild(mutated.LaneConnection.connect);
+  try {
+    conn.close();
+    await conn.exited;
+    // Give the mutant the same window the real path is allowed above.
+    await new Promise((r) => setTimeout(r, 500));
+    assert.ok(
+      alive(grandchildPid),
+      "without the group kill the grandchild survives — so the previous test observes the group kill, not the worker's exit",
+    );
+  } finally {
+    if (alive(grandchildPid)) process.kill(grandchildPid, "SIGKILL");
+    dropMutant(name);
+  }
+});
 
 test("handshake: connect completes initialize + session/new", async () => {
   const conn = await LaneConnection.connect({ spec: fakeSpec(), cwd: os.tmpdir(), readOnly: false });
