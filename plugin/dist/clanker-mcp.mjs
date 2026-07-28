@@ -32734,6 +32734,15 @@ async function changedFiles(cwd) {
   }
   return files;
 }
+async function holdsUnmergedWork(worktreePath, targetRepo) {
+  try {
+    const baseRef = await resolveBaseRef(targetRepo);
+    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseRef}..HEAD`])).trim();
+    return ahead !== "0";
+  } catch {
+    return true;
+  }
+}
 async function removeIfClean(worktreePath, targetRepo = BASE_REPO) {
   const changes = await changedFiles(worktreePath);
   if (changes.length > 0) return false;
@@ -32741,7 +32750,7 @@ async function removeIfClean(worktreePath, targetRepo = BASE_REPO) {
     const ahead = (await git(worktreePath, ["rev-list", "--count", "@{upstream}..HEAD"])).trim();
     if (ahead !== "0") return false;
   } catch {
-    return false;
+    if (await holdsUnmergedWork(worktreePath, targetRepo)) return false;
   }
   try {
     await git(targetRepo, ["worktree", "remove", worktreePath]);
@@ -33474,7 +33483,7 @@ function describe(profile) {
     `Server-welded: ${welded}. Isolation: ${profile.isolation} \u2014 ${isolation}.`,
     profile.sandbox?.kind === "caller" ? `Caller-selectable sandbox across all three Codex tiers, default ${profile.sandbox.defaultMode}.` : void 0,
     profile.secrets.length ? `Credentials: ${profile.secrets.join(", ")} materialized from the OS keychain via \`tachi vault exec\` at spawn time \u2014 never passed as a parameter.` : void 0,
-    profile.supervision === "sonnet" ? "Requires a Sonnet supervisor seat holding clanker_prompt/clanker_cancel." : void 0,
+    profile.supervision === "sonnet" ? "Requires a Sonnet supervisor seat holding clanker_cancel." : void 0,
     `Hard turn ceiling: ${Math.round(profile.turnTimeoutMs / 6e4)} minutes${profile.readOnly ? "" : " \u2014 commit periodically so a timeout still leaves reviewable work in the worktree"}.`,
     profile.status === "dormant" ? `DORMANT: ${profile.dormantReason}.` : void 0
   ].filter(Boolean).join(" ");

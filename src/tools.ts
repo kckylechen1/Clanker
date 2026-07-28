@@ -130,7 +130,7 @@ function describe(profile: DispatchProfile): string {
       ? `Credentials: ${profile.secrets.join(", ")} materialized from the OS keychain via \`tachi vault exec\` at spawn time — never passed as a parameter.`
       : undefined,
     profile.supervision === "sonnet"
-      ? "Requires a Sonnet supervisor seat holding clanker_prompt/clanker_cancel."
+      ? "Requires a Sonnet supervisor seat holding clanker_cancel."
       : undefined,
     `Hard turn ceiling: ${Math.round(profile.turnTimeoutMs / 60_000)} minutes${profile.readOnly ? "" : " — commit periodically so a timeout still leaves reviewable work in the worktree"}.`,
     profile.status === "dormant" ? `DORMANT: ${profile.dormantReason}.` : undefined,

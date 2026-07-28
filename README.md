@@ -19,6 +19,7 @@ There is deliberately **no generic `clanker_start(profile, ...)`**. A universal 
 | `oc-glm-write` | opencode | yes | required | welded `glm` | n/a | `ZHIPUAI_API_KEY` via vault; Sonnet supervision |
 | `oc-kimi-crew` | opencode | yes | required | welded `kimi` | n/a | installed OpenCode `kimi-crew` profile |
 | `gemini-recon` | gemini | no | forbidden | lane default | n/a | the lane rejects worktrees; 11-minute turn ceiling |
+| `gemini-research` | gemini | no | forbidden | lane default | n/a | online research; every conclusion carries its source URL, anything unsourced is reported unverified |
 | `grok-review` | grok | no | optional | lane default | n/a | dormant: HTTP 402 |
 | `grok-write` | grok | yes | required | required | n/a | dormant: HTTP 402 |
 

@@ -1,7 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { DISPATCH_PROFILES } from "../src/profiles.js";
+import type { LaneManager } from "../src/manager.js";
+import { registerTools } from "../src/tools.js";
+
+const ALL_SEATS = ["codex", "oc", "gemini", "grok", "crew", "writer", "supervisor", "watch"];
+
+/** Tool names the server really registers for `host`, read off registerTools itself. */
+function registeredTools(host: string): Set<string> {
+  const names = new Set<string>();
+  const server = { registerTool(name: string) { names.add(name); } } as unknown as McpServer;
+  registerTools(server, { host } as LaneManager);
+  return names;
+}
 
 const seatFor: Record<string, string> = {
   "codex-review": "codex",
@@ -59,11 +72,10 @@ test("every seat holds only its own narrow start tool and no retired API", async
     assert.deepEqual(named, [...tools].sort(), `${seat}.md must hold exactly its own start tools`);
     assert.doesNotMatch(frontmatter, /clanker_list|clanker_close|clanker_dispatch/);
     assert.match(frontmatter, /clanker_wait/);
-    // Only the GLM supervisor may correct or cancel a worker, and only it is Sonnet.
-    const mayCorrect = seat === "supervisor";
-    assert.equal(/clanker_prompt/.test(frontmatter), mayCorrect, `${seat}.md correction rights`);
-    assert.equal(/clanker_cancel/.test(frontmatter), mayCorrect, `${seat}.md cancellation rights`);
-    assert.equal(/^model: sonnet$/m.test(frontmatter), mayCorrect, `${seat}.md model tier`);
+    // Only the GLM supervisor may cancel a worker, and only it is Sonnet.
+    const maySupervise = seat === "supervisor";
+    assert.equal(/clanker_cancel/.test(frontmatter), maySupervise, `${seat}.md cancellation rights`);
+    assert.equal(/^model: sonnet$/m.test(frontmatter), maySupervise, `${seat}.md model tier`);
     // The 0.2.x seat contracts: named-redirect refusal, zero-fabrication
     // delivery, and the per-profile deadline.
     assert.match(body, /CLANKER-FAILURE:/, `${seat}.md must keep the verbatim-failure contract`);
@@ -95,6 +107,78 @@ test("every seat holds only its own narrow start tool and no retired API", async
       `${seat}.md still asks for the retired restate-the-result delivery`,
     );
   }
+});
+
+test("no seat names a clanker tool the server does not register", async () => {
+  // The gate that would have caught the phantom. `supervisor.md` declared
+  // `clanker_prompt` and step 4 told it to correct a drifting worker with it —
+  // but `registerTools` has registered no such tool since 69988a3 turned Clanker
+  // into a one-shot job controller. The seat's single steering verb did not
+  // exist, and the contract test of the day ASSERTED it must be declared, so the
+  // drift was welded in rather than caught. A tool name that resolves to nothing
+  // is silently dropped by the host, which means the failure surfaces only as a
+  // seat improvising at the exact moment it was supposed to intervene.
+  //
+  // Derived from registerTools, never from a hand-kept list: a gate that keeps
+  // its own copy of the tool surface is the same class of bug one level up.
+  const available = registeredTools("claude");
+  for (const seat of ALL_SEATS) {
+    const body = await readFile(new URL(`../plugin/agents/${seat}.md`, import.meta.url), "utf8");
+    const frontmatter = body.split("---")[1] ?? "";
+    const named = [...frontmatter.matchAll(/mcp__plugin_clanker_clanker__(clanker_[a-z0-9_-]+)/g)].map((m) => m[1]);
+    assert.ok(named.length > 0, `${seat}.md declares no clanker tools at all`);
+    for (const tool of named) {
+      assert.ok(
+        available.has(tool),
+        `${seat}.md declares '${tool}', which the server never registers ` +
+          `(registered: ${[...available].sort().join(", ")})`,
+      );
+    }
+    // And the prose must not instruct a call the frontmatter cannot make.
+    for (const tool of [...body.matchAll(/`(clanker_[a-z0-9_-]+)\(/g)].map((m) => m[1])) {
+      assert.ok(available.has(tool), `${seat}.md tells the seat to call '${tool}', which does not exist`);
+    }
+  }
+});
+
+test("every seat reports the model that actually ran", async () => {
+  // observed_model is on the terminal clanker_wait result already (manager.ts
+  // buildWaitResult sets `telemetry` on terminal), so no seat needs an extra
+  // tool to see it — what was missing is any instruction to hand it back. That
+  // gap is what let an out-of-band ~/.codex/config.toml edit move every
+  // dispatch onto a different model with zero signal to the dispatcher
+  // (af0dea5): the fact reached the relay and died there.
+  for (const seat of ALL_SEATS) {
+    const body = await readFile(new URL(`../plugin/agents/${seat}.md`, import.meta.url), "utf8");
+    // Anchored to the DELIVERY LIST, not to the word appearing anywhere: the
+    // first version of this assertion matched the explanatory sentence too, so
+    // deleting the field from the list left the test green. A gate satisfied by
+    // prose about a field is not a gate on the field.
+    assert.match(
+      body,
+      /`plan_final`, `telemetry\.observed_model`/,
+      `${seat}.md must list telemetry.observed_model among the fields it returns — the model that actually ran`,
+    );
+  }
+});
+
+test("the README profile table and the registry agree, in both directions", async () => {
+  // README's table is the first thing anyone reads about what a dispatch can
+  // be, and it silently fell one row behind the registry: `gemini-research`
+  // shipped in #23 and never appeared, so the documented surface was 9 profiles
+  // against a real 10. Nothing compared them, because every other gate in the
+  // repo compares code to code.
+  //
+  // Both directions matter. A missing row hides a capability; a leftover row
+  // advertises one that no longer exists, which is worse — a caller picks it and
+  // the tool is simply not there.
+  const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+  const rows = [...readme.matchAll(/^\| `([a-z0-9-]+)` \| /gm)].map((m) => m[1]);
+  assert.deepEqual(
+    [...rows].sort(),
+    DISPATCH_PROFILES.map((p) => p.id).sort(),
+    "README's profile table must list exactly the registry's profiles",
+  );
 });
 
 test("every registry profile is reachable from exactly one seat", async () => {

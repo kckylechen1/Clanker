@@ -85,12 +85,33 @@ test("#12: createWorktree cuts a no-remote repo from local HEAD (not hardcoded o
   const wtHead = execFileSync("git", ["-C", wtPath, "rev-parse", "HEAD"]).toString().trim();
   assert.equal(wtHead, repoHead, "worktree cut from the repo's local HEAD");
 
-  // A no-remote worktree branch has no upstream, so removeIfClean cannot prove
-  // it holds nothing unshipped and conservatively RETAINS it (the doctrine's
-  // "retain when uncertain" — a branch ref with no remote to compare against).
-  assert.equal(await removeIfClean(wtPath, repo), false, "no-remote worktree retained (no upstream to compare)");
-  assert.ok(fs.existsSync(wtPath), "retained no-remote worktree still exists");
-  // Cleanup runs against the SOURCE repo (targetRepo), never a hardcoded host.
+  // #17: this assertion used to expect `false` — "no upstream, so retain". That
+  // encoded the leak: a no-remote branch can NEVER acquire an upstream, so the
+  // guard was unsatisfiable and removeIfClean degraded into neverRemove. A tree
+  // holding nothing beyond its base ref must be reclaimed.
+  assert.equal(await removeIfClean(wtPath, repo), true, "no-remote worktree holding nothing is reclaimed");
+  assert.equal(fs.existsSync(wtPath), false, "reclaimed no-remote worktree is gone");
+  fs.rmSync(repo, { recursive: true, force: true });
+});
+
+test("#17: a no-remote worktree holding its own commit is still retained", async () => {
+  // The other half of the fix, and the half that must not regress: the reason
+  // the unconditional retain existed at all is real (2026-07-10, a finished
+  // lane's deliverable vanished mid-review). Committed-but-unmerged work is
+  // exactly what the base-ref comparison has to keep.
+  const repo = makeNoRemoteRepo();
+  const branch = `lane-noremote-commit-${Math.random().toString(36).slice(2, 8)}`;
+  const wtPath = await createWorktree(branch, repo);
+
+  fs.writeFileSync(path.join(wtPath, "deliverable.txt"), "the lane's work\n");
+  git(wtPath, ["add", "."]);
+  git(wtPath, ["commit", "-m", "lane work"]);
+
+  assert.deepEqual(await changedFiles(wtPath), [], "committed work leaves a clean tree");
+  assert.equal(await removeIfClean(wtPath, repo), false, "a commit that exists nowhere else must retain the tree");
+  assert.ok(fs.existsSync(wtPath), "retained worktree still holds the deliverable");
+  assert.ok(fs.existsSync(path.join(wtPath, "deliverable.txt")));
+
   execFileSync("git", ["-C", repo, "worktree", "remove", "--force", wtPath]);
   fs.rmSync(repo, { recursive: true, force: true });
 });

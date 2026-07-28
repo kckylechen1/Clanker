@@ -129,6 +129,23 @@ export async function changedFiles(cwd: string): Promise<string[]> {
 }
 
 /**
+ * Does this worktree hold commits that exist nowhere but here?
+ *
+ * Fallback judge for branches with no upstream (#17). `true` also on any error:
+ * if we cannot prove the tree holds nothing, we must not remove it — a leaked
+ * worktree costs disk, a wrongly removed one costs a deliverable (2026-07-10).
+ */
+async function holdsUnmergedWork(worktreePath: string, targetRepo: string): Promise<boolean> {
+  try {
+    const baseRef = await resolveBaseRef(targetRepo);
+    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseRef}..HEAD`])).trim();
+    return ahead !== "0";
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Remove a worktree if it has no changes. Returns true if removed, false if it
  * was retained because of local changes.
  */
@@ -150,8 +167,22 @@ export async function removeIfClean(worktreePath: string, targetRepo = BASE_REPO
     ).trim();
     if (ahead !== "0") return false;
   } catch {
-    // If we cannot prove the tree holds nothing unpushed, keep it.
-    return false;
+    // NO UPSTREAM IS THE NORMAL STATE, NOT AN EXCEPTION (#17).
+    //
+    // A worktree branch created by `createWorktree` tracks nothing, and a repo
+    // with no remote can never give it an upstream. Retaining unconditionally
+    // here made the guard unsatisfiable for those repos, so `removeIfClean`
+    // silently degraded into `neverRemove` and every worktree it was asked to
+    // reclaim became immortal. A cleanup path that can only ever answer "kept"
+    // is worse than no cleanup path: callers read the `false` as "the lane left
+    // work behind", which was never true.
+    //
+    // Ask the question the upstream probe was really asking — does this tree
+    // hold commits that exist nowhere else? — against the ref the tree was CUT
+    // from, resolved exactly as `createWorktree` resolved it. That works with
+    // no remote at all, and it stays correct when the base has since advanced:
+    // a branch whose commits are already merged into it counts zero.
+    if (await holdsUnmergedWork(worktreePath, targetRepo)) return false;
   }
   try {
     await git(targetRepo, ["worktree", "remove", worktreePath]);
