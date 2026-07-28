@@ -25,6 +25,7 @@ import {
   TURN_TIMEOUT_MS,
 } from "./constants.js";
 import { buildSpawnSpec } from "./backends.js";
+import { foreignControlRefusal, readForeignRun, scanForeignRuns } from "./foreign.js";
 import {
   classifyTurnFailure,
   INFRA_FAILURE_ADVISORY,
@@ -125,12 +126,26 @@ export interface WaitResult {
 
 export interface LaneListEntry {
   id: string;
-  lane: LaneName;
+  lane: LaneName | string;
   state: "working" | "idle" | "stalled" | "closed";
   idle_ms: number;
   turns_count: number;
   plan_summary: string;
   suspected_stall: boolean;
+  /**
+   * Which process owns this run (#32). `foreign` entries are reconstructed
+   * from `telemetry.json` on disk because another session's server holds the
+   * live object — they are visible, never controllable, and they are on the
+   * list precisely so an orphan scan stops mistaking "another process owns it"
+   * for "it never started".
+   */
+  owner: "this-process" | "foreign";
+  /** foreign only: where to read the record this entry was reconstructed from. */
+  run_dir?: string;
+  /** foreign only: the verdict file, when the run already wrote one. */
+  result_path?: string;
+  /** foreign only: the model that actually ran, straight off the durable record. */
+  observed_model?: string | null;
 }
 
 export type SpecResolver = (lane: LaneName, opts: LaneRequestOptions, runDir: string) => SpawnSpec;
@@ -148,6 +163,8 @@ export interface LaneManagerOptions {
   /** Handshake timeout passed to LaneConnection.connect. */
   handshakeTimeoutMs?: number;
   baseRepo?: string;
+  /** Root under which run directories live; also the root the foreign-run scan reads (#32). */
+  runsRoot?: string;
   /** Disable the background reaper (tests drive reaping manually). */
   disableReaper?: boolean;
   /** Backoff before the single automatic retry of a capacity-transient first-turn failure. */
@@ -175,6 +192,7 @@ export class LaneManager {
   private readonly turnTimeoutOverrideMs?: number;
   private readonly handshakeTimeoutMs: number;
   private readonly baseRepo: string;
+  private readonly runsRoot: string;
   private readonly capacityRetryBackoffMs: number;
   private readonly cancelGraceMs: number;
   private readonly processTerminateGraceMs?: number;
@@ -197,6 +215,7 @@ export class LaneManager {
     this.turnTimeoutOverrideMs = opts.turnTimeoutMs;
     this.handshakeTimeoutMs = opts.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
     this.baseRepo = opts.baseRepo ?? BASE_REPO;
+    this.runsRoot = opts.runsRoot ?? RUNS_ROOT;
     this.capacityRetryBackoffMs = opts.capacityRetryBackoffMs ?? CAPACITY_RETRY_BACKOFF_MS;
     this.cancelGraceMs = opts.cancelGraceMs ?? CANCEL_GRACE_MS;
     this.processTerminateGraceMs = opts.processTerminateGraceMs;
@@ -331,7 +350,7 @@ export class LaneManager {
     }
 
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
-    const runDir = path.join(RUNS_ROOT, id);
+    const runDir = path.join(this.runsRoot, id);
     fs.mkdirSync(runDir, { recursive: true });
 
     let cwd = params.cwd ?? this.baseRepo;
@@ -414,7 +433,7 @@ export class LaneManager {
    */
   async promptExisting(id: string, prompt: string, correction = false): Promise<{ id: string; status: RunStatus }> {
     const run = this.runs.get(id);
-    if (!run) throw new Error(`run '${id}' not found`);
+    if (!run) this.throwUnknownRun(id);
     if (!run.supervised) {
       throw new Error(
         `run '${id}' was not started from a supervised profile, so it takes no correction turn ` +
@@ -699,7 +718,7 @@ export class LaneManager {
    */
   async wait(id: string, timeoutMs?: number, quiet = true): Promise<WaitResult> {
     const run = this.runs.get(id);
-    if (!run) throw new Error(`run '${id}' not found`);
+    if (!run) this.throwUnknownRun(id);
     // CP6: single-consumer contract — a concurrent clanker_wait on the same id would
     // race the shared digest cursor, so reject it outright.
     if (this.activeWaits.has(id)) {
@@ -758,7 +777,7 @@ export class LaneManager {
 
   status(id: string): LaneStatusView {
     const run = this.runs.get(id);
-    if (!run) throw new Error(`run '${id}' not found`);
+    if (!run) this.throwUnknownRun(id);
     const view: LaneStatusView = {
       id: run.id,
       lane: run.lane,
@@ -781,9 +800,42 @@ export class LaneManager {
     return view;
   }
 
+  /**
+   * Reject an id this process does not hold — telling the caller WHICH kind of
+   * absent it is (#32).
+   *
+   * `run '<id>' not found` was the same sentence for two opposite situations:
+   * an id that never existed, and an id that is running right now in another
+   * session's server. The documented recovery for a dropped relay reads the
+   * lifecycle tools first and re-dispatches when they come back empty, so the
+   * second case rendered as the first is how one contract ends up with two
+   * live workers both opening PRs. Disk knows the difference; ask it.
+   *
+   * Never returns.
+   */
+  private throwUnknownRun(id: string): never {
+    const foreign = readForeignRun(id, this.runsRoot);
+    if (foreign) throw new Error(foreignControlRefusal(id, foreign));
+    throw new Error(
+      `run '${id}' not found — no such run in this process, and no record of it on disk under ${this.runsRoot}`,
+    );
+  }
+
+  /**
+   * Everything in flight that this process can see — its own runs, plus (#32)
+   * the ones another session's server is holding, reconstructed from disk.
+   *
+   * The foreign half exists because the honest answer to "what is running?"
+   * was previously `[]` whenever the asker was in a different session from the
+   * dispatcher, and an empty list reads as "nothing started" rather than
+   * "I cannot see". That is the reading that produces two workers on one
+   * contract.
+   */
   list(): LaneListEntry[] {
     const out: LaneListEntry[] = [];
+    const mine = new Set<string>();
     for (const run of this.runs.values()) {
+      mine.add(run.id);
       if (run.sessionClosed) continue;
       out.push({
         id: run.id,
@@ -793,6 +845,28 @@ export class LaneManager {
         turns_count: run.turnsCount,
         plan_summary: run.planSummary(),
         suspected_stall: run.suspectedStall(this.stallThresholdMs),
+        owner: "this-process",
+      });
+    }
+    for (const foreign of scanForeignRuns({ runsRoot: this.runsRoot, exclude: mine })) {
+      out.push({
+        id: foreign.id,
+        lane: foreign.lane ?? "unknown",
+        // Never "working": this process has no event stream for a foreign run,
+        // so it cannot tell working from wedged. `idle` plus a truthful
+        // last-activity age says what is actually known.
+        state: "idle",
+        idle_ms: foreign.last_activity_ms,
+        turns_count: foreign.turns ?? 0,
+        // Not synthesized from anything. Plan state lives in the owning
+        // process's memory and is not on disk; an invented summary here would
+        // be a fabrication on the one board people scan for orphans.
+        plan_summary: "(foreign run — plan state lives in the owning process)",
+        suspected_stall: foreign.last_activity_ms >= 0 && foreign.last_activity_ms > this.stallThresholdMs,
+        owner: "foreign",
+        run_dir: foreign.run_dir,
+        ...(foreign.result_path ? { result_path: foreign.result_path } : {}),
+        observed_model: foreign.observed_model,
       });
     }
     return out;
@@ -802,7 +876,7 @@ export class LaneManager {
 
   async cancel(id: string): Promise<{ id: string; status: RunStatus }> {
     const run = this.runs.get(id);
-    if (!run) throw new Error(`run '${id}' not found`);
+    if (!run) this.throwUnknownRun(id);
     if (run.turnStatus !== "running") return { id, status: run.turnStatus };
     run.requestCancellation();
     const pending = this.pendingConnects.get(id);

@@ -31,6 +31,14 @@ Policy stays server-side: a host cannot dispatch itself; Gemini is fixed read-on
 
 Credentials are never parameters. OpenCode's own auth store owns everything OAuth-backed; the one bare API key in play, GLM's `ZHIPUAI_API_KEY`, is materialized from the OS keychain at spawn time by rewriting the spawn command to `tachi vault exec --keychain --require ZHIPUAI_API_KEY -- <original command>`, so it never lives in Clanker's or the ambient shell's environment.
 
+## Runs owned by another process
+
+A host spawns one Clanker server per session, and each server holds its jobs in memory — so a job started in session A used to be invisible to session B. That would be a nuisance if jobs died with their session; they do not, and not dying is the whole reason to dispatch through Clanker. The result was the inversion of what the registry is for: **the job outlives the only record that it exists**, and `clanker_list` answered `[]` — not "I cannot see", just "nothing".
+
+`clanker_list` therefore also reports runs reconstructed from `telemetry.json` on disk, tagged `owner: "foreign"` and carrying `run_dir`, `result_path` and `observed_model`. Foreign entries are never reported as `working`: with no event stream this process cannot tell working from wedged, and a board that guesses is worse than one that abstains. Terminal foreign runs are omitted — the question a scan asks is what is still in flight.
+
+Visibility is recoverable from disk; **control is not**. `clanker_wait`, `clanker_cancel` and `clanker_prompt` need the process holding the worker's stdio, so they refuse a foreign id by name — `run '<id>' belongs to a different Clanker server process and is still in flight … Do NOT re-dispatch on the assumption that it never started` — instead of the old `run '<id>' not found`. That sentence was the same for an id that never existed and an id running elsewhere, and the documented recovery for a dropped relay re-dispatches when the tools come back empty; one frozen contract, two live workers, both opening a PR. An id with no record anywhere still says not found, and says where it looked.
+
 ## Run artifacts
 
 Every job owns a directory under `CLANKER_RUNS_ROOT` (default `~/.cache/clanker/runs/<id>`), returned as `run_dir` by `clanker_wait`/`clanker_status` so no caller has to construct the path:

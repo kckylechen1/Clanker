@@ -3226,8 +3226,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path9) {
-      let input = path9;
+    function removeDotSegments(path10) {
+      let input = path10;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3479,8 +3479,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path9, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path9 && path9 !== "/" ? path9 : void 0;
+        const [path10, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path10 && path10 !== "/" ? path10 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -6873,12 +6873,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs8, exportName) {
+    function addFormats(ajv, list, fs9, exportName) {
       var _a;
       var _b;
       (_a = (_b = ajv.opts.code).formats) !== null && _a !== void 0 ? _a : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs8[f]);
+        ajv.addFormat(f, fs9[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -7364,8 +7364,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path9, errorMaps, issueData } = params;
-  const fullPath = [...path9, ...issueData.path || []];
+  const { data, path: path10, errorMaps, issueData } = params;
+  const fullPath = [...path10, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7481,11 +7481,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path9, key) {
+  constructor(parent, value, path10, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path9;
+    this._path = path10;
     this._key = key;
   }
   get path() {
@@ -11367,10 +11367,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path9) {
-  if (!path9)
+function getElementAtPath(obj, path10) {
+  if (!path10)
     return obj;
-  return path9.reduce((acc, key) => acc?.[key], obj);
+  return path10.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11690,11 +11690,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path9, issues) {
+function prefixIssues(path10, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path9);
+    iss.path.unshift(path10);
     return iss;
   });
 }
@@ -11831,7 +11831,7 @@ function treeifyError(error40, _mapper) {
     return issue2.message;
   };
   const result = { errors: [] };
-  const processError = (error41, path9 = []) => {
+  const processError = (error41, path10 = []) => {
     var _a, _b;
     for (const issue2 of error41.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
@@ -11841,7 +11841,7 @@ function treeifyError(error40, _mapper) {
       } else if (issue2.code === "invalid_element") {
         processError({ issues: issue2.issues }, issue2.path);
       } else {
-        const fullpath = [...path9, ...issue2.path];
+        const fullpath = [...path10, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -11871,9 +11871,9 @@ function treeifyError(error40, _mapper) {
   processError(error40);
   return result;
 }
-function toDotPath(path9) {
+function toDotPath(path10) {
   const segs = [];
-  for (const seg of path9) {
+  for (const seg of path10) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -27791,8 +27791,8 @@ function envInt(name, fallback) {
 
 // src/manager.ts
 import crypto from "node:crypto";
-import fs6 from "node:fs";
-import path7 from "node:path";
+import fs7 from "node:fs";
+import path8 from "node:path";
 
 // src/acp-client.ts
 import { spawn } from "node:child_process";
@@ -31653,263 +31653,9 @@ function buildSpawnSpec(lane, opts, runDir) {
   }
 }
 
-// src/failure-classifier.ts
-var INFRA_FAILURE_TAG = "CLANKER-INFRA-FAILURE";
-var INFRA_FAILURE_ADVISORY = "infra \u5C42\u6545\u969C\uFF0C\u91CD\u8BD5\u65E0\u76CA\uFF1B\u5148\u8DD1 `npm run smoke -- <lane>` \u590D\u9A8C\u8F66\u9053\u5065\u5EB7\uFF0C\u518D\u51B3\u5B9A\u662F\u5426\u91CD\u6D3E\u3002";
-var API_SCHEMA_ERROR_PATTERNS = [
-  /invalid_request_error/i,
-  /"param"\s*:\s*"tools"/i,
-  /reserved for use by this model/i
-];
-function classifyTurnFailure(params) {
-  if (params.turnsCount !== 1 || params.toolCalls !== 0) return void 0;
-  if (API_SCHEMA_ERROR_PATTERNS.some((re) => re.test(params.message))) {
-    return INFRA_FAILURE_TAG;
-  }
-  return void 0;
-}
-var CAPACITY_TRANSIENT_PATTERNS = [
-  /model[ _-]?at[ _-]?capacity/i,
-  /\boverloaded\b/i,
-  /\bservice unavailable\b/i,
-  /\b(500|502|503|504)\b/
-];
-function isCapacityTransient(message) {
-  return CAPACITY_TRANSIENT_PATTERNS.some((re) => re.test(message));
-}
-
-// src/types.ts
-var LANE_NAMES = ["codex", "opencode", "grok", "gemini"];
-
-// src/profiles.ts
-var GEMINI_TURN_TIMEOUT_MS = 66e4;
-var DISPATCH_PROFILES = [
-  {
-    id: "codex-review",
-    title: "Codex cold review (read-only, in place)",
-    description: "Read-only Codex review. lane, read_only=true and sandbox=read-only are welded server-side: the sandbox is welded because a Codex dispatch with read_only=true but a write-capable native sandbox can still write the workspace, so leaving sandbox callable would be a way around the read-only gate. Runs in place by default; an optional worktree branch runs the review inside an isolated tree instead.",
-    lane: "codex",
-    model: { kind: "lane-default" },
-    readOnly: true,
-    sandbox: { kind: "welded", mode: "read-only" },
-    isolation: "optional",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "reviewer",
-    status: "active"
-  },
-  {
-    id: "codex-write",
-    title: "Codex implementation (isolated worktree)",
-    description: "Write-capable Codex worker. read_only=false is welded and a managed worktree branch is mandatory, so writes are boxed to the worktree. Sandbox strictness stays caller-selectable across all three Codex tiers and defaults to workspace-write. Model omitted on purpose: Codex runs its configured default.",
-    lane: "codex",
-    model: { kind: "lane-default" },
-    readOnly: false,
-    sandbox: { kind: "caller", defaultMode: "workspace-write" },
-    isolation: "required",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "implementer",
-    status: "active"
-  },
-  {
-    id: "oc-review",
-    title: "OpenCode cold review (read-only, in place)",
-    description: "Read-only OpenCode review on the fixed clanker-worker permission profile. read_only=true is welded; an optional worktree branch runs the review inside an isolated tree. An explicit model is required: omitting it lets OpenCode's own interactive config pick the provider (possibly GLM) outside the vault-exec credential wrap.",
-    lane: "opencode",
-    model: { kind: "caller-required" },
-    readOnly: true,
-    isolation: "optional",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "reviewer",
-    ocProfile: "worker",
-    status: "active"
-  },
-  {
-    id: "oc-write",
-    title: "OpenCode implementation (isolated worktree)",
-    description: "Write-capable OpenCode worker on the fixed clanker-worker permission profile. read_only=false is welded and a managed worktree branch is mandatory. An explicit non-GLM model is required; GLM writes are rejected here and belong to the supervised oc-glm-write profile.",
-    lane: "opencode",
-    model: { kind: "caller-required" },
-    readOnly: false,
-    isolation: "required",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "implementer",
-    ocProfile: "worker",
-    status: "active"
-  },
-  {
-    id: "oc-glm-write",
-    title: "Supervised GLM implementation (isolated worktree)",
-    description: "The only supervised GLM write shape. lane=opencode, model=glm and read_only=false are welded, a managed worktree branch is mandatory, ZHIPUAI_API_KEY is materialized from the OS keychain through `tachi vault exec` at spawn time, and the profile requires a Sonnet supervisor seat that can correct or cancel the worker.",
-    lane: "opencode",
-    model: { kind: "welded", id: "glm" },
-    readOnly: false,
-    isolation: "required",
-    secrets: ["ZHIPUAI_API_KEY"],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "sonnet",
-    roleClass: "implementer",
-    ocProfile: "worker",
-    status: "active"
-  },
-  {
-    id: "oc-kimi-crew",
-    title: "Kimi Crew (OpenCode-owned multi-agent profile)",
-    description: "Runs the installed OpenCode `kimi-crew` profile, which owns its own child agents, prompts and permissions. lane=opencode, model=kimi and read_only=false are welded and a managed worktree branch is mandatory. Not a GLM lane and not externally supervised.",
-    lane: "opencode",
-    model: { kind: "welded", id: "kimi" },
-    readOnly: false,
-    isolation: "required",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "implementer",
-    ocProfile: "kimi-crew",
-    status: "active"
-  },
-  {
-    id: "gemini-recon",
-    title: "Gemini reconnaissance (read-only, in place)",
-    description: "Read-only Gemini survey. The lane is reconnaissance-only server-side and rejects both write mode and worktrees (the only profile whose isolation is forbidden rather than optional \u2014 it is the lane's own rule, not a registry preference); the model defaults to the sidecar's configured Gemini model.",
-    lane: "gemini",
-    model: { kind: "lane-default" },
-    readOnly: true,
-    isolation: "forbidden",
-    secrets: [],
-    turnTimeoutMs: GEMINI_TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "scout",
-    status: "active"
-  },
-  {
-    id: "gemini-research",
-    title: "Gemini online research (read-only, in place)",
-    description: "Read-only Gemini web research entry \u2014 the online-research counterpart to gemini-recon's quick survey. Every conclusion must carry its source URL and anything unsourced is reported as unverified. Same lane rules as gemini-recon: reconnaissance-only server-side, write mode and worktrees rejected; the model defaults to the sidecar's configured Gemini model.",
-    lane: "gemini",
-    model: { kind: "lane-default" },
-    readOnly: true,
-    isolation: "forbidden",
-    secrets: [],
-    turnTimeoutMs: GEMINI_TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "scout",
-    status: "active"
-  },
-  {
-    id: "grok-review",
-    title: "Grok cold review (read-only, in place)",
-    description: "Read-only Grok review with Clanker's own native containment flags. read_only=true is welded; an optional worktree branch runs the review inside an isolated tree. Model may be omitted \u2014 the grok lane has its own configured default. Currently dormant: the account returns HTTP 402 (out of credit).",
-    lane: "grok",
-    model: { kind: "lane-default" },
-    readOnly: true,
-    isolation: "optional",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "reviewer",
-    status: "dormant",
-    dormantReason: "grok account is out of credit (HTTP 402)"
-  },
-  {
-    id: "grok-write",
-    title: "Grok implementation (isolated worktree)",
-    description: "Write-capable Grok worker with a native workspace sandbox. read_only=false is welded and a managed worktree branch is mandatory; an explicit model is required. Currently dormant: the account returns HTTP 402 (out of credit).",
-    lane: "grok",
-    model: { kind: "caller-required" },
-    readOnly: false,
-    isolation: "required",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "implementer",
-    status: "dormant",
-    dormantReason: "grok account is out of credit (HTTP 402)"
-  }
-];
-var PROFILE_IDS = DISPATCH_PROFILES.map((p) => p.id);
-var BY_ID = new Map(DISPATCH_PROFILES.map((p) => [p.id, p]));
-function getProfile(id) {
-  const profile = BY_ID.get(id);
-  if (!profile) throw new Error(`unknown profile '${id}'; expected one of ${PROFILE_IDS.join(", ")}`);
-  return profile;
-}
-var ENV_PREFIX = "CLANKER_TURN_TIMEOUT_MS_";
-function profileTurnTimeoutMs(profile, env = process.env) {
-  const raw = env[ENV_PREFIX + profile.id.replace(/-/g, "_").toUpperCase()];
-  if (raw === void 0) return profile.turnTimeoutMs;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : profile.turnTimeoutMs;
-}
-function resolveProfileDispatch(input, env = process.env) {
-  const profile = getProfile(input.profile);
-  if (profile.isolation === "forbidden" && input.worktree !== void 0) {
-    throw new Error(`profile '${profile.id}' runs in place and does not take a worktree`);
-  }
-  if (profile.isolation === "required" && !input.worktree?.trim()) {
-    throw new Error(`profile '${profile.id}' is write-capable and requires a managed worktree branch name`);
-  }
-  let sandbox;
-  if (profile.sandbox === void 0) {
-    if (input.sandbox !== void 0) {
-      throw new Error(`profile '${profile.id}' runs on a lane with no native sandbox tier; it takes no sandbox argument`);
-    }
-  } else if (profile.sandbox.kind === "welded") {
-    if (input.sandbox !== void 0 && input.sandbox !== profile.sandbox.mode) {
-      throw new Error(`profile '${profile.id}' welds sandbox='${profile.sandbox.mode}'; it cannot be overridden`);
-    }
-    sandbox = profile.sandbox.mode;
-  } else {
-    sandbox = input.sandbox ?? profile.sandbox.defaultMode;
-  }
-  let model;
-  switch (profile.model.kind) {
-    case "welded":
-      if (input.model !== void 0 && input.model.trim() !== profile.model.id) {
-        throw new Error(`profile '${profile.id}' welds model='${profile.model.id}'; it cannot be overridden`);
-      }
-      model = profile.model.id;
-      break;
-    case "lane-default":
-      if (input.model !== void 0) {
-        throw new Error(`profile '${profile.id}' uses the lane's configured default model; it takes no model argument`);
-      }
-      model = void 0;
-      break;
-    case "caller-required":
-      if (!input.model?.trim()) {
-        throw new Error(`profile '${profile.id}' requires an explicit model id`);
-      }
-      model = input.model.trim();
-      if (!profile.readOnly && profile.supervision !== "sonnet" && isGlmModel(model)) {
-        throw new Error(
-          `profile '${profile.id}' cannot run a GLM write; GLM writes are supervised and belong to profile 'oc-glm-write'`
-        );
-      }
-      break;
-  }
-  return {
-    lane: profile.lane,
-    prompt: input.prompt,
-    cwd: input.cwd,
-    worktree: input.worktree,
-    model,
-    effort: input.effort,
-    readOnly: profile.readOnly,
-    sandbox,
-    profile: profile.ocProfile,
-    secrets: profile.secrets,
-    supervision: profile.supervision,
-    turnTimeoutMs: profileTurnTimeoutMs(profile, env),
-    profileId: profile.id
-  };
-}
+// src/foreign.ts
+import fs5 from "node:fs";
+import path6 from "node:path";
 
 // src/run.ts
 import fs4 from "node:fs";
@@ -32665,6 +32411,330 @@ function truncate(s, max) {
   return s.slice(0, Math.max(0, max - 1)) + "\u2026";
 }
 
+// src/foreign.ts
+function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
+  const runDir = path6.join(runsRoot, id);
+  let telemetry;
+  try {
+    telemetry = JSON.parse(fs5.readFileSync(path6.join(runDir, "telemetry.json"), "utf8"));
+  } catch {
+    return null;
+  }
+  let newestMtimeMs = 0;
+  try {
+    for (const entry of fs5.readdirSync(runDir)) {
+      try {
+        newestMtimeMs = Math.max(newestMtimeMs, fs5.statSync(path6.join(runDir, entry)).mtimeMs);
+      } catch {
+      }
+    }
+  } catch {
+  }
+  let resultPath;
+  try {
+    if (fs5.statSync(path6.join(runDir, RESULT_FILE)).size > 0) resultPath = path6.join(runDir, RESULT_FILE);
+  } catch {
+  }
+  return {
+    id,
+    lane: telemetry.lane ?? null,
+    host: telemetry.host ?? null,
+    created_at: telemetry.created_at ?? null,
+    terminal_at: telemetry.terminal_at ?? null,
+    terminal_reason: telemetry.terminal_reason ?? null,
+    observed_model: telemetry.observed_model ?? null,
+    read_only: telemetry.read_only ?? null,
+    turns: telemetry.turns ?? null,
+    run_dir: runDir,
+    ...resultPath ? { result_path: resultPath } : {},
+    last_activity_ms: newestMtimeMs > 0 ? Math.max(0, now - newestMtimeMs) : -1
+  };
+}
+function scanForeignRuns(options = {}) {
+  const runsRoot = options.runsRoot ?? RUNS_ROOT;
+  const exclude = options.exclude ?? /* @__PURE__ */ new Set();
+  const inFlightOnly = options.inFlightOnly ?? true;
+  const now = options.now ?? Date.now();
+  let ids;
+  try {
+    ids = fs5.readdirSync(runsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
+  const found = [];
+  for (const id of ids) {
+    if (exclude.has(id)) continue;
+    const run = readForeignRun(id, runsRoot, now);
+    if (!run) continue;
+    if (inFlightOnly && run.terminal_at) continue;
+    found.push(run);
+  }
+  found.sort((a, b) => a.last_activity_ms - b.last_activity_ms);
+  return found;
+}
+function foreignControlRefusal(id, run) {
+  const state = run.terminal_at ? `already terminal (${run.terminal_reason ?? "unknown"})` : "still in flight";
+  return `run '${id}' belongs to a different Clanker server process and is ${state}. Each session spawns its own server, and control (wait/cancel/prompt) needs the process that holds the worker's stdio \u2014 it cannot be recovered from disk. You can read its record at ${run.run_dir}${run.result_path ? ` and its verdict at ${run.result_path}` : ""}. Do NOT re-dispatch on the assumption that it never started.`;
+}
+
+// src/failure-classifier.ts
+var INFRA_FAILURE_TAG = "CLANKER-INFRA-FAILURE";
+var INFRA_FAILURE_ADVISORY = "infra \u5C42\u6545\u969C\uFF0C\u91CD\u8BD5\u65E0\u76CA\uFF1B\u5148\u8DD1 `npm run smoke -- <lane>` \u590D\u9A8C\u8F66\u9053\u5065\u5EB7\uFF0C\u518D\u51B3\u5B9A\u662F\u5426\u91CD\u6D3E\u3002";
+var API_SCHEMA_ERROR_PATTERNS = [
+  /invalid_request_error/i,
+  /"param"\s*:\s*"tools"/i,
+  /reserved for use by this model/i
+];
+function classifyTurnFailure(params) {
+  if (params.turnsCount !== 1 || params.toolCalls !== 0) return void 0;
+  if (API_SCHEMA_ERROR_PATTERNS.some((re) => re.test(params.message))) {
+    return INFRA_FAILURE_TAG;
+  }
+  return void 0;
+}
+var CAPACITY_TRANSIENT_PATTERNS = [
+  /model[ _-]?at[ _-]?capacity/i,
+  /\boverloaded\b/i,
+  /\bservice unavailable\b/i,
+  /\b(500|502|503|504)\b/
+];
+function isCapacityTransient(message) {
+  return CAPACITY_TRANSIENT_PATTERNS.some((re) => re.test(message));
+}
+
+// src/types.ts
+var LANE_NAMES = ["codex", "opencode", "grok", "gemini"];
+
+// src/profiles.ts
+var GEMINI_TURN_TIMEOUT_MS = 66e4;
+var DISPATCH_PROFILES = [
+  {
+    id: "codex-review",
+    title: "Codex cold review (read-only, in place)",
+    description: "Read-only Codex review. lane, read_only=true and sandbox=read-only are welded server-side: the sandbox is welded because a Codex dispatch with read_only=true but a write-capable native sandbox can still write the workspace, so leaving sandbox callable would be a way around the read-only gate. Runs in place by default; an optional worktree branch runs the review inside an isolated tree instead.",
+    lane: "codex",
+    model: { kind: "lane-default" },
+    readOnly: true,
+    sandbox: { kind: "welded", mode: "read-only" },
+    isolation: "optional",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "reviewer",
+    status: "active"
+  },
+  {
+    id: "codex-write",
+    title: "Codex implementation (isolated worktree)",
+    description: "Write-capable Codex worker. read_only=false is welded and a managed worktree branch is mandatory, so writes are boxed to the worktree. Sandbox strictness stays caller-selectable across all three Codex tiers and defaults to workspace-write. Model omitted on purpose: Codex runs its configured default.",
+    lane: "codex",
+    model: { kind: "lane-default" },
+    readOnly: false,
+    sandbox: { kind: "caller", defaultMode: "workspace-write" },
+    isolation: "required",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "implementer",
+    status: "active"
+  },
+  {
+    id: "oc-review",
+    title: "OpenCode cold review (read-only, in place)",
+    description: "Read-only OpenCode review on the fixed clanker-worker permission profile. read_only=true is welded; an optional worktree branch runs the review inside an isolated tree. An explicit model is required: omitting it lets OpenCode's own interactive config pick the provider (possibly GLM) outside the vault-exec credential wrap.",
+    lane: "opencode",
+    model: { kind: "caller-required" },
+    readOnly: true,
+    isolation: "optional",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "reviewer",
+    ocProfile: "worker",
+    status: "active"
+  },
+  {
+    id: "oc-write",
+    title: "OpenCode implementation (isolated worktree)",
+    description: "Write-capable OpenCode worker on the fixed clanker-worker permission profile. read_only=false is welded and a managed worktree branch is mandatory. An explicit non-GLM model is required; GLM writes are rejected here and belong to the supervised oc-glm-write profile.",
+    lane: "opencode",
+    model: { kind: "caller-required" },
+    readOnly: false,
+    isolation: "required",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "implementer",
+    ocProfile: "worker",
+    status: "active"
+  },
+  {
+    id: "oc-glm-write",
+    title: "Supervised GLM implementation (isolated worktree)",
+    description: "The only supervised GLM write shape. lane=opencode, model=glm and read_only=false are welded, a managed worktree branch is mandatory, ZHIPUAI_API_KEY is materialized from the OS keychain through `tachi vault exec` at spawn time, and the profile requires a Sonnet supervisor seat that can correct or cancel the worker.",
+    lane: "opencode",
+    model: { kind: "welded", id: "glm" },
+    readOnly: false,
+    isolation: "required",
+    secrets: ["ZHIPUAI_API_KEY"],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "sonnet",
+    roleClass: "implementer",
+    ocProfile: "worker",
+    status: "active"
+  },
+  {
+    id: "oc-kimi-crew",
+    title: "Kimi Crew (OpenCode-owned multi-agent profile)",
+    description: "Runs the installed OpenCode `kimi-crew` profile, which owns its own child agents, prompts and permissions. lane=opencode, model=kimi and read_only=false are welded and a managed worktree branch is mandatory. Not a GLM lane and not externally supervised.",
+    lane: "opencode",
+    model: { kind: "welded", id: "kimi" },
+    readOnly: false,
+    isolation: "required",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "implementer",
+    ocProfile: "kimi-crew",
+    status: "active"
+  },
+  {
+    id: "gemini-recon",
+    title: "Gemini reconnaissance (read-only, in place)",
+    description: "Read-only Gemini survey. The lane is reconnaissance-only server-side and rejects both write mode and worktrees (the only profile whose isolation is forbidden rather than optional \u2014 it is the lane's own rule, not a registry preference); the model defaults to the sidecar's configured Gemini model.",
+    lane: "gemini",
+    model: { kind: "lane-default" },
+    readOnly: true,
+    isolation: "forbidden",
+    secrets: [],
+    turnTimeoutMs: GEMINI_TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "scout",
+    status: "active"
+  },
+  {
+    id: "gemini-research",
+    title: "Gemini online research (read-only, in place)",
+    description: "Read-only Gemini web research entry \u2014 the online-research counterpart to gemini-recon's quick survey. Every conclusion must carry its source URL and anything unsourced is reported as unverified. Same lane rules as gemini-recon: reconnaissance-only server-side, write mode and worktrees rejected; the model defaults to the sidecar's configured Gemini model.",
+    lane: "gemini",
+    model: { kind: "lane-default" },
+    readOnly: true,
+    isolation: "forbidden",
+    secrets: [],
+    turnTimeoutMs: GEMINI_TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "scout",
+    status: "active"
+  },
+  {
+    id: "grok-review",
+    title: "Grok cold review (read-only, in place)",
+    description: "Read-only Grok review with Clanker's own native containment flags. read_only=true is welded; an optional worktree branch runs the review inside an isolated tree. Model may be omitted \u2014 the grok lane has its own configured default. Currently dormant: the account returns HTTP 402 (out of credit).",
+    lane: "grok",
+    model: { kind: "lane-default" },
+    readOnly: true,
+    isolation: "optional",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "reviewer",
+    status: "dormant",
+    dormantReason: "grok account is out of credit (HTTP 402)"
+  },
+  {
+    id: "grok-write",
+    title: "Grok implementation (isolated worktree)",
+    description: "Write-capable Grok worker with a native workspace sandbox. read_only=false is welded and a managed worktree branch is mandatory; an explicit model is required. Currently dormant: the account returns HTTP 402 (out of credit).",
+    lane: "grok",
+    model: { kind: "caller-required" },
+    readOnly: false,
+    isolation: "required",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "implementer",
+    status: "dormant",
+    dormantReason: "grok account is out of credit (HTTP 402)"
+  }
+];
+var PROFILE_IDS = DISPATCH_PROFILES.map((p) => p.id);
+var BY_ID = new Map(DISPATCH_PROFILES.map((p) => [p.id, p]));
+function getProfile(id) {
+  const profile = BY_ID.get(id);
+  if (!profile) throw new Error(`unknown profile '${id}'; expected one of ${PROFILE_IDS.join(", ")}`);
+  return profile;
+}
+var ENV_PREFIX = "CLANKER_TURN_TIMEOUT_MS_";
+function profileTurnTimeoutMs(profile, env = process.env) {
+  const raw = env[ENV_PREFIX + profile.id.replace(/-/g, "_").toUpperCase()];
+  if (raw === void 0) return profile.turnTimeoutMs;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : profile.turnTimeoutMs;
+}
+function resolveProfileDispatch(input, env = process.env) {
+  const profile = getProfile(input.profile);
+  if (profile.isolation === "forbidden" && input.worktree !== void 0) {
+    throw new Error(`profile '${profile.id}' runs in place and does not take a worktree`);
+  }
+  if (profile.isolation === "required" && !input.worktree?.trim()) {
+    throw new Error(`profile '${profile.id}' is write-capable and requires a managed worktree branch name`);
+  }
+  let sandbox;
+  if (profile.sandbox === void 0) {
+    if (input.sandbox !== void 0) {
+      throw new Error(`profile '${profile.id}' runs on a lane with no native sandbox tier; it takes no sandbox argument`);
+    }
+  } else if (profile.sandbox.kind === "welded") {
+    if (input.sandbox !== void 0 && input.sandbox !== profile.sandbox.mode) {
+      throw new Error(`profile '${profile.id}' welds sandbox='${profile.sandbox.mode}'; it cannot be overridden`);
+    }
+    sandbox = profile.sandbox.mode;
+  } else {
+    sandbox = input.sandbox ?? profile.sandbox.defaultMode;
+  }
+  let model;
+  switch (profile.model.kind) {
+    case "welded":
+      if (input.model !== void 0 && input.model.trim() !== profile.model.id) {
+        throw new Error(`profile '${profile.id}' welds model='${profile.model.id}'; it cannot be overridden`);
+      }
+      model = profile.model.id;
+      break;
+    case "lane-default":
+      if (input.model !== void 0) {
+        throw new Error(`profile '${profile.id}' uses the lane's configured default model; it takes no model argument`);
+      }
+      model = void 0;
+      break;
+    case "caller-required":
+      if (!input.model?.trim()) {
+        throw new Error(`profile '${profile.id}' requires an explicit model id`);
+      }
+      model = input.model.trim();
+      if (!profile.readOnly && profile.supervision !== "sonnet" && isGlmModel(model)) {
+        throw new Error(
+          `profile '${profile.id}' cannot run a GLM write; GLM writes are supervised and belong to profile 'oc-glm-write'`
+        );
+      }
+      break;
+  }
+  return {
+    lane: profile.lane,
+    prompt: input.prompt,
+    cwd: input.cwd,
+    worktree: input.worktree,
+    model,
+    effort: input.effort,
+    readOnly: profile.readOnly,
+    sandbox,
+    profile: profile.ocProfile,
+    secrets: profile.secrets,
+    supervision: profile.supervision,
+    turnTimeoutMs: profileTurnTimeoutMs(profile, env),
+    profileId: profile.id
+  };
+}
+
 // src/host.ts
 var HOSTS = ["claude", "codex", "standalone"];
 function parseHostArgs(args) {
@@ -32690,8 +32760,8 @@ function hostLaneBlockedReason(host, lane) {
 
 // src/worktree.ts
 import { execFile } from "node:child_process";
-import fs5 from "node:fs";
-import path6 from "node:path";
+import fs6 from "node:fs";
+import path7 from "node:path";
 import { promisify } from "node:util";
 var exec = promisify(execFile);
 async function git(cwd, args) {
@@ -32700,7 +32770,7 @@ async function git(cwd, args) {
 }
 function deriveWorktreePath(branch) {
   const safe = branch.replace(/[^A-Za-z0-9._-]/g, "-");
-  return path6.join(WORKTREES_ROOT, safe);
+  return path7.join(WORKTREES_ROOT, safe);
 }
 async function isGitWorkTree(cwd) {
   try {
@@ -32744,11 +32814,11 @@ async function resolveBaseRef(targetRepo) {
 }
 async function createWorktree(branch, targetRepo = BASE_REPO) {
   const wtPath = deriveWorktreePath(branch);
-  if (fs5.existsSync(wtPath)) {
+  if (fs6.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
   const baseRef = await resolveBaseRef(targetRepo);
-  fs5.mkdirSync(WORKTREES_ROOT, { recursive: true });
+  fs6.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
   return wtPath;
 }
@@ -32808,6 +32878,7 @@ var LaneManager = class {
   turnTimeoutOverrideMs;
   handshakeTimeoutMs;
   baseRepo;
+  runsRoot;
   capacityRetryBackoffMs;
   cancelGraceMs;
   processTerminateGraceMs;
@@ -32829,6 +32900,7 @@ var LaneManager = class {
     this.turnTimeoutOverrideMs = opts.turnTimeoutMs;
     this.handshakeTimeoutMs = opts.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
     this.baseRepo = opts.baseRepo ?? BASE_REPO;
+    this.runsRoot = opts.runsRoot ?? RUNS_ROOT;
     this.capacityRetryBackoffMs = opts.capacityRetryBackoffMs ?? CAPACITY_RETRY_BACKOFF_MS;
     this.cancelGraceMs = opts.cancelGraceMs ?? CANCEL_GRACE_MS;
     this.processTerminateGraceMs = opts.processTerminateGraceMs;
@@ -32917,13 +32989,13 @@ var LaneManager = class {
         "write-capable dispatch must run in an isolated worktree: pass `worktree` (a branch name). Strict reads may run in-place."
       );
     }
-    let targetRepo = path7.resolve(this.baseRepo);
+    let targetRepo = path8.resolve(this.baseRepo);
     if (params.worktree && params.cwd) {
       targetRepo = await resolveTargetRepo(params.cwd);
     }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
-    const runDir = path7.join(RUNS_ROOT, id);
-    fs6.mkdirSync(runDir, { recursive: true });
+    const runDir = path8.join(this.runsRoot, id);
+    fs7.mkdirSync(runDir, { recursive: true });
     let cwd = params.cwd ?? this.baseRepo;
     let worktreePath;
     if (params.worktree) {
@@ -32997,7 +33069,7 @@ var LaneManager = class {
    */
   async promptExisting(id, prompt, correction = false) {
     const run = this.runs.get(id);
-    if (!run) throw new Error(`run '${id}' not found`);
+    if (!run) this.throwUnknownRun(id);
     if (!run.supervised) {
       throw new Error(
         `run '${id}' was not started from a supervised profile, so it takes no correction turn (only the supervised shape accepts one \u2014 see profiles.ts supervision)`
@@ -33233,7 +33305,7 @@ var LaneManager = class {
    */
   async wait(id, timeoutMs, quiet = true) {
     const run = this.runs.get(id);
-    if (!run) throw new Error(`run '${id}' not found`);
+    if (!run) this.throwUnknownRun(id);
     if (this.activeWaits.has(id)) {
       throw new Error(`clanker_wait already in progress for '${id}' (one waiter per run)`);
     }
@@ -33284,7 +33356,7 @@ var LaneManager = class {
   // ---- cheap queries ------------------------------------------------------
   status(id) {
     const run = this.runs.get(id);
-    if (!run) throw new Error(`run '${id}' not found`);
+    if (!run) this.throwUnknownRun(id);
     const view = {
       id: run.id,
       lane: run.lane,
@@ -33306,9 +33378,41 @@ var LaneManager = class {
     }
     return view;
   }
+  /**
+   * Reject an id this process does not hold — telling the caller WHICH kind of
+   * absent it is (#32).
+   *
+   * `run '<id>' not found` was the same sentence for two opposite situations:
+   * an id that never existed, and an id that is running right now in another
+   * session's server. The documented recovery for a dropped relay reads the
+   * lifecycle tools first and re-dispatches when they come back empty, so the
+   * second case rendered as the first is how one contract ends up with two
+   * live workers both opening PRs. Disk knows the difference; ask it.
+   *
+   * Never returns.
+   */
+  throwUnknownRun(id) {
+    const foreign = readForeignRun(id, this.runsRoot);
+    if (foreign) throw new Error(foreignControlRefusal(id, foreign));
+    throw new Error(
+      `run '${id}' not found \u2014 no such run in this process, and no record of it on disk under ${this.runsRoot}`
+    );
+  }
+  /**
+   * Everything in flight that this process can see — its own runs, plus (#32)
+   * the ones another session's server is holding, reconstructed from disk.
+   *
+   * The foreign half exists because the honest answer to "what is running?"
+   * was previously `[]` whenever the asker was in a different session from the
+   * dispatcher, and an empty list reads as "nothing started" rather than
+   * "I cannot see". That is the reading that produces two workers on one
+   * contract.
+   */
   list() {
     const out = [];
+    const mine = /* @__PURE__ */ new Set();
     for (const run of this.runs.values()) {
+      mine.add(run.id);
       if (run.sessionClosed) continue;
       out.push({
         id: run.id,
@@ -33317,7 +33421,29 @@ var LaneManager = class {
         idle_ms: run.idleMs(),
         turns_count: run.turnsCount,
         plan_summary: run.planSummary(),
-        suspected_stall: run.suspectedStall(this.stallThresholdMs)
+        suspected_stall: run.suspectedStall(this.stallThresholdMs),
+        owner: "this-process"
+      });
+    }
+    for (const foreign of scanForeignRuns({ runsRoot: this.runsRoot, exclude: mine })) {
+      out.push({
+        id: foreign.id,
+        lane: foreign.lane ?? "unknown",
+        // Never "working": this process has no event stream for a foreign run,
+        // so it cannot tell working from wedged. `idle` plus a truthful
+        // last-activity age says what is actually known.
+        state: "idle",
+        idle_ms: foreign.last_activity_ms,
+        turns_count: foreign.turns ?? 0,
+        // Not synthesized from anything. Plan state lives in the owning
+        // process's memory and is not on disk; an invented summary here would
+        // be a fabrication on the one board people scan for orphans.
+        plan_summary: "(foreign run \u2014 plan state lives in the owning process)",
+        suspected_stall: foreign.last_activity_ms >= 0 && foreign.last_activity_ms > this.stallThresholdMs,
+        owner: "foreign",
+        run_dir: foreign.run_dir,
+        ...foreign.result_path ? { result_path: foreign.result_path } : {},
+        observed_model: foreign.observed_model
       });
     }
     return out;
@@ -33325,7 +33451,7 @@ var LaneManager = class {
   // ---- cancel / close -----------------------------------------------------
   async cancel(id) {
     const run = this.runs.get(id);
-    if (!run) throw new Error(`run '${id}' not found`);
+    if (!run) this.throwUnknownRun(id);
     if (run.turnStatus !== "running") return { id, status: run.turnStatus };
     run.requestCancellation();
     const pending = this.pendingConnects.get(id);
@@ -33448,16 +33574,16 @@ function errMessage(e) {
   return e instanceof Error ? e.message : String(e);
 }
 function realpathBestEffort(p) {
-  let cur = path7.resolve(p);
+  let cur = path8.resolve(p);
   const tail = [];
   for (; ; ) {
     try {
-      const real = fs6.realpathSync(cur);
-      return tail.length ? path7.join(real, ...tail) : real;
+      const real = fs7.realpathSync(cur);
+      return tail.length ? path8.join(real, ...tail) : real;
     } catch {
-      const parent = path7.dirname(cur);
-      if (parent === cur) return path7.resolve(p);
-      tail.unshift(path7.basename(cur));
+      const parent = path8.dirname(cur);
+      if (parent === cur) return path8.resolve(p);
+      tail.unshift(path8.basename(cur));
       cur = parent;
     }
   }
@@ -33465,7 +33591,7 @@ function realpathBestEffort(p) {
 function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
   const wt = realpathBestEffort(worktreePath);
   const repo = realpathBestEffort(targetRepo);
-  if (wt === repo || wt.startsWith(repo + path7.sep) || repo.startsWith(wt + path7.sep)) {
+  if (wt === repo || wt.startsWith(repo + path8.sep) || repo.startsWith(wt + path8.sep)) {
     throw new Error(
       `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT outside the repo)`
     );
@@ -33661,8 +33787,8 @@ function registerTools(server, manager) {
 }
 
 // src/retention.ts
-import fs7 from "node:fs";
-import path8 from "node:path";
+import fs8 from "node:fs";
+import path9 from "node:path";
 function sweepRunStreams(options = {}) {
   const runsRoot = options.runsRoot ?? RUNS_ROOT;
   const ttlMs = options.ttlMs ?? RUN_STREAM_TTL_MS;
@@ -33671,21 +33797,21 @@ function sweepRunStreams(options = {}) {
   if (!(ttlMs > 0)) return report;
   let entries;
   try {
-    entries = fs7.readdirSync(runsRoot, { withFileTypes: true });
+    entries = fs8.readdirSync(runsRoot, { withFileTypes: true });
   } catch {
     return report;
   }
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     report.scanned++;
-    const runDir = path8.join(runsRoot, entry.name);
+    const runDir = path9.join(runsRoot, entry.name);
     const streams = [];
     let newestMtimeMs = 0;
     for (const name of RUN_STREAM_FILES) {
-      const file2 = path8.join(runDir, name);
+      const file2 = path9.join(runDir, name);
       let stat;
       try {
-        stat = fs7.statSync(file2);
+        stat = fs8.statSync(file2);
       } catch {
         continue;
       }
@@ -33698,7 +33824,7 @@ function sweepRunStreams(options = {}) {
     let swept = 0;
     for (const stream of streams) {
       try {
-        fs7.rmSync(stream.file);
+        fs8.rmSync(stream.file);
         report.sweptFiles++;
         report.bytesFreed += stream.size;
         swept++;
@@ -33715,14 +33841,14 @@ function sweepRunStreams(options = {}) {
 }
 function isEmptyDir(dir) {
   try {
-    return fs7.readdirSync(dir).length === 0;
+    return fs8.readdirSync(dir).length === 0;
   } catch {
     return false;
   }
 }
 function removeDir(dir) {
   try {
-    fs7.rmdirSync(dir);
+    fs8.rmdirSync(dir);
     return true;
   } catch {
     return false;
