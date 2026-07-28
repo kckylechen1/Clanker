@@ -74,3 +74,64 @@ const CAPACITY_TRANSIENT_PATTERNS: readonly RegExp[] = [
 export function isCapacityTransient(message: string): boolean {
   return CAPACITY_TRANSIENT_PATTERNS.some((re) => re.test(message));
 }
+
+/** Machine-checkable tag for a permanent backend billing/balance rejection. */
+export const BACKEND_BILLING_TAG = "CLANKER-BACKEND-BILLING";
+
+/** Machine-checkable tag for a permanent backend auth/credential rejection. */
+export const BACKEND_AUTH_TAG = "CLANKER-BACKEND-AUTH";
+
+/**
+ * Backend billing-account failure signatures. 2026-07-24 incident (issue
+ * #9): Grok's ACP bridge returned HTTP 402 ("API error (status 402 Payment
+ * Required): Grok Build usage balance exhausted") from its backend, but its
+ * own bridge collapsed that into a bare JSON-RPC -32603 "Internal error" —
+ * Clanker's captured stderr never carried the real status_code/message. The
+ * detail only lived in Grok's private `$GROK_HOME/logs/unified.jsonl` (see
+ * grok-diagnostics.ts's grokFailureDetail, spliced into the turn's error
+ * text by manager.ts). Once spliced in, it must classify as a permanent,
+ * non-retryable failure — an empty account balance does not self-heal the
+ * way an overloaded backend does — so this is checked before the generic
+ * CAPACITY_TRANSIENT_PATTERNS below.
+ */
+const BACKEND_BILLING_PATTERNS: readonly RegExp[] = [
+  /\b402\b|balance|billing|payment required|usage balance exhausted|insufficient credit/i,
+];
+
+/**
+ * Backend auth/credential failure signatures — same permanent-failure
+ * reasoning as BACKEND_BILLING_PATTERNS above (issue #9), for the sibling
+ * case where the backend rejects the credential itself rather than the
+ * account balance.
+ */
+const BACKEND_AUTH_PATTERNS: readonly RegExp[] = [
+  /\b40[13]\b|unauthorized|forbidden|invalid api key|authentication/i,
+];
+
+/**
+ * Classify a failure message as a permanent backend billing or auth
+ * rejection. Unlike classifyTurnFailure's CLANKER-INFRA-FAILURE (scoped to a
+ * turn-1, zero-tool-call schema rejection), a billing/auth failure is
+ * permanent regardless of turn number or tool-call count — the account
+ * state doesn't change mid-session — so there is no turnsCount/toolCalls
+ * gate here. Billing is checked before auth only because 402 and 401/403 are
+ * mutually exclusive HTTP statuses in practice; the two pattern sets
+ * otherwise don't need a specific relative order.
+ *
+ * BOUNDARY: only ever run this against the error/stderr text a *failed* turn
+ * carries — the same channel classifyTurnFailure/isCapacityTransient
+ * consume (manager.ts's runTurn only calls these against the message from
+ * its own catch clause: timeout / process-exit / connection-closed text,
+ * never a successful turn's agent_message or tool-result content). A page
+ * the agent fetched that itself contains the literal text "HTTP 403 in
+ * retrieved web page content" is *content*, not a backend failure signal —
+ * it must never be routed through this classifier. The guarantee is
+ * structural (call-site discipline: only the catch-path message is ever
+ * passed in), not lexical — this function cannot itself tell content from a
+ * real backend rejection, since both are just strings.
+ */
+export function classifyBackendFailure(message: string): typeof BACKEND_BILLING_TAG | typeof BACKEND_AUTH_TAG | undefined {
+  if (BACKEND_BILLING_PATTERNS.some((re) => re.test(message))) return BACKEND_BILLING_TAG;
+  if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;
+  return undefined;
+}

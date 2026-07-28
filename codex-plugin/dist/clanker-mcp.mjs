@@ -3226,8 +3226,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path10) {
-      let input = path10;
+    function removeDotSegments(path11) {
+      let input = path11;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3479,8 +3479,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path10, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path10 && path10 !== "/" ? path10 : void 0;
+        const [path11, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path11 && path11 !== "/" ? path11 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -6873,12 +6873,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs9, exportName) {
+    function addFormats(ajv, list, fs10, exportName) {
       var _a;
       var _b;
       (_a = (_b = ajv.opts.code).formats) !== null && _a !== void 0 ? _a : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs9[f]);
+        ajv.addFormat(f, fs10[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -7364,8 +7364,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path10, errorMaps, issueData } = params;
-  const fullPath = [...path10, ...issueData.path || []];
+  const { data, path: path11, errorMaps, issueData } = params;
+  const fullPath = [...path11, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7481,11 +7481,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path10, key) {
+  constructor(parent, value, path11, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path10;
+    this._path = path11;
     this._key = key;
   }
   get path() {
@@ -11367,10 +11367,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path10) {
-  if (!path10)
+function getElementAtPath(obj, path11) {
+  if (!path11)
     return obj;
-  return path10.reduce((acc, key) => acc?.[key], obj);
+  return path11.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11690,11 +11690,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path10, issues) {
+function prefixIssues(path11, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path10);
+    iss.path.unshift(path11);
     return iss;
   });
 }
@@ -11831,7 +11831,7 @@ function treeifyError(error40, _mapper) {
     return issue2.message;
   };
   const result = { errors: [] };
-  const processError = (error41, path10 = []) => {
+  const processError = (error41, path11 = []) => {
     var _a, _b;
     for (const issue2 of error41.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
@@ -11841,7 +11841,7 @@ function treeifyError(error40, _mapper) {
       } else if (issue2.code === "invalid_element") {
         processError({ issues: issue2.issues }, issue2.path);
       } else {
-        const fullpath = [...path10, ...issue2.path];
+        const fullpath = [...path11, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -11871,9 +11871,9 @@ function treeifyError(error40, _mapper) {
   processError(error40);
   return result;
 }
-function toDotPath(path10) {
+function toDotPath(path11) {
   const segs = [];
-  for (const seg of path10) {
+  for (const seg of path11) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -27791,8 +27791,8 @@ function envInt(name, fallback) {
 
 // src/manager.ts
 import crypto from "node:crypto";
-import fs7 from "node:fs";
-import path8 from "node:path";
+import fs8 from "node:fs";
+import path9 from "node:path";
 
 // src/acp-client.ts
 import { spawn } from "node:child_process";
@@ -31429,17 +31429,57 @@ function writeContainedTextFile(target, requested, content) {
 }
 
 // src/backends.ts
-import fs2 from "node:fs";
+import fs3 from "node:fs";
 import { createRequire } from "node:module";
+import os3 from "node:os";
+import path4 from "node:path";
+import { fileURLToPath } from "node:url";
+
+// src/grok-diagnostics.ts
+import fs2 from "node:fs";
 import os2 from "node:os";
 import path3 from "node:path";
-import { fileURLToPath } from "node:url";
+function resolveGrokHome() {
+  return process.env.GROK_HOME ?? path3.join(os2.homedir(), ".grok");
+}
+var FAILURE_MSG_PATTERN = /inference_failed|terminal_failure/;
+function grokFailureDetail(turnStartMs, now = Date.now()) {
+  try {
+    const logPath = path3.join(resolveGrokHome(), "logs", "unified.jsonl");
+    const raw = fs2.readFileSync(logPath, "utf8");
+    const lines = raw.split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line || !FAILURE_MSG_PATTERN.test(line)) continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (typeof parsed !== "object" || parsed === null) continue;
+      const rec = parsed;
+      if (typeof rec.msg !== "string" || !FAILURE_MSG_PATTERN.test(rec.msg)) continue;
+      const ts = typeof rec.ts === "string" ? Date.parse(rec.ts) : NaN;
+      if (!Number.isFinite(ts) || ts < turnStartMs || ts > now) continue;
+      const statusCode = rec.ctx?.status_code;
+      const message = rec.ctx?.message;
+      if (statusCode === void 0 && message === void 0) continue;
+      return `Grok backend error \u2014 status_code=${statusCode ?? "?"} message=${message ?? "?"}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// src/backends.ts
 var nodeRequire = createRequire(import.meta.url);
 function resolveCodexAcpEntry() {
   const packagedEntry = fileURLToPath(new URL("./codex-acp.mjs", import.meta.url));
-  if (fs2.existsSync(packagedEntry)) return packagedEntry;
+  if (fs3.existsSync(packagedEntry)) return packagedEntry;
   const pkgJsonPath = nodeRequire.resolve("@agentclientprotocol/codex-acp/package.json");
-  return path3.join(path3.dirname(pkgJsonPath), "dist", "index.js");
+  return path4.join(path4.dirname(pkgJsonPath), "dist", "index.js");
 }
 function resolveGeminiAcpEntry() {
   const candidates = [
@@ -31447,7 +31487,7 @@ function resolveGeminiAcpEntry() {
     fileURLToPath(new URL("./gemini-acp.js", import.meta.url)),
     fileURLToPath(new URL("../plugin/dist/gemini-acp.mjs", import.meta.url))
   ];
-  const entry = candidates.find((candidate) => fs2.existsSync(candidate));
+  const entry = candidates.find((candidate) => fs3.existsSync(candidate));
   if (entry) return entry;
   throw new Error("Gemini ACP sidecar is missing; run `npm run bundle` before dispatching Clanker: Gemini");
 }
@@ -31459,18 +31499,18 @@ function requireGeminiWorkspaceSandbox() {
     throw new Error("Clanker: Gemini currently requires macOS sandbox-exec for a fail-closed workspace read-only boundary");
   }
   try {
-    fs2.accessSync("/usr/bin/sandbox-exec", fs2.constants.X_OK);
+    fs3.accessSync("/usr/bin/sandbox-exec", fs3.constants.X_OK);
   } catch {
     throw new Error("Clanker: Gemini requires executable /usr/bin/sandbox-exec for a fail-closed workspace read-only boundary");
   }
 }
 function resolveSystemCodexPath() {
   const searchPath = process.env.PATH ?? "";
-  for (const dir of searchPath.split(path3.delimiter)) {
+  for (const dir of searchPath.split(path4.delimiter)) {
     if (!dir) continue;
-    const candidate = path3.join(dir, "codex");
+    const candidate = path4.join(dir, "codex");
     try {
-      fs2.accessSync(candidate, fs2.constants.X_OK);
+      fs3.accessSync(candidate, fs3.constants.X_OK);
       return candidate;
     } catch {
     }
@@ -31479,12 +31519,12 @@ function resolveSystemCodexPath() {
 }
 function resolveSystemAgyPath() {
   const candidates = [
-    ...(process.env.PATH ?? "").split(path3.delimiter).filter(Boolean).map((dir) => path3.join(dir, "agy")),
-    path3.join(os2.homedir(), ".local", "bin", "agy")
+    ...(process.env.PATH ?? "").split(path4.delimiter).filter(Boolean).map((dir) => path4.join(dir, "agy")),
+    path4.join(os3.homedir(), ".local", "bin", "agy")
   ];
   for (const candidate of candidates) {
     try {
-      fs2.accessSync(candidate, fs2.constants.X_OK);
+      fs3.accessSync(candidate, fs3.constants.X_OK);
       return candidate;
     } catch {
     }
@@ -31595,6 +31635,7 @@ function buildSpawnSpec(lane, opts, runDir) {
       );
     }
     case "grok": {
+      env.GROK_HOME = resolveGrokHome();
       const args = [
         "--sandbox",
         opts.readOnly === true ? "read-only" : "workspace",
@@ -31625,8 +31666,8 @@ function buildSpawnSpec(lane, opts, runDir) {
       };
       if (opts.profile !== "kimi-crew") config2.agent = { [profile]: opencodeClankerAgent(opts.readOnly === true) };
       if (model) config2.model = model;
-      const cfgPath = path3.join(runDir, "opencode-config.json");
-      fs2.writeFileSync(cfgPath, JSON.stringify(config2, null, 2));
+      const cfgPath = path4.join(runDir, "opencode-config.json");
+      fs3.writeFileSync(cfgPath, JSON.stringify(config2, null, 2));
       env.OPENCODE_CONFIG = cfgPath;
       env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config2);
       if (opts.profile !== "kimi-crew") {
@@ -31654,21 +31695,21 @@ function buildSpawnSpec(lane, opts, runDir) {
 }
 
 // src/foreign.ts
+import fs6 from "node:fs";
+import path7 from "node:path";
+
+// src/run.ts
 import fs5 from "node:fs";
 import path6 from "node:path";
 
-// src/run.ts
-import fs4 from "node:fs";
-import path5 from "node:path";
-
 // src/ledger.ts
-import fs3 from "node:fs";
-import os3 from "node:os";
-import path4 from "node:path";
+import fs4 from "node:fs";
+import os4 from "node:os";
+import path5 from "node:path";
 var rawLedgerDirEnv = process.env.CLANKER_LEDGER_DIR?.trim();
-var LEDGER_DIR = rawLedgerDirEnv ? rawLedgerDirEnv : path4.join(os3.homedir(), ".agents", "dispatch-ledger");
-var LEDGER_PATH = path4.join(LEDGER_DIR, "ledger.jsonl");
-var HOOK_ERRORS_PATH = path4.join(LEDGER_DIR, "hook_errors.log");
+var LEDGER_DIR = rawLedgerDirEnv ? rawLedgerDirEnv : path5.join(os4.homedir(), ".agents", "dispatch-ledger");
+var LEDGER_PATH = path5.join(LEDGER_DIR, "ledger.jsonl");
+var HOOK_ERRORS_PATH = path5.join(LEDGER_DIR, "hook_errors.log");
 var PROMPT_HEAD_CHAR_BUDGET = 200;
 var ERROR_CLASS_CHAR_BUDGET = 200;
 var DEFAULT_AGENT_PROFILE = "worker";
@@ -31701,17 +31742,17 @@ function buildLedgerRow(input) {
 }
 function appendLedgerRow(input) {
   try {
-    fs3.mkdirSync(LEDGER_DIR, { recursive: true });
-    fs3.appendFileSync(LEDGER_PATH, JSON.stringify(buildLedgerRow(input)) + "\n");
+    fs4.mkdirSync(LEDGER_DIR, { recursive: true });
+    fs4.appendFileSync(LEDGER_PATH, JSON.stringify(buildLedgerRow(input)) + "\n");
   } catch (error40) {
     logHookError(input.id, error40);
   }
 }
 function logHookError(runId, error40) {
   try {
-    fs3.mkdirSync(LEDGER_DIR, { recursive: true });
+    fs4.mkdirSync(LEDGER_DIR, { recursive: true });
     const message = error40 instanceof Error ? error40.stack ?? error40.message : String(error40);
-    fs3.appendFileSync(
+    fs4.appendFileSync(
       HOOK_ERRORS_PATH,
       `[${(/* @__PURE__ */ new Date()).toISOString()}] native-ledger-writer append failed for run '${runId}': ${message}
 `
@@ -31787,6 +31828,14 @@ var LaneRun = class {
   cancellationRequested = false;
   terminalAt;
   startedAt;
+  /**
+   * Wall-clock time the CURRENT turn began (set fresh on every beginTurn
+   * call, unlike `startedAt` above which is job-level and set once via
+   * `??=`). Exists so grok-diagnostics.ts's log tail (issue #9) can bound
+   * its search to the failing turn's own window instead of the whole job's
+   * lifetime.
+   */
+  turnStartedAt;
   retries = 0;
   corrections = 0;
   forcedKill = false;
@@ -31833,6 +31882,7 @@ var LaneRun = class {
   beginTurn(prompt, correction = false) {
     if (this.isTerminalTurn() && this.sessionClosed) return;
     this.startedAt ??= Date.now();
+    this.turnStartedAt = Date.now();
     this.cancellationRequested = false;
     this.terminalAt = void 0;
     this.stopReason = void 0;
@@ -31850,6 +31900,10 @@ var LaneRun = class {
     this.pushDigest(`\u25B6 turn ${this.turnsCount}: ${truncate(prompt, 160)}`, true);
     this.writeEvent({ t: "turn_start", turn: this.turnsCount, prompt });
     this.persistTelemetry();
+  }
+  /** Wall-clock start of the current turn (see `turnStartedAt` field doc). */
+  get turnStartedAtMs() {
+    return this.turnStartedAt;
   }
   completeTurn() {
     if (this.isTerminalTurn()) return;
@@ -32181,7 +32235,7 @@ var LaneRun = class {
    */
   /** Absolute path of this run's terminal-judgment artifact (see RESULT_FILE). */
   resultPath() {
-    return path5.join(this.runDir, RESULT_FILE);
+    return path6.join(this.runDir, RESULT_FILE);
   }
   /**
    * Size in bytes of an already-written `result.md`, or 0 when it is missing or
@@ -32191,7 +32245,7 @@ var LaneRun = class {
    */
   resultBytes() {
     try {
-      return fs4.statSync(this.resultPath()).size;
+      return fs5.statSync(this.resultPath()).size;
     } catch {
       return 0;
     }
@@ -32232,12 +32286,12 @@ var LaneRun = class {
     }
     lines.push(RESULT_FINAL_MESSAGE_HEADING, "", this.lastFinalMessage, "");
     try {
-      fs4.mkdirSync(this.runDir, { recursive: true });
-      fs4.writeFileSync(tmp, lines.join("\n"));
-      fs4.renameSync(tmp, target);
+      fs5.mkdirSync(this.runDir, { recursive: true });
+      fs5.writeFileSync(tmp, lines.join("\n"));
+      fs5.renameSync(tmp, target);
     } catch (error40) {
       try {
-        fs4.rmSync(tmp, { force: true });
+        fs5.rmSync(tmp, { force: true });
       } catch {
       }
       console.error(
@@ -32278,14 +32332,14 @@ var LaneRun = class {
     });
   }
   persistTelemetry() {
-    const target = path5.join(this.runDir, "telemetry.json");
+    const target = path6.join(this.runDir, "telemetry.json");
     const tmp = `${target}.${process.pid}.tmp`;
     try {
-      fs4.writeFileSync(tmp, JSON.stringify(this.telemetry(), null, 2));
-      fs4.renameSync(tmp, target);
+      fs5.writeFileSync(tmp, JSON.stringify(this.telemetry(), null, 2));
+      fs5.renameSync(tmp, target);
     } catch (error40) {
       try {
-        fs4.rmSync(tmp, { force: true });
+        fs5.rmSync(tmp, { force: true });
       } catch {
       }
       console.error(`[clanker] telemetry persistence failed for run '${this.id}' at '${target}': ${error40 instanceof Error ? error40.message : String(error40)}`);
@@ -32346,13 +32400,13 @@ var LaneRun = class {
    */
   appendToStream(file2, streamField, line) {
     if (this.sessionClosed) {
-      fs4.mkdirSync(this.runDir, { recursive: true });
-      fs4.appendFileSync(path5.join(this.runDir, file2), line);
+      fs5.mkdirSync(this.runDir, { recursive: true });
+      fs5.appendFileSync(path6.join(this.runDir, file2), line);
       return;
     }
     if (!this[streamField]) {
-      fs4.mkdirSync(this.runDir, { recursive: true });
-      this[streamField] = fs4.createWriteStream(path5.join(this.runDir, file2), { flags: "a" });
+      fs5.mkdirSync(this.runDir, { recursive: true });
+      this[streamField] = fs5.createWriteStream(path6.join(this.runDir, file2), { flags: "a" });
     }
     this[streamField].write(line);
   }
@@ -32404,7 +32458,7 @@ var LaneRun = class {
   }
   relToCwd(p) {
     try {
-      const rel = path5.relative(this.cwd, p);
+      const rel = path6.relative(this.cwd, p);
       return rel && !rel.startsWith("..") ? rel : p;
     } catch {
       return p;
@@ -32425,18 +32479,18 @@ function truncate(s, max) {
 
 // src/foreign.ts
 function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
-  const runDir = path6.join(runsRoot, id);
+  const runDir = path7.join(runsRoot, id);
   let telemetry;
   try {
-    telemetry = JSON.parse(fs5.readFileSync(path6.join(runDir, "telemetry.json"), "utf8"));
+    telemetry = JSON.parse(fs6.readFileSync(path7.join(runDir, "telemetry.json"), "utf8"));
   } catch {
     return null;
   }
   let newestMtimeMs = 0;
   try {
-    for (const entry of fs5.readdirSync(runDir)) {
+    for (const entry of fs6.readdirSync(runDir)) {
       try {
-        newestMtimeMs = Math.max(newestMtimeMs, fs5.statSync(path6.join(runDir, entry)).mtimeMs);
+        newestMtimeMs = Math.max(newestMtimeMs, fs6.statSync(path7.join(runDir, entry)).mtimeMs);
       } catch {
       }
     }
@@ -32444,7 +32498,7 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
   }
   let resultPath;
   try {
-    if (fs5.statSync(path6.join(runDir, RESULT_FILE)).size > 0) resultPath = path6.join(runDir, RESULT_FILE);
+    if (fs6.statSync(path7.join(runDir, RESULT_FILE)).size > 0) resultPath = path7.join(runDir, RESULT_FILE);
   } catch {
   }
   return {
@@ -32469,7 +32523,7 @@ function scanForeignRuns(options = {}) {
   const now = options.now ?? Date.now();
   let ids;
   try {
-    ids = fs5.readdirSync(runsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+    ids = fs6.readdirSync(runsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
   } catch {
     return [];
   }
@@ -32513,6 +32567,19 @@ var CAPACITY_TRANSIENT_PATTERNS = [
 ];
 function isCapacityTransient(message) {
   return CAPACITY_TRANSIENT_PATTERNS.some((re) => re.test(message));
+}
+var BACKEND_BILLING_TAG = "CLANKER-BACKEND-BILLING";
+var BACKEND_AUTH_TAG = "CLANKER-BACKEND-AUTH";
+var BACKEND_BILLING_PATTERNS = [
+  /\b402\b|balance|billing|payment required|usage balance exhausted|insufficient credit/i
+];
+var BACKEND_AUTH_PATTERNS = [
+  /\b40[13]\b|unauthorized|forbidden|invalid api key|authentication/i
+];
+function classifyBackendFailure(message) {
+  if (BACKEND_BILLING_PATTERNS.some((re) => re.test(message))) return BACKEND_BILLING_TAG;
+  if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;
+  return void 0;
 }
 
 // src/types.ts
@@ -32773,8 +32840,8 @@ function hostLaneBlockedReason(host, lane) {
 
 // src/worktree.ts
 import { execFile } from "node:child_process";
-import fs6 from "node:fs";
-import path7 from "node:path";
+import fs7 from "node:fs";
+import path8 from "node:path";
 import { promisify } from "node:util";
 var exec = promisify(execFile);
 async function git(cwd, args) {
@@ -32783,7 +32850,7 @@ async function git(cwd, args) {
 }
 function deriveWorktreePath(branch) {
   const safe = branch.replace(/[^A-Za-z0-9._-]/g, "-");
-  return path7.join(WORKTREES_ROOT, safe);
+  return path8.join(WORKTREES_ROOT, safe);
 }
 async function isGitWorkTree(cwd) {
   try {
@@ -32827,11 +32894,11 @@ async function resolveBaseRef(targetRepo) {
 }
 async function createWorktree(branch, targetRepo = BASE_REPO) {
   const wtPath = deriveWorktreePath(branch);
-  if (fs6.existsSync(wtPath)) {
+  if (fs7.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
   const baseRef = await resolveBaseRef(targetRepo);
-  fs6.mkdirSync(WORKTREES_ROOT, { recursive: true });
+  fs7.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
   return wtPath;
 }
@@ -32856,16 +32923,16 @@ async function holdsUnmergedWork(worktreePath, targetRepo) {
   }
 }
 function realpathBestEffort(p) {
-  let cur = path7.resolve(p);
+  let cur = path8.resolve(p);
   const tail = [];
   for (; ; ) {
     try {
-      const real = fs6.realpathSync(cur);
-      return tail.length ? path7.join(real, ...tail) : real;
+      const real = fs7.realpathSync(cur);
+      return tail.length ? path8.join(real, ...tail) : real;
     } catch {
-      const parent = path7.dirname(cur);
-      if (parent === cur) return path7.resolve(p);
-      tail.unshift(path7.basename(cur));
+      const parent = path8.dirname(cur);
+      if (parent === cur) return path8.resolve(p);
+      tail.unshift(path8.basename(cur));
       cur = parent;
     }
   }
@@ -32873,7 +32940,7 @@ function realpathBestEffort(p) {
 function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
   const wt = realpathBestEffort(worktreePath);
   const repo = realpathBestEffort(targetRepo);
-  if (wt === repo || wt.startsWith(repo + path7.sep) || repo.startsWith(wt + path7.sep)) {
+  if (wt === repo || wt.startsWith(repo + path8.sep) || repo.startsWith(wt + path8.sep)) {
     throw new Error(
       `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT outside the repo)`
     );
@@ -32979,14 +33046,14 @@ function validateDispatchParams(params, minted, host) {
   return { params, profile, readOnly, requiresIsolation };
 }
 function writeTelemetryStub(runDir, stub) {
-  const target = path8.join(runDir, "telemetry.json");
+  const target = path9.join(runDir, "telemetry.json");
   const tmp = `${target}.${process.pid}.tmp`;
   try {
-    fs7.writeFileSync(tmp, JSON.stringify(stub, null, 2));
-    fs7.renameSync(tmp, target);
+    fs8.writeFileSync(tmp, JSON.stringify(stub, null, 2));
+    fs8.renameSync(tmp, target);
   } catch (error40) {
     try {
-      fs7.rmSync(tmp, { force: true });
+      fs8.rmSync(tmp, { force: true });
     } catch {
     }
     console.error(`[clanker] telemetry stub write failed for run dir '${runDir}': ${errMessage(error40)}`);
@@ -33089,13 +33156,13 @@ var LaneManager = class {
     const validated = validateDispatchParams(params, minted, this.host);
     params = validated.params;
     const { profile, readOnly } = validated;
-    let targetRepo = path8.resolve(this.baseRepo);
+    let targetRepo = path9.resolve(this.baseRepo);
     if (params.worktree && params.cwd) {
       targetRepo = await resolveTargetRepo(params.cwd);
     }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
-    const runDir = path8.join(this.runsRoot, id);
-    fs7.mkdirSync(runDir, { recursive: true });
+    const runDir = path9.join(this.runsRoot, id);
+    fs8.mkdirSync(runDir, { recursive: true });
     const stub = {
       host: this.host,
       lane: params.lane,
@@ -33230,7 +33297,7 @@ var LaneManager = class {
     await this.close(run.id);
     run.failTurn(
       outcome.message,
-      classifyTurnFailure({ message: outcome.message, turnsCount: run.turnsCount, toolCalls: run.toolCalls() })
+      classifyTurnFailure({ message: outcome.message, turnsCount: run.turnsCount, toolCalls: run.toolCalls() }) ?? classifyBackendFailure(outcome.message)
     );
   }
   /**
@@ -33316,8 +33383,8 @@ var LaneManager = class {
       message: outcome.message,
       turnsCount: run.turnsCount,
       toolCalls: run.toolCalls()
-    });
-    if (attempt === 1 && failureClass !== INFRA_FAILURE_TAG && isCapacityTransient(outcome.message)) {
+    }) ?? classifyBackendFailure(outcome.message);
+    if (attempt === 1 && failureClass === void 0 && isCapacityTransient(outcome.message)) {
       await this.killConnection(run.id);
       await this.retryAfterBackoff(run, outcome.message, attempt + 1);
       return this.attemptInitialTurn(run, spec, prompt, attempt + 1);
@@ -33370,13 +33437,18 @@ var LaneManager = class {
           );
         }
         if (outcome.kind === "exit" || outcome.kind === "closed") {
+          const grokDetail = run.lane === "grok" && run.turnStartedAtMs !== void 0 ? grokFailureDetail(run.turnStartedAtMs) : null;
+          const grokDetailSuffix = grokDetail ? `
+${grokDetail}` : "";
           const info = outcome.kind === "exit" ? outcome.info : await Promise.race([conn.exited, createTimeout(500).promise.then(() => null)]);
           if (info) {
             const { code, signal, stderr } = info;
-            throw new Error(`lane process exited mid-turn (code=${code} signal=${signal})${stderrSuffix(stderr)}`);
+            throw new Error(
+              `lane process exited mid-turn (code=${code} signal=${signal})${grokDetailSuffix}${stderrSuffix(stderr)}`
+            );
           }
           throw new Error(
-            `ACP connection closed mid-turn: ${outcome.kind === "closed" ? errMessage(outcome.err) : "process exited"}` + stderrSuffix(conn.stderr())
+            `ACP connection closed mid-turn: ${outcome.kind === "closed" ? errMessage(outcome.err) : "process exited"}${grokDetailSuffix}${stderrSuffix(conn.stderr())}`
           );
         }
         if (outcome.m.kind === "stop") {
@@ -33861,8 +33933,8 @@ function registerTools(server, manager) {
 }
 
 // src/retention.ts
-import fs8 from "node:fs";
-import path9 from "node:path";
+import fs9 from "node:fs";
+import path10 from "node:path";
 function sweepRunStreams(options = {}) {
   const runsRoot = options.runsRoot ?? RUNS_ROOT;
   const ttlMs = options.ttlMs ?? RUN_STREAM_TTL_MS;
@@ -33871,21 +33943,21 @@ function sweepRunStreams(options = {}) {
   if (!(ttlMs > 0)) return report;
   let entries;
   try {
-    entries = fs8.readdirSync(runsRoot, { withFileTypes: true });
+    entries = fs9.readdirSync(runsRoot, { withFileTypes: true });
   } catch {
     return report;
   }
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     report.scanned++;
-    const runDir = path9.join(runsRoot, entry.name);
+    const runDir = path10.join(runsRoot, entry.name);
     const streams = [];
     let newestMtimeMs = 0;
     for (const name of RUN_STREAM_FILES) {
-      const file2 = path9.join(runDir, name);
+      const file2 = path10.join(runDir, name);
       let stat;
       try {
-        stat = fs8.statSync(file2);
+        stat = fs9.statSync(file2);
       } catch {
         continue;
       }
@@ -33898,7 +33970,7 @@ function sweepRunStreams(options = {}) {
     let swept = 0;
     for (const stream of streams) {
       try {
-        fs8.rmSync(stream.file);
+        fs9.rmSync(stream.file);
         report.sweptFiles++;
         report.bytesFreed += stream.size;
         swept++;
@@ -33915,14 +33987,14 @@ function sweepRunStreams(options = {}) {
 }
 function isEmptyDir(dir) {
   try {
-    return fs8.readdirSync(dir).length === 0;
+    return fs9.readdirSync(dir).length === 0;
   } catch {
     return false;
   }
 }
 function removeDir(dir) {
   try {
-    fs8.rmdirSync(dir);
+    fs9.rmdirSync(dir);
     return true;
   } catch {
     return false;

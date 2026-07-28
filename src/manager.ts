@@ -24,7 +24,8 @@ import {
 } from "./constants.js";
 import { buildSpawnSpec } from "./backends.js";
 import { foreignControlRefusal, readForeignRun, scanForeignRuns } from "./foreign.js";
-import { classifyTurnFailure, INFRA_FAILURE_TAG, isCapacityTransient } from "./failure-classifier.js";
+import { classifyBackendFailure, classifyTurnFailure, isCapacityTransient } from "./failure-classifier.js";
+import { grokFailureDetail } from "./grok-diagnostics.js";
 import { resolveProfileDispatch, type ProfileDispatchInput } from "./profiles.js";
 import { LaneRun } from "./run.js";
 import type {
@@ -598,7 +599,8 @@ export class LaneManager {
     await this.close(run.id);
     run.failTurn(
       outcome.message,
-      classifyTurnFailure({ message: outcome.message, turnsCount: run.turnsCount, toolCalls: run.toolCalls() }),
+      classifyTurnFailure({ message: outcome.message, turnsCount: run.turnsCount, toolCalls: run.toolCalls() }) ??
+        classifyBackendFailure(outcome.message),
     );
   }
 
@@ -684,12 +686,18 @@ export class LaneManager {
     if (run.isTerminalTurn()) return;
     if (outcome.ok) return;
 
-    const failureClass = classifyTurnFailure({
-      message: outcome.message,
-      turnsCount: run.turnsCount,
-      toolCalls: run.toolCalls(),
-    });
-    if (attempt === 1 && failureClass !== INFRA_FAILURE_TAG && isCapacityTransient(outcome.message)) {
+    // classifyBackendFailure (CLANKER-BACKEND-BILLING / -AUTH) is equally
+    // permanent as CLANKER-INFRA-FAILURE — an empty account balance or a
+    // rejected credential does not self-heal on retry — so any assigned
+    // failureClass (not just INFRA_FAILURE_TAG) blocks the capacity retry
+    // below.
+    const failureClass =
+      classifyTurnFailure({
+        message: outcome.message,
+        turnsCount: run.turnsCount,
+        toolCalls: run.toolCalls(),
+      }) ?? classifyBackendFailure(outcome.message);
+    if (attempt === 1 && failureClass === undefined && isCapacityTransient(outcome.message)) {
       // Kill the half-dead process/connection (NOT run.close() — that would
       // also reap the worktree, which the retry needs to reuse) so the retry
       // spawns a clean process against the backend.
@@ -756,6 +764,18 @@ export class LaneManager {
           );
         }
         if (outcome.kind === "exit" || outcome.kind === "closed") {
+          // Issue #9: Grok's ACP bridge swallows the real backend error
+          // (e.g. HTTP 402 balance-exhausted) into a bare -32603 "Internal
+          // error" that never reaches stderr — the real status_code/message
+          // only lives in Grok's own unified.jsonl log. When this is the
+          // grok lane, tail that log for the failing turn's window and
+          // splice the result in before the (often empty, for exactly this
+          // reason) stderr tail — it carries more signal.
+          const grokDetail =
+            run.lane === "grok" && run.turnStartedAtMs !== undefined
+              ? grokFailureDetail(run.turnStartedAtMs)
+              : null;
+          const grokDetailSuffix = grokDetail ? `\n${grokDetail}` : "";
           // Prefer the concrete exit info (code/signal/stderr); the ACP stream
           // often closes a beat before the exit event, so wait briefly for it.
           const info =
@@ -764,7 +784,9 @@ export class LaneManager {
               : await Promise.race([conn.exited, createTimeout(500).promise.then(() => null)]);
           if (info) {
             const { code, signal, stderr } = info;
-            throw new Error(`lane process exited mid-turn (code=${code} signal=${signal})${stderrSuffix(stderr)}`);
+            throw new Error(
+              `lane process exited mid-turn (code=${code} signal=${signal})${grokDetailSuffix}${stderrSuffix(stderr)}`,
+            );
           }
           // #37 B1: no exit info arrived within the 500ms grace above — the
           // stream closed but the process's own exit event is still pending.
@@ -774,7 +796,7 @@ export class LaneManager {
           // branch above reads from `info.stderr`.
           throw new Error(
             `ACP connection closed mid-turn: ${outcome.kind === "closed" ? errMessage(outcome.err) : "process exited"}` +
-              stderrSuffix(conn.stderr()),
+              `${grokDetailSuffix}${stderrSuffix(conn.stderr())}`,
           );
         }
         if (outcome.m.kind === "stop") {

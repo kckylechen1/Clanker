@@ -135,6 +135,14 @@ export class LaneRun {
   cancellationRequested = false;
   private terminalAt?: number;
   private startedAt?: number;
+  /**
+   * Wall-clock time the CURRENT turn began (set fresh on every beginTurn
+   * call, unlike `startedAt` above which is job-level and set once via
+   * `??=`). Exists so grok-diagnostics.ts's log tail (issue #9) can bound
+   * its search to the failing turn's own window instead of the whole job's
+   * lifetime.
+   */
+  private turnStartedAt?: number;
   private retries = 0;
   private corrections = 0;
   private forcedKill = false;
@@ -203,6 +211,7 @@ export class LaneRun {
   beginTurn(prompt: string, correction = false): void {
     if (this.isTerminalTurn() && this.sessionClosed) return;
     this.startedAt ??= Date.now();
+    this.turnStartedAt = Date.now();
     this.cancellationRequested = false;
     this.terminalAt = undefined;
     this.stopReason = undefined;
@@ -220,6 +229,11 @@ export class LaneRun {
     this.pushDigest(`▶ turn ${this.turnsCount}: ${truncate(prompt, 160)}`, true);
     this.writeEvent({ t: "turn_start", turn: this.turnsCount, prompt });
     this.persistTelemetry();
+  }
+
+  /** Wall-clock start of the current turn (see `turnStartedAt` field doc). */
+  get turnStartedAtMs(): number | undefined {
+    return this.turnStartedAt;
   }
 
   completeTurn(): void {
