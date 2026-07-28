@@ -1,20 +1,20 @@
 {
   "name": "clanker",
-  "version": "0.3.8",
-  "description": "Codex dispatcher adapter for external Opencode, Grok, and read-only Gemini Clankers over ACP.",
+  "version": "0.3.9",
+  "description": "Codex dispatcher adapter for external Opencode, Grok, Cursor, and read-only Gemini Clankers over ACP.",
   "author": {
     "name": "kckylechen1"
   },
   "homepage": "https://github.com/kckylechen1/Clanker",
   "repository": "https://github.com/kckylechen1/Clanker",
   "license": "MIT",
-  "keywords": ["acp", "dispatch", "opencode", "grok", "gemini", "research", "glm", "deepseek", "kimi"],
+  "keywords": ["acp", "dispatch", "opencode", "grok", "gemini", "cursor", "research", "glm", "deepseek", "kimi"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Clanker",
     "shortDescription": "Dispatch external coding agents without self-dispatch",
-    "longDescription": "Dispatch bounded read-only or isolated write tasks from Codex to external Opencode and Grok workers, plus read-only Gemini reconnaissance, through the host-aware Clanker ACP runtime.",
+    "longDescription": "Dispatch bounded read-only or isolated write tasks from Codex to external Opencode, Grok, and Cursor workers, plus read-only Gemini reconnaissance, through the host-aware Clanker ACP runtime.",
     "developerName": "kckylechen1",
     "category": "Developer Tools",
     "capabilities": ["Interactive", "Read", "Write"],

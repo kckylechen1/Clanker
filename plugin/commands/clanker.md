@@ -11,9 +11,10 @@ Dispatch exactly one `Agent(subagent_type=...)`: the seat that owns the requeste
 | `codex-review` | `clanker:codex` |
 | `oc-review` | `clanker:oc` |
 | `gemini-recon` / `gemini-research` | `clanker:gemini` |
+| `cursor-review` | `clanker:cursor` |
 | `grok-review` | `clanker:grok` (dormant: HTTP 402) |
-| `codex-write` / `oc-write` / `grok-write` | `clanker:writer` |
+| `codex-write` / `oc-write` / `cursor-write` / `grok-write` | `clanker:writer` |
 | `oc-glm-write` | `clanker:supervisor` |
 | `oc-kimi-crew` | `clanker:crew` |
 
-Pass only the free parameters that profile accepts: always `prompt`, plus `cwd`/`effort`, plus `worktree` for write profiles and `model` where the profile requires an explicit one. Never ask for a lane, a read-only flag, a sandbox, or a welded model — those parameters do not exist on the seat's tool.
+Pass only the free parameters that profile accepts: always `prompt`, plus `cwd`/`effort`, plus `worktree` — mandatory for every write profile, and **also accepted by a read-only profile whose isolation is optional** (`codex-review`, `oc-review`, `grok-review`, `cursor-review`): name one when the review has to run build or test tooling, omit it to read the working checkout in place. Plus `model` where the profile requires an explicit one or accepts an optional one (the `cursor-*` pair takes an optional model and otherwise runs its pinned default). Never ask for a lane, a read-only flag, a sandbox, or a welded model — those parameters do not exist on the seat's tool.

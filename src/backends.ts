@@ -25,6 +25,16 @@
  *           process and workspace lifecycle ownership.
  *           opencode has no ACP-mode reasoning-effort knob (that is the
  *           `--variant` run flag), so effort warns.
+ * - cursor  `cursor-agent --print --output-format stream-json` is not ACP, but
+ *           it is a real event stream, so the lane ships its own sidecar
+ *           (`src/cursor-acp.ts`, bundled to `dist/cursor-acp.mjs`) that
+ *           projects those events onto ACP updates — the same trick the gemini
+ *           lane plays on `agy`. Everything the lane needs is passed through
+ *           the sidecar's environment: CLANKER_CURSOR_MODE (the read/write
+ *           boundary), CLANKER_CURSOR_MODEL, CLANKER_CURSOR_AGENT_PATH, and an
+ *           optional CLANKER_CURSOR_PRINT_TIMEOUT. Auth is Cursor's own login
+ *           state under ~/.cursor, like opencode's credential store — Clanker
+ *           holds nothing.
  * - codex   `@agentclientprotocol/codex-acp` as a pinned build dependency,
  *           packaged into each plugin as a self-contained `dist/codex-acp.mjs`
  *           sidecar and spawned directly with Node instead of
@@ -96,7 +106,14 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_CODEX_EFFORT, DEFAULT_CODEX_MODEL, isGlmModel, resolveOcModel } from "./constants.js";
+import {
+  DEFAULT_CODEX_EFFORT,
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CURSOR_MODEL,
+  isGlmModel,
+  resolveCursorModel,
+  resolveOcModel,
+} from "./constants.js";
 import { resolveGrokHome } from "./grok-diagnostics.js";
 import { resolveNodeBinary } from "./node-binary.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "./types.js";
@@ -124,6 +141,17 @@ function resolveGeminiAcpEntry(): string {
   const entry = candidates.find((candidate) => fs.existsSync(candidate));
   if (entry) return entry;
   throw new Error("Gemini ACP sidecar is missing; run `npm run bundle` before dispatching Clanker: Gemini");
+}
+
+function resolveCursorAcpEntry(): string {
+  const candidates = [
+    fileURLToPath(new URL("./cursor-acp.mjs", import.meta.url)),
+    fileURLToPath(new URL("./cursor-acp.js", import.meta.url)),
+    fileURLToPath(new URL("../plugin/dist/cursor-acp.mjs", import.meta.url)),
+  ];
+  const entry = candidates.find((candidate) => fs.existsSync(candidate));
+  if (entry) return entry;
+  throw new Error("Cursor ACP sidecar is missing; run `npm run bundle` before dispatching Clanker: Cursor");
 }
 
 function isGeminiModel(model: string): boolean {
@@ -172,9 +200,21 @@ function resolveSystemCodexPath(): string {
 }
 
 function resolveSystemAgyPath(): string {
+  return resolveLocalBinPath("agy");
+}
+
+/**
+ * Resolve a user-installed CLI the same way for every lane that needs one:
+ * PATH first, then `~/.local/bin` (where both `agy` and `cursor-agent` are
+ * installed on this machine). The fallback matters because the PATH this MCP
+ * server inherits is sometimes minimal — the hazard acp-client.ts's PATH
+ * comment already flags. Returning the bare name when nothing is found keeps
+ * the failure as the spawn's own ENOENT rather than a swallowed one here.
+ */
+function resolveLocalBinPath(binary: string): string {
   const candidates = [
-    ...(process.env.PATH ?? "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, "agy")),
-    path.join(os.homedir(), ".local", "bin", "agy"),
+    ...(process.env.PATH ?? "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, binary)),
+    path.join(os.homedir(), ".local", "bin", binary),
   ];
   for (const candidate of candidates) {
     try {
@@ -184,7 +224,7 @@ function resolveSystemAgyPath(): string {
       /* not here, keep looking */
     }
   }
-  return "agy";
+  return binary;
 }
 
 interface LaneCapabilities {
@@ -199,6 +239,12 @@ const CAPS: Record<LaneName, LaneCapabilities> = {
   opencode: { model: true, effort: false, sandbox: false },
   grok: { model: true, effort: true, sandbox: false },
   gemini: { model: true, effort: true, sandbox: false },
+  // cursor has no reasoning-effort flag at all: the effort tier is baked into
+  // the model id (`gpt-5.3-codex-high` vs `-xhigh`), so an effort override has
+  // nowhere to go and warns. Its `--sandbox enabled|disabled` is a boolean of
+  // its own, not codex-acp's three-tier CodexSandboxMode, so it is not exposed
+  // through that option either — the read-only lane sets it unconditionally.
+  cursor: { model: true, effort: false, sandbox: false },
 };
 
 /**
@@ -216,6 +262,9 @@ const REQUIRED_ENV: Record<Exclude<LaneName, "opencode">, string[]> = {
   codex: [],
   grok: [],
   gemini: [],
+  // Cursor holds its own login state under ~/.cursor (the observed init event
+  // reports `apiKeySource: "login"`), so Clanker never carries a secret for it.
+  cursor: [],
 };
 
 /** GLM is the only opencode-served model that needs a vault-sourced secret. */
@@ -325,6 +374,37 @@ export function buildSpawnSpec(
   }
 
   switch (lane) {
+    case "cursor": {
+      // Mode IS the read/write boundary for this lane, so it is derived from
+      // the welded readOnly and never taken from the caller. The one operator
+      // degree of freedom is WHICH read-only mode: `plan` and `ask` are both
+      // read-only in cursor-agent's own model, so honoring an override between
+      // them cannot widen anything, while a write dispatch stays `write` and a
+      // read-only one can never become it.
+      const mode = opts.readOnly === true
+        ? (process.env.CLANKER_CURSOR_MODE?.trim() === "plan" ? "plan" : "ask")
+        : "write";
+      env.CLANKER_CURSOR_MODE = mode;
+      // Aliases resolve here, in the same place run.ts computes resolved_model
+      // from, so telemetry and argv are one computation rather than two.
+      env.CLANKER_CURSOR_MODEL = resolveCursorModel(opts.model) || DEFAULT_CURSOR_MODEL;
+      env.CLANKER_CURSOR_AGENT_PATH =
+        process.env.CLANKER_CURSOR_AGENT_PATH ?? resolveLocalBinPath("cursor-agent");
+      // Only forward an EXPLICIT operator override. The per-mode defaults live
+      // solely in cursor-acp.ts; shadowing them with a second default here
+      // would mean the sidecar never sees the var unset and its own defaults
+      // become dead code on the real dispatch path (#13).
+      if (process.env.CLANKER_CURSOR_PRINT_TIMEOUT) {
+        env.CLANKER_CURSOR_PRINT_TIMEOUT = process.env.CLANKER_CURSOR_PRINT_TIMEOUT;
+      }
+      return wrapWithVaultExec(
+        // resolveNodeBinary(), not process.execPath: this server can outlive
+        // the path it was launched from (#37).
+        { command: resolveNodeBinary(), args: [resolveCursorAcpEntry()], env, warnings },
+        requiredEnvFor(lane, opts),
+      );
+    }
+
     case "gemini": {
       if (opts.readOnly !== true) {
         throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");

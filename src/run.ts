@@ -18,7 +18,13 @@ import type {
   ToolCallLocation,
   ToolKind,
 } from "@agentclientprotocol/sdk";
-import { DIGEST_CHAR_BUDGET, FINAL_MESSAGE_CHAR_BUDGET, resolveOcModel } from "./constants.js";
+import {
+  DEFAULT_CURSOR_MODEL,
+  DIGEST_CHAR_BUDGET,
+  FINAL_MESSAGE_CHAR_BUDGET,
+  resolveCursorModel,
+  resolveOcModel,
+} from "./constants.js";
 import { appendLedgerRow } from "./ledger.js";
 import type {
   LaneName,
@@ -614,9 +620,17 @@ export class LaneRun {
     this.persistTelemetry();
   }
   telemetry(): RunTelemetry {
+    // resolved_model is "what Clanker decided to run", the value observed_model
+    // is compared against — so each lane resolves it the same way its backend
+    // does. cursor mirrors backends.ts exactly: alias expansion, then the
+    // lane's pinned default when the caller named nothing.
     const resolved = this.lane === "opencode"
       ? (resolveOcModel(this.requestOpts.model) ?? null)
-      : this.lane === "grok" ? (this.requestOpts.model ?? "grok-4.5") : (this.requestOpts.model ?? null);
+      : this.lane === "grok"
+        ? (this.requestOpts.model ?? "grok-4.5")
+        : this.lane === "cursor"
+          ? (resolveCursorModel(this.requestOpts.model) || DEFAULT_CURSOR_MODEL)
+          : (this.requestOpts.model ?? null);
     return {
       host: this.host, requested_lane: this.lane, actual_lane: this.lane,
       requested_model: this.requestOpts.model, resolved_model: resolved,

@@ -6,7 +6,7 @@ import { DISPATCH_PROFILES } from "../src/profiles.js";
 import type { LaneManager } from "../src/manager.js";
 import { registerTools } from "../src/tools.js";
 
-const ALL_SEATS = ["codex", "oc", "gemini", "grok", "crew", "writer", "supervisor", "watch"];
+const ALL_SEATS = ["codex", "oc", "gemini", "grok", "cursor", "crew", "writer", "supervisor", "watch"];
 
 /** Tool names the server really registers for `host`, read off registerTools itself. */
 function registeredTools(host: string): Set<string> {
@@ -25,6 +25,8 @@ const seatFor: Record<string, string> = {
   "oc-kimi-crew": "crew",
   "gemini-recon": "gemini",
   "gemini-research": "gemini",
+  "cursor-review": "cursor",
+  "cursor-write": "writer",
   "grok-review": "grok",
   "grok-write": "writer",
 };
@@ -61,8 +63,14 @@ test("every seat holds only its own narrow start tool and no retired API", async
     oc: ["clanker_start_oc-review"],
     gemini: ["clanker_start_gemini-recon", "clanker_start_gemini-research"],
     grok: ["clanker_start_grok-review"],
+    cursor: ["clanker_start_cursor-review"],
     crew: ["clanker_start_oc-kimi-crew"],
-    writer: ["clanker_start_codex-write", "clanker_start_oc-write", "clanker_start_grok-write"],
+    writer: [
+      "clanker_start_codex-write",
+      "clanker_start_oc-write",
+      "clanker_start_grok-write",
+      "clanker_start_cursor-write",
+    ],
     supervisor: ["clanker_start_oc-glm-write"],
   };
   for (const [seat, tools] of Object.entries(expected)) {
@@ -183,7 +191,7 @@ test("the README profile table and the registry agree, in both directions", asyn
 });
 
 test("every registry profile is reachable from exactly one seat", async () => {
-  const seats = ["codex", "oc", "gemini", "grok", "writer", "supervisor", "crew"];
+  const seats = ["codex", "oc", "gemini", "grok", "cursor", "writer", "supervisor", "crew"];
   const holders = new Map<string, string[]>();
   for (const seat of seats) {
     const frontmatter = (await readFile(new URL(`../plugin/agents/${seat}.md`, import.meta.url), "utf8")).split("---")[1] ?? "";

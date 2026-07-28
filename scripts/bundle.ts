@@ -55,6 +55,11 @@ export const BUNDLES: readonly Bundle[] = [
     entry: "src/gemini-acp.ts",
     banner: "// GENERATED Gemini reconnaissance ACP sidecar. Do not edit.",
   },
+  {
+    name: "cursor-acp.mjs",
+    entry: "src/cursor-acp.ts",
+    banner: "// GENERATED Cursor stream-json -> ACP sidecar. Do not edit.",
+  },
 ];
 
 /** Every plugin adapter that ships a copy of the artifacts. */

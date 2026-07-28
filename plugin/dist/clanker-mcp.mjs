@@ -27761,7 +27761,7 @@ var RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 864e5;
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.3.8";
+var SERVER_VERSION = "0.3.9";
 var DEFAULT_CODEX_MODEL = "gpt-5.5";
 var DEFAULT_CODEX_EFFORT = "xhigh";
 var WRITE_DISCIPLINE_PREFIX = `Workspace discipline, enforced by the dispatching contract \u2014 these override any
@@ -27793,6 +27793,17 @@ function resolveOcModel(model) {
   if (!model) return model;
   return OC_MODEL_ALIASES[model] ?? model;
 }
+var CURSOR_MODEL_ALIASES = {
+  composer: "composer-2.5",
+  grok: "cursor-grok-4.5-high",
+  codex53: "gpt-5.3-codex-high"
+};
+var DEFAULT_CURSOR_MODEL = "composer-2.5";
+function resolveCursorModel(model) {
+  if (!model) return model;
+  return CURSOR_MODEL_ALIASES[model.trim()] ?? model.trim();
+}
+var LANES_WITH_PINNED_WRITE_MODEL = /* @__PURE__ */ new Set(["codex", "cursor"]);
 var GLM_PROVIDER_PREFIX = `${OC_MODEL_ALIASES.glm.split("/", 1)[0]}/`;
 function isGlmModel(model) {
   const normalized = model?.trim().toLowerCase();
@@ -31573,6 +31584,16 @@ function resolveGeminiAcpEntry() {
   if (entry) return entry;
   throw new Error("Gemini ACP sidecar is missing; run `npm run bundle` before dispatching Clanker: Gemini");
 }
+function resolveCursorAcpEntry() {
+  const candidates = [
+    fileURLToPath(new URL("./cursor-acp.mjs", import.meta.url)),
+    fileURLToPath(new URL("./cursor-acp.js", import.meta.url)),
+    fileURLToPath(new URL("../plugin/dist/cursor-acp.mjs", import.meta.url))
+  ];
+  const entry = candidates.find((candidate) => fs4.existsSync(candidate));
+  if (entry) return entry;
+  throw new Error("Cursor ACP sidecar is missing; run `npm run bundle` before dispatching Clanker: Cursor");
+}
 function isGeminiModel(model) {
   return model.trim().toLowerCase().startsWith("gemini-");
 }
@@ -31600,9 +31621,12 @@ function resolveSystemCodexPath() {
   return "codex";
 }
 function resolveSystemAgyPath() {
+  return resolveLocalBinPath("agy");
+}
+function resolveLocalBinPath(binary) {
   const candidates = [
-    ...(process.env.PATH ?? "").split(path4.delimiter).filter(Boolean).map((dir) => path4.join(dir, "agy")),
-    path4.join(os3.homedir(), ".local", "bin", "agy")
+    ...(process.env.PATH ?? "").split(path4.delimiter).filter(Boolean).map((dir) => path4.join(dir, binary)),
+    path4.join(os3.homedir(), ".local", "bin", binary)
   ];
   for (const candidate of candidates) {
     try {
@@ -31611,18 +31635,27 @@ function resolveSystemAgyPath() {
     } catch {
     }
   }
-  return "agy";
+  return binary;
 }
 var CAPS = {
   codex: { model: true, effort: true, sandbox: true },
   opencode: { model: true, effort: false, sandbox: false },
   grok: { model: true, effort: true, sandbox: false },
-  gemini: { model: true, effort: true, sandbox: false }
+  gemini: { model: true, effort: true, sandbox: false },
+  // cursor has no reasoning-effort flag at all: the effort tier is baked into
+  // the model id (`gpt-5.3-codex-high` vs `-xhigh`), so an effort override has
+  // nowhere to go and warns. Its `--sandbox enabled|disabled` is a boolean of
+  // its own, not codex-acp's three-tier CodexSandboxMode, so it is not exposed
+  // through that option either — the read-only lane sets it unconditionally.
+  cursor: { model: true, effort: false, sandbox: false }
 };
 var REQUIRED_ENV = {
   codex: [],
   grok: [],
-  gemini: []
+  gemini: [],
+  // Cursor holds its own login state under ~/.cursor (the observed init event
+  // reports `apiKeySource: "login"`), so Clanker never carries a secret for it.
+  cursor: []
 };
 function opencodeRequiredEnv(model) {
   return isGlmModel(model) ? ["ZHIPUAI_API_KEY"] : [];
@@ -31691,6 +31724,21 @@ function buildSpawnSpec(lane, opts, runDir) {
     warnings.push(`lane '${lane}' does not support sandbox override; ignoring sandbox='${opts.sandbox}'`);
   }
   switch (lane) {
+    case "cursor": {
+      const mode = opts.readOnly === true ? process.env.CLANKER_CURSOR_MODE?.trim() === "plan" ? "plan" : "ask" : "write";
+      env.CLANKER_CURSOR_MODE = mode;
+      env.CLANKER_CURSOR_MODEL = resolveCursorModel(opts.model) || DEFAULT_CURSOR_MODEL;
+      env.CLANKER_CURSOR_AGENT_PATH = process.env.CLANKER_CURSOR_AGENT_PATH ?? resolveLocalBinPath("cursor-agent");
+      if (process.env.CLANKER_CURSOR_PRINT_TIMEOUT) {
+        env.CLANKER_CURSOR_PRINT_TIMEOUT = process.env.CLANKER_CURSOR_PRINT_TIMEOUT;
+      }
+      return wrapWithVaultExec(
+        // resolveNodeBinary(), not process.execPath: this server can outlive
+        // the path it was launched from (#37).
+        { command: resolveNodeBinary(), args: [resolveCursorAcpEntry()], env, warnings },
+        requiredEnvFor(lane, opts)
+      );
+    }
     case "gemini": {
       if (opts.readOnly !== true) {
         throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
@@ -32329,7 +32377,7 @@ var LaneRun = class {
     this.persistTelemetry();
   }
   telemetry() {
-    const resolved = this.lane === "opencode" ? resolveOcModel(this.requestOpts.model) ?? null : this.lane === "grok" ? this.requestOpts.model ?? "grok-4.5" : this.requestOpts.model ?? null;
+    const resolved = this.lane === "opencode" ? resolveOcModel(this.requestOpts.model) ?? null : this.lane === "grok" ? this.requestOpts.model ?? "grok-4.5" : this.lane === "cursor" ? resolveCursorModel(this.requestOpts.model) || DEFAULT_CURSOR_MODEL : this.requestOpts.model ?? null;
     return {
       host: this.host,
       requested_lane: this.lane,
@@ -32777,10 +32825,12 @@ function classifyBackendFailure(message) {
 }
 
 // src/types.ts
-var LANE_NAMES = ["codex", "opencode", "grok", "gemini"];
+var LANE_NAMES = ["codex", "opencode", "grok", "gemini", "cursor"];
 
 // src/profiles.ts
 var GEMINI_TURN_TIMEOUT_MS = 66e4;
+var CURSOR_REVIEW_TURN_TIMEOUT_MS = 9e5;
+var CURSOR_ROUTING_NOTE = "Routing: the default Composer 2.5 is a bounded single-layer-scaffolding tier (composer-2.5 lane card, #1368) \u2014 provenance and identity-critical cores still require a cross-vendor screen, so do not route those here. Model is a free parameter: the same Cursor subscription also serves cursor-grok-4.5-high (alias `grok`) and gpt-5.3-codex-high (alias `codex53`).";
 var DISPATCH_PROFILES = [
   {
     id: "codex-review",
@@ -32901,6 +32951,34 @@ var DISPATCH_PROFILES = [
     status: "active"
   },
   {
+    id: "cursor-review",
+    title: "Cursor cold review (read-only, in place)",
+    description: "Read-only Cursor review through the cursor-agent headless stream. read_only=true is welded and the lane runs cursor's own read-only execution mode plus its sandbox on top of it; an optional worktree branch runs the review inside an isolated tree instead of the working checkout. " + CURSOR_ROUTING_NOTE,
+    lane: "cursor",
+    model: { kind: "caller-optional", defaultId: "composer-2.5" },
+    readOnly: true,
+    isolation: "optional",
+    secrets: [],
+    turnTimeoutMs: CURSOR_REVIEW_TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "reviewer",
+    status: "active"
+  },
+  {
+    id: "cursor-write",
+    title: "Cursor implementation (isolated worktree)",
+    description: "Write-capable Cursor worker. read_only=false is welded and a managed worktree branch is mandatory, so writes are boxed to the worktree rather than to cursor's own `--worktree`, which Clanker does not use. " + CURSOR_ROUTING_NOTE,
+    lane: "cursor",
+    model: { kind: "caller-optional", defaultId: "composer-2.5" },
+    readOnly: false,
+    isolation: "required",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "implementer",
+    status: "active"
+  },
+  {
     id: "grok-review",
     title: "Grok cold review (read-only, in place)",
     description: "Read-only Grok review with Clanker's own native containment flags. read_only=true is welded; an optional worktree branch runs the review inside an isolated tree. Model may be omitted \u2014 the grok lane has its own configured default. Currently dormant: the account returns HTTP 402 (out of credit).",
@@ -32986,6 +33064,9 @@ function resolveProfileDispatch(input, env = process.env) {
       }
       model = void 0;
       break;
+    case "caller-optional":
+      model = input.model?.trim() || void 0;
+      break;
     case "caller-required":
       if (!input.model?.trim()) {
         throw new Error(`profile '${profile.id}' requires an explicit model id`);
@@ -33019,6 +33100,7 @@ function resolveProfileDispatch(input, env = process.env) {
 
 // src/host.ts
 var HOSTS = ["claude", "codex", "standalone"];
+var CODEX_LANES = LANE_NAMES.filter((lane) => lane !== "codex");
 function parseHostArgs(args) {
   let host;
   for (let i = 0; i < args.length; i += 1) {
@@ -33328,7 +33410,7 @@ function validateDispatchParams(params, minted, host) {
   }
   const readOnly = params.lane === "gemini" ? true : params.readOnly ?? false;
   if (params.lane === "gemini" && params.worktree) throw new Error("Clanker: Gemini rejects worktree");
-  if (!readOnly && params.lane !== "codex" && !params.model?.trim()) {
+  if (!readOnly && !LANES_WITH_PINNED_WRITE_MODEL.has(params.lane) && !params.model?.trim()) {
     throw new Error(`an explicit model is required for write lane '${params.lane}'`);
   }
   if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew" && minted.supervision !== "sonnet") {
@@ -34229,6 +34311,8 @@ function narrowShape(profile) {
   }
   if (profile.model.kind === "caller-required") {
     shape.model = external_exports.string().trim().min(1).describe("Required explicit model id or supported alias for this lane");
+  } else if (profile.model.kind === "caller-optional") {
+    shape.model = external_exports.string().trim().min(1).optional().describe(`Optional model id or supported alias for this lane (default ${profile.model.defaultId}).`);
   }
   if (profile.sandbox?.kind === "caller") {
     shape.sandbox = sandboxEnum.optional().describe(
@@ -34277,6 +34361,7 @@ function describe(profile) {
     profile.description,
     `Server-welded: ${welded}. Isolation: ${profile.isolation} \u2014 ${isolation}.`,
     profile.sandbox?.kind === "caller" ? `Caller-selectable sandbox across all three Codex tiers, default ${profile.sandbox.defaultMode}.` : void 0,
+    profile.model.kind === "caller-optional" ? `Model is a free parameter; omitting it runs the lane's pinned default (${profile.model.defaultId}).` : void 0,
     profile.secrets.length ? `Credentials: ${profile.secrets.join(", ")} materialized from the OS keychain via \`tachi vault exec\` at spawn time \u2014 never passed as a parameter.` : void 0,
     profile.supervision === "sonnet" ? "Requires a Sonnet supervisor seat holding clanker_cancel." : void 0,
     `Hard turn ceiling: ${Math.round(profile.turnTimeoutMs / 6e4)} minutes${profile.readOnly ? "" : " \u2014 commit periodically so a timeout still leaves reviewable work in the worktree"}.`,

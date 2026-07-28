@@ -6,12 +6,14 @@ plugin/dist/*
 !plugin/dist/clanker-mcp.mjs
 !plugin/dist/codex-acp.mjs
 !plugin/dist/gemini-acp.mjs
+!plugin/dist/cursor-acp.mjs
 codex-plugin/dist/
 !codex-plugin/dist/
 codex-plugin/dist/*
 !codex-plugin/dist/clanker-mcp.mjs
 !codex-plugin/dist/codex-acp.mjs
 !codex-plugin/dist/gemini-acp.mjs
+!codex-plugin/dist/cursor-acp.mjs
 .test-tmp/
 .DS_Store
 *.log
