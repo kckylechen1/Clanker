@@ -729,33 +729,35 @@ export class LaneRun {
     if (this.digestLog.length > 500) this.digestLog.splice(0, this.digestLog.length - 500);
   }
 
-  private writeEvent(obj: unknown): void {
-    const line = JSON.stringify({ ts: Date.now(), ...(obj as object) }) + "\n";
+  /**
+   * Shared append template for both forensic streams (#37 A6): once
+   * `sessionClosed`, append synchronously (no stream to keep open past
+   * teardown); otherwise lazily open a durable append stream and write
+   * through it. `streamField` names which of the two per-instance
+   * WriteStream slots (`eventsStream` / `chunksStream`) this call owns.
+   */
+  private appendToStream(file: string, streamField: "eventsStream" | "chunksStream", line: string): void {
     if (this.sessionClosed) {
       fs.mkdirSync(this.runDir, { recursive: true });
-      fs.appendFileSync(path.join(this.runDir, EVENTS_FILE), line);
+      fs.appendFileSync(path.join(this.runDir, file), line);
       return;
     }
-    if (!this.eventsStream) {
+    if (!this[streamField]) {
       fs.mkdirSync(this.runDir, { recursive: true });
-      this.eventsStream = fs.createWriteStream(path.join(this.runDir, EVENTS_FILE), { flags: "a" });
+      this[streamField] = fs.createWriteStream(path.join(this.runDir, file), { flags: "a" });
     }
-    this.eventsStream.write(line);
+    this[streamField]!.write(line);
+  }
+
+  private writeEvent(obj: unknown): void {
+    const line = JSON.stringify({ ts: Date.now(), ...(obj as object) }) + "\n";
+    this.appendToStream(EVENTS_FILE, "eventsStream", line);
   }
 
   private logChunk(kind: "thought" | "message", text: string): void {
     if (!text) return;
     const line = `[${new Date().toISOString()}] ${kind}: ${text}\n`;
-    if (this.sessionClosed) {
-      fs.mkdirSync(this.runDir, { recursive: true });
-      fs.appendFileSync(path.join(this.runDir, CHUNKS_FILE), line);
-      return;
-    }
-    if (!this.chunksStream) {
-      fs.mkdirSync(this.runDir, { recursive: true });
-      this.chunksStream = fs.createWriteStream(path.join(this.runDir, CHUNKS_FILE), { flags: "a" });
-    }
-    this.chunksStream.write(line);
+    this.appendToStream(CHUNKS_FILE, "chunksStream", line);
   }
 
   closeStreams(): void {

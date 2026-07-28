@@ -146,6 +146,51 @@ async function holdsUnmergedWork(worktreePath: string, targetRepo: string): Prom
 }
 
 /**
+ * Resolve symlinks in a path that may not exist yet: realpath the deepest
+ * ancestor that DOES exist, then re-append the not-yet-created tail. A bare
+ * `path.resolve` leaves symlinks unresolved, so a WORKTREES_ROOT that is a
+ * symlink pointing inside the target repo would pass a literal-string overlap
+ * check while git still lands the worktree inside the checkout (#12 hardening).
+ */
+export function realpathBestEffort(p: string): string {
+  let cur = path.resolve(p);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync(cur);
+      return tail.length ? path.join(real, ...tail) : real;
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return path.resolve(p); // reached the root; nothing resolved
+      tail.unshift(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+/**
+ * Enforce the target-aware isolation invariant (#12): the worktree a write
+ * dispatch runs in must be a distinct path from the target repo's primary
+ * checkout — never equal to it, inside it, or containing it. Under normal
+ * config (WORKTREES_ROOT under ~/.cache) this always holds; the guard exists to
+ * reject a misconfiguration that would route writes back onto the checkout the
+ * isolation is meant to protect. Both sides are realpath-resolved first so a
+ * symlinked WORKTREES_ROOT cannot slip a worktree inside the repo undetected.
+ * Exported for a direct unit test.
+ */
+export function assertWorktreeOutsideRepo(worktreePath: string, targetRepo: string): void {
+  const wt = realpathBestEffort(worktreePath);
+  const repo = realpathBestEffort(targetRepo);
+  if (wt === repo || wt.startsWith(repo + path.sep) || repo.startsWith(wt + path.sep)) {
+    throw new Error(
+      `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; ` +
+        `refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT ` +
+        `outside the repo)`,
+    );
+  }
+}
+
+/**
  * Remove a worktree if it has no changes. Returns true if removed, false if it
  * was retained because of local changes.
  */

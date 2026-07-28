@@ -31665,7 +31665,8 @@ import path5 from "node:path";
 import fs3 from "node:fs";
 import os3 from "node:os";
 import path4 from "node:path";
-var LEDGER_DIR = process.env.CLANKER_LEDGER_DIR ?? path4.join(os3.homedir(), ".agents", "dispatch-ledger");
+var rawLedgerDirEnv = process.env.CLANKER_LEDGER_DIR?.trim();
+var LEDGER_DIR = rawLedgerDirEnv ? rawLedgerDirEnv : path4.join(os3.homedir(), ".agents", "dispatch-ledger");
 var LEDGER_PATH = path4.join(LEDGER_DIR, "ledger.jsonl");
 var HOOK_ERRORS_PATH = path4.join(LEDGER_DIR, "hook_errors.log");
 var PROMPT_HEAD_CHAR_BUDGET = 200;
@@ -31675,6 +31676,7 @@ function buildLedgerRow(input) {
   const profile = input.agentProfile ?? DEFAULT_AGENT_PROFILE;
   const agentType = profile !== DEFAULT_AGENT_PROFILE ? `${input.lane}:${profile}` : input.lane;
   const isError = input.turnStatus === "error";
+  const isCancelled = input.turnStatus === "cancelled";
   return {
     ts: (/* @__PURE__ */ new Date()).toISOString(),
     session: null,
@@ -31687,7 +31689,13 @@ function buildLedgerRow(input) {
     outcome: isError ? "blocked" : null,
     review: null,
     refix_rounds: null,
-    error_class: isError && input.error ? input.error.slice(0, ERROR_CLASS_CHAR_BUDGET) : null,
+    // #37 D1: `error_class` used to be null for BOTH "done" and "cancelled" —
+    // the 13-key contract is grep-consumed downstream (no schema migration
+    // possible without a coordinated change there), so a cancelled run gets a
+    // literal "cancelled" tag here instead of a new column. `outcome` stays
+    // null either way: it is reserved for a human/terminal-review backfill,
+    // not something this writer should synthesize.
+    error_class: isError && input.error ? input.error.slice(0, ERROR_CLASS_CHAR_BUDGET) : isCancelled ? "cancelled" : null,
     lesson_ref: null
   };
 }
@@ -31708,7 +31716,10 @@ function logHookError(runId, error40) {
       `[${(/* @__PURE__ */ new Date()).toISOString()}] native-ledger-writer append failed for run '${runId}': ${message}
 `
     );
-  } catch {
+  } catch (fallbackError) {
+    console.error(
+      `[clanker] ledger write AND hook_errors.log fallback both failed for run '${runId}': ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`
+    );
   }
 }
 
@@ -32326,33 +32337,34 @@ var LaneRun = class {
     this.digestLog.push({ seq: this.seq, text, significant });
     if (this.digestLog.length > 500) this.digestLog.splice(0, this.digestLog.length - 500);
   }
-  writeEvent(obj) {
-    const line = JSON.stringify({ ts: Date.now(), ...obj }) + "\n";
+  /**
+   * Shared append template for both forensic streams (#37 A6): once
+   * `sessionClosed`, append synchronously (no stream to keep open past
+   * teardown); otherwise lazily open a durable append stream and write
+   * through it. `streamField` names which of the two per-instance
+   * WriteStream slots (`eventsStream` / `chunksStream`) this call owns.
+   */
+  appendToStream(file2, streamField, line) {
     if (this.sessionClosed) {
       fs4.mkdirSync(this.runDir, { recursive: true });
-      fs4.appendFileSync(path5.join(this.runDir, EVENTS_FILE), line);
+      fs4.appendFileSync(path5.join(this.runDir, file2), line);
       return;
     }
-    if (!this.eventsStream) {
+    if (!this[streamField]) {
       fs4.mkdirSync(this.runDir, { recursive: true });
-      this.eventsStream = fs4.createWriteStream(path5.join(this.runDir, EVENTS_FILE), { flags: "a" });
+      this[streamField] = fs4.createWriteStream(path5.join(this.runDir, file2), { flags: "a" });
     }
-    this.eventsStream.write(line);
+    this[streamField].write(line);
+  }
+  writeEvent(obj) {
+    const line = JSON.stringify({ ts: Date.now(), ...obj }) + "\n";
+    this.appendToStream(EVENTS_FILE, "eventsStream", line);
   }
   logChunk(kind, text) {
     if (!text) return;
     const line = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${kind}: ${text}
 `;
-    if (this.sessionClosed) {
-      fs4.mkdirSync(this.runDir, { recursive: true });
-      fs4.appendFileSync(path5.join(this.runDir, CHUNKS_FILE), line);
-      return;
-    }
-    if (!this.chunksStream) {
-      fs4.mkdirSync(this.runDir, { recursive: true });
-      this.chunksStream = fs4.createWriteStream(path5.join(this.runDir, CHUNKS_FILE), { flags: "a" });
-    }
-    this.chunksStream.write(line);
+    this.appendToStream(CHUNKS_FILE, "chunksStream", line);
   }
   closeStreams() {
     this.eventsStream?.end();
@@ -32469,7 +32481,8 @@ function scanForeignRuns(options = {}) {
     if (inFlightOnly && run.terminal_at) continue;
     found.push(run);
   }
-  found.sort((a, b) => a.last_activity_ms - b.last_activity_ms);
+  const activityRank = (ms) => ms < 0 ? Infinity : ms;
+  found.sort((a, b) => activityRank(a.last_activity_ms) - activityRank(b.last_activity_ms));
   return found;
 }
 function foreignControlRefusal(id, run) {
@@ -32842,6 +32855,30 @@ async function holdsUnmergedWork(worktreePath, targetRepo) {
     return true;
   }
 }
+function realpathBestEffort(p) {
+  let cur = path7.resolve(p);
+  const tail = [];
+  for (; ; ) {
+    try {
+      const real = fs6.realpathSync(cur);
+      return tail.length ? path7.join(real, ...tail) : real;
+    } catch {
+      const parent = path7.dirname(cur);
+      if (parent === cur) return path7.resolve(p);
+      tail.unshift(path7.basename(cur));
+      cur = parent;
+    }
+  }
+}
+function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
+  const wt = realpathBestEffort(worktreePath);
+  const repo = realpathBestEffort(targetRepo);
+  if (wt === repo || wt.startsWith(repo + path7.sep) || repo.startsWith(wt + path7.sep)) {
+    throw new Error(
+      `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT outside the repo)`
+    );
+  }
+}
 async function removeIfClean(worktreePath, targetRepo = BASE_REPO) {
   const changes = await changedFiles(worktreePath);
   if (changes.length > 0) return false;
@@ -32859,8 +32896,102 @@ async function removeIfClean(worktreePath, targetRepo = BASE_REPO) {
   return true;
 }
 
+// src/util.ts
+function errMessage(e) {
+  return e instanceof Error ? e.message : String(e);
+}
+function createTimeout(ms) {
+  let handle;
+  const promise2 = new Promise((resolve) => {
+    handle = setTimeout(resolve, ms);
+    handle.unref?.();
+  });
+  return { promise: promise2, cancel: () => clearTimeout(handle) };
+}
+function dedupe(items) {
+  return [...new Set(items)];
+}
+function clampWait(ms) {
+  if (ms === void 0) return DEFAULT_WAIT_MS;
+  if (!Number.isFinite(ms) || ms < 0) return DEFAULT_WAIT_MS;
+  return Math.min(ms, MAX_WAIT_MS);
+}
+function envInt2(name, fallback) {
+  const raw = process.env[name];
+  if (raw === void 0) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+function annotatedError(message, failureClass) {
+  if (failureClass === INFRA_FAILURE_TAG) {
+    return `${message}
+
+[${INFRA_FAILURE_TAG}] ${INFRA_FAILURE_ADVISORY}`;
+  }
+  return message;
+}
+var SECRET_PATTERN = /(api[_-]?key|token|secret|authorization|bearer)(\s*[=:]\s*)\S+/gi;
+function redact(text) {
+  return text.replace(SECRET_PATTERN, (_match, key, sep) => `${key}${sep}[REDACTED]`);
+}
+function stderrSuffix(stderr) {
+  const cleaned = redact(stderr).trim();
+  return cleaned ? `; stderr: ${cleaned.slice(-400)}` : "";
+}
+
 // src/manager.ts
 var NO_CAPABILITIES = { supervision: "none" };
+function validateDispatchParams(params, minted, host) {
+  if (!LANE_NAMES.includes(params.lane)) {
+    throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
+  }
+  const profile = params.profile ?? "worker";
+  if (profile !== "worker" && profile !== "kimi-crew") throw new Error(`unsupported profile '${profile}'`);
+  if (params.lane === "gemini" && profile !== "worker") throw new Error("Clanker: Gemini rejects profile");
+  if (profile === "kimi-crew") {
+    params = { ...params, lane: "opencode", model: "kimi", readOnly: false, profile };
+  }
+  const blockedReason = hostLaneBlockedReason(host, params.lane);
+  if (blockedReason) throw new Error(blockedReason);
+  if (params.lane === "codex" && params.model?.trim().toLowerCase() === "codex") {
+    throw new Error("model='codex' is a lane name, not a Codex model id; omit model to use the configured default");
+  }
+  if (params.lane === "gemini" && params.readOnly === false) {
+    throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
+  }
+  const readOnly = params.lane === "gemini" ? true : params.readOnly ?? false;
+  if (params.lane === "gemini" && params.worktree) throw new Error("Clanker: Gemini rejects worktree");
+  if (!readOnly && params.lane !== "codex" && !params.model?.trim()) {
+    throw new Error(`an explicit model is required for write lane '${params.lane}'`);
+  }
+  if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew" && minted.supervision !== "sonnet") {
+    throw new Error(
+      "direct GLM write is prohibited; use profile='kimi-crew' for the OpenCode crew, or the supervised 'oc-glm-write' dispatch profile for a GLM write under Sonnet supervision"
+    );
+  }
+  const writeCapableSandbox = params.lane === "codex" && params.sandbox !== void 0 && params.sandbox !== "read-only";
+  const requiresIsolation = !readOnly || writeCapableSandbox;
+  if (requiresIsolation && !params.worktree) {
+    throw new Error(
+      "write-capable dispatch must run in an isolated worktree: pass `worktree` (a branch name). Strict reads may run in-place."
+    );
+  }
+  return { params, profile, readOnly, requiresIsolation };
+}
+function writeTelemetryStub(runDir, stub) {
+  const target = path8.join(runDir, "telemetry.json");
+  const tmp = `${target}.${process.pid}.tmp`;
+  try {
+    fs7.writeFileSync(tmp, JSON.stringify(stub, null, 2));
+    fs7.renameSync(tmp, target);
+  } catch (error40) {
+    try {
+      fs7.rmSync(tmp, { force: true });
+    } catch {
+    }
+    console.error(`[clanker] telemetry stub write failed for run dir '${runDir}': ${errMessage(error40)}`);
+  }
+}
 var DEFAULT_SESSION_TTL_MS = envInt2("CLANKER_SESSION_TTL_MS", 6e5);
 var LaneManager = class {
   host;
@@ -32955,40 +33086,9 @@ var LaneManager = class {
   }
   async dispatchStartInternal(params, minted) {
     if (this.shuttingDown) throw new Error("Clanker manager is shutting down; refusing a new dispatch");
-    if (!LANE_NAMES.includes(params.lane)) {
-      throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
-    }
-    const profile = params.profile ?? "worker";
-    if (profile !== "worker" && profile !== "kimi-crew") throw new Error(`unsupported profile '${profile}'`);
-    if (params.lane === "gemini" && profile !== "worker") throw new Error("Clanker: Gemini rejects profile");
-    if (profile === "kimi-crew") {
-      params = { ...params, lane: "opencode", model: "kimi", readOnly: false, profile };
-    }
-    const blockedReason = hostLaneBlockedReason(this.host, params.lane);
-    if (blockedReason) throw new Error(blockedReason);
-    if (params.lane === "codex" && params.model?.trim().toLowerCase() === "codex") {
-      throw new Error("model='codex' is a lane name, not a Codex model id; omit model to use the configured default");
-    }
-    if (params.lane === "gemini" && params.readOnly === false) {
-      throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
-    }
-    const readOnly = params.lane === "gemini" ? true : params.readOnly ?? false;
-    if (params.lane === "gemini" && params.worktree) throw new Error("Clanker: Gemini rejects worktree");
-    if (!readOnly && params.lane !== "codex" && !params.model?.trim()) {
-      throw new Error(`an explicit model is required for write lane '${params.lane}'`);
-    }
-    if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew" && minted.supervision !== "sonnet") {
-      throw new Error(
-        "direct GLM write is prohibited; use profile='kimi-crew' for the OpenCode crew, or the supervised 'oc-glm-write' dispatch profile for a GLM write under Sonnet supervision"
-      );
-    }
-    const writeCapableSandbox = params.lane === "codex" && params.sandbox !== void 0 && params.sandbox !== "read-only";
-    const requiresIsolation = !readOnly || writeCapableSandbox;
-    if (requiresIsolation && !params.worktree) {
-      throw new Error(
-        "write-capable dispatch must run in an isolated worktree: pass `worktree` (a branch name). Strict reads may run in-place."
-      );
-    }
+    const validated = validateDispatchParams(params, minted, this.host);
+    params = validated.params;
+    const { profile, readOnly } = validated;
     let targetRepo = path8.resolve(this.baseRepo);
     if (params.worktree && params.cwd) {
       targetRepo = await resolveTargetRepo(params.cwd);
@@ -32996,14 +33096,16 @@ var LaneManager = class {
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
     const runDir = path8.join(this.runsRoot, id);
     fs7.mkdirSync(runDir, { recursive: true });
-    let cwd = params.cwd ?? this.baseRepo;
-    let worktreePath;
-    if (params.worktree) {
-      assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree), targetRepo);
-      worktreePath = await createWorktree(params.worktree, targetRepo);
-      cwd = worktreePath;
-    }
-    const opts = {
+    const stub = {
+      host: this.host,
+      lane: params.lane,
+      profileId: profile,
+      cwd: params.cwd ?? this.baseRepo,
+      created_at: (/* @__PURE__ */ new Date()).toISOString(),
+      requested_model: params.model
+    };
+    writeTelemetryStub(runDir, stub);
+    const requestOpts = {
       model: params.model,
       effort: params.effort,
       readOnly,
@@ -33014,7 +33116,25 @@ var LaneManager = class {
       // callers get no role routing and the sidecar falls back to recon copy.
       geminiRole: params.lane === "gemini" ? minted.profileId : void 0
     };
-    const spec = this.resolveSpec(params.lane, opts, runDir);
+    let cwd = params.cwd ?? this.baseRepo;
+    let worktreePath;
+    let spec;
+    try {
+      spec = this.resolveSpec(params.lane, requestOpts, runDir);
+      if (params.worktree) {
+        assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree), targetRepo);
+        worktreePath = await createWorktree(params.worktree, targetRepo);
+        cwd = worktreePath;
+      }
+    } catch (e) {
+      writeTelemetryStub(runDir, {
+        ...stub,
+        terminal_at: (/* @__PURE__ */ new Date()).toISOString(),
+        terminal_reason: "rejected",
+        error: errMessage(e)
+      });
+      throw e;
+    }
     this.warningsById.set(id, spec.warnings);
     const run = new LaneRun({
       id,
@@ -33026,7 +33146,7 @@ var LaneManager = class {
       worktreeBranch: params.worktree,
       worktreePath,
       targetRepo: worktreePath ? targetRepo : void 0,
-      requestOpts: opts,
+      requestOpts,
       initialPrompt: params.prompt,
       turnTimeoutMs: minted.turnTimeoutMs,
       supervised: minted.supervision === "sonnet"
@@ -33075,6 +33195,14 @@ var LaneManager = class {
         `run '${id}' was not started from a supervised profile, so it takes no correction turn (only the supervised shape accepts one \u2014 see profiles.ts supervision)`
       );
     }
+    if (this.shuttingDown) {
+      throw new Error(`Clanker manager is shutting down; refusing a correction turn for '${id}'`);
+    }
+    if (this.closing.has(id)) {
+      throw new Error(
+        `session for '${id}' is closing right now \u2014 the correction window has already passed. The worker cannot be corrected mid-teardown; report the blocker instead of retrying.`
+      );
+    }
     if (run.turnStatus === "running" || this.turnDrives.has(id)) {
       throw new Error(`a turn is already running for '${id}'; wait for it to reach a terminal state first`);
     }
@@ -33106,6 +33234,26 @@ var LaneManager = class {
     );
   }
   /**
+   * Shared teardown for the three "cancellation/shutdown raced setup" spots in
+   * `attemptInitialTurn` below (#37 A3) — before connect, after connect throws,
+   * and after connect succeeds. Only the third has a live `conn` to close;
+   * the first two race in before one exists. Behavior is byte-for-byte what
+   * all three call sites did inline before this extraction.
+   */
+  async abortDuringSetup(run, conn) {
+    if (!run.cancellationRequested) run.requestCancellation();
+    if (conn) {
+      try {
+        await conn.closeAndWait();
+      } catch (err) {
+        console.error(`[clanker] subprocess shutdown failed for '${run.id}': ${errMessage(err)}`);
+      }
+    }
+    await this.computeTouched(run);
+    await this.close(run.id);
+    run.cancelTurn();
+  }
+  /**
    * Drive the first turn of a fresh dispatch, with one automatic retry when
    * the failure looks like a transient backend-capacity condition (see
    * failure-classifier.ts isCapacityTransient). CLANKER-INFRA-FAILURE never
@@ -33116,10 +33264,7 @@ var LaneManager = class {
    */
   async attemptInitialTurn(run, spec, prompt, attempt) {
     if (run.cancellationRequested || this.shuttingDown) {
-      if (!run.cancellationRequested) run.requestCancellation();
-      await this.computeTouched(run);
-      await this.close(run.id);
-      run.cancelTurn();
+      await this.abortDuringSetup(run);
       return;
     }
     let conn;
@@ -33137,10 +33282,7 @@ var LaneManager = class {
       });
     } catch (e) {
       if (run.cancellationRequested || this.shuttingDown) {
-        if (!run.cancellationRequested) run.requestCancellation();
-        await this.computeTouched(run);
-        await this.close(run.id);
-        run.cancelTurn();
+        await this.abortDuringSetup(run);
         return;
       }
       const message = errMessage(e);
@@ -33156,17 +33298,7 @@ var LaneManager = class {
       if (this.pendingConnects.get(run.id) === controller) this.pendingConnects.delete(run.id);
     }
     if (run.cancellationRequested || this.shuttingDown) {
-      if (!run.cancellationRequested) run.requestCancellation();
-      try {
-        await conn.closeAndWait();
-      } catch (err) {
-        console.error(
-          `[clanker] subprocess shutdown failed for '${run.id}': ${errMessage(err)}`
-        );
-      }
-      await this.computeTouched(run);
-      await this.close(run.id);
-      run.cancelTurn();
+      await this.abortDuringSetup(run, conn);
       return;
     }
     this.connections.set(run.id, conn);
@@ -33234,19 +33366,17 @@ var LaneManager = class {
         ]);
         if (outcome.kind === "timeout") {
           throw new Error(
-            `turn exceeded CLANKER_TURN_TIMEOUT_MS (${turnTimeoutMs}ms) with no completion; killing the Clanker`
+            `turn exceeded CLANKER_TURN_TIMEOUT_MS (${turnTimeoutMs}ms) with no completion; killing the Clanker` + stderrSuffix(conn.stderr())
           );
         }
         if (outcome.kind === "exit" || outcome.kind === "closed") {
           const info = outcome.kind === "exit" ? outcome.info : await Promise.race([conn.exited, createTimeout(500).promise.then(() => null)]);
           if (info) {
             const { code, signal, stderr } = info;
-            throw new Error(
-              `lane process exited mid-turn (code=${code} signal=${signal})${stderr.trim() ? `; stderr: ${stderr.trim().slice(-400)}` : ""}`
-            );
+            throw new Error(`lane process exited mid-turn (code=${code} signal=${signal})${stderrSuffix(stderr)}`);
           }
           throw new Error(
-            `ACP connection closed mid-turn: ${outcome.kind === "closed" ? errMessage(outcome.err) : "process exited"}`
+            `ACP connection closed mid-turn: ${outcome.kind === "closed" ? errMessage(outcome.err) : "process exited"}` + stderrSuffix(conn.stderr())
           );
         }
         if (outcome.m.kind === "stop") {
@@ -33413,7 +33543,7 @@ var LaneManager = class {
     const mine = /* @__PURE__ */ new Set();
     for (const run of this.runs.values()) {
       mine.add(run.id);
-      if (run.sessionClosed) continue;
+      if (run.sessionClosed && run.isTerminalTurn()) continue;
       out.push({
         id: run.id,
         lane: run.lane,
@@ -33547,6 +33677,7 @@ var LaneManager = class {
     const reaped = [];
     for (const run of [...this.runs.values()]) {
       if (run.sessionClosed) continue;
+      if (this.turnDrives.has(run.id)) continue;
       if (run.turnStatus !== "running" && run.idleMs() > this.sessionTtlMs) {
         await this.close(run.id);
         reaped.push(run.id);
@@ -33570,63 +33701,6 @@ var LaneManager = class {
     }
   }
 };
-function errMessage(e) {
-  return e instanceof Error ? e.message : String(e);
-}
-function realpathBestEffort(p) {
-  let cur = path8.resolve(p);
-  const tail = [];
-  for (; ; ) {
-    try {
-      const real = fs7.realpathSync(cur);
-      return tail.length ? path8.join(real, ...tail) : real;
-    } catch {
-      const parent = path8.dirname(cur);
-      if (parent === cur) return path8.resolve(p);
-      tail.unshift(path8.basename(cur));
-      cur = parent;
-    }
-  }
-}
-function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
-  const wt = realpathBestEffort(worktreePath);
-  const repo = realpathBestEffort(targetRepo);
-  if (wt === repo || wt.startsWith(repo + path8.sep) || repo.startsWith(wt + path8.sep)) {
-    throw new Error(
-      `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT outside the repo)`
-    );
-  }
-}
-function annotatedError(message, failureClass) {
-  if (failureClass === INFRA_FAILURE_TAG) {
-    return `${message}
-
-[${INFRA_FAILURE_TAG}] ${INFRA_FAILURE_ADVISORY}`;
-  }
-  return message;
-}
-function createTimeout(ms) {
-  let handle;
-  const promise2 = new Promise((resolve) => {
-    handle = setTimeout(resolve, ms);
-    handle.unref?.();
-  });
-  return { promise: promise2, cancel: () => clearTimeout(handle) };
-}
-function dedupe(items) {
-  return [...new Set(items)];
-}
-function clampWait(ms) {
-  if (ms === void 0) return DEFAULT_WAIT_MS;
-  if (!Number.isFinite(ms) || ms < 0) return DEFAULT_WAIT_MS;
-  return Math.min(ms, MAX_WAIT_MS);
-}
-function envInt2(name, fallback) {
-  const raw = process.env[name];
-  if (raw === void 0) return fallback;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
 
 // src/tools.ts
 var laneEnum = external_exports.enum(LANE_NAMES);

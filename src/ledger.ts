@@ -31,8 +31,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const LEDGER_DIR =
-  process.env.CLANKER_LEDGER_DIR ?? path.join(os.homedir(), ".agents", "dispatch-ledger");
+// #37 D2: `??` alone does not catch an EMPTY string — `CLANKER_LEDGER_DIR=""`
+// (e.g. an unset shell var interpolated into a quoted arg) would otherwise
+// resolve to `path.join("", "ledger.jsonl")`, a relative path that lands
+// wherever the server's cwd happens to be — possibly the very repo being
+// managed. Trim and treat blank the same as unset.
+const rawLedgerDirEnv = process.env.CLANKER_LEDGER_DIR?.trim();
+const LEDGER_DIR = rawLedgerDirEnv ? rawLedgerDirEnv : path.join(os.homedir(), ".agents", "dispatch-ledger");
 const LEDGER_PATH = path.join(LEDGER_DIR, "ledger.jsonl");
 const HOOK_ERRORS_PATH = path.join(LEDGER_DIR, "hook_errors.log");
 
@@ -85,6 +90,7 @@ export function buildLedgerRow(input: LedgerRunInput): LedgerRow {
   const profile = input.agentProfile ?? DEFAULT_AGENT_PROFILE;
   const agentType = profile !== DEFAULT_AGENT_PROFILE ? `${input.lane}:${profile}` : input.lane;
   const isError = input.turnStatus === "error";
+  const isCancelled = input.turnStatus === "cancelled";
   return {
     ts: new Date().toISOString(),
     session: null,
@@ -97,7 +103,17 @@ export function buildLedgerRow(input: LedgerRunInput): LedgerRow {
     outcome: isError ? "blocked" : null,
     review: null,
     refix_rounds: null,
-    error_class: isError && input.error ? input.error.slice(0, ERROR_CLASS_CHAR_BUDGET) : null,
+    // #37 D1: `error_class` used to be null for BOTH "done" and "cancelled" —
+    // the 13-key contract is grep-consumed downstream (no schema migration
+    // possible without a coordinated change there), so a cancelled run gets a
+    // literal "cancelled" tag here instead of a new column. `outcome` stays
+    // null either way: it is reserved for a human/terminal-review backfill,
+    // not something this writer should synthesize.
+    error_class: isError && input.error
+      ? input.error.slice(0, ERROR_CLASS_CHAR_BUDGET)
+      : isCancelled
+        ? "cancelled"
+        : null,
     lesson_ref: null,
   };
 }
@@ -125,7 +141,16 @@ function logHookError(runId: string, error: unknown): void {
       HOOK_ERRORS_PATH,
       `[${new Date().toISOString()}] native-ledger-writer append failed for run '${runId}': ${message}\n`,
     );
-  } catch {
-    /* truly best-effort: even the error-log write failed, swallow it */
+  } catch (fallbackError) {
+    // #37 D3: the ledger append AND its own hook_errors.log fallback both
+    // failed — total silence here hid a real double failure (e.g. disk full,
+    // unwritable dir) from the only diagnostic channel a stdio MCP server has
+    // (stdout is the wire protocol; stderr is where every other failure in
+    // this codebase surfaces — see manager.ts/run.ts console.error sites).
+    console.error(
+      `[clanker] ledger write AND hook_errors.log fallback both failed for run '${runId}': ${
+        fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+      }`,
+    );
   }
 }

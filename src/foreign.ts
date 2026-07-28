@@ -148,8 +148,14 @@ export function scanForeignRuns(options: ScanOptions = {}): ForeignRun[] {
     if (inFlightOnly && run.terminal_at) continue;
     found.push(run);
   }
-  // Newest activity first: an orphan scan reads the top of this list.
-  found.sort((a, b) => a.last_activity_ms - b.last_activity_ms);
+  // Newest activity first: an orphan scan reads the top of this list. `-1`
+  // is the "mtime unreadable" sentinel (see readForeignRun above), not a
+  // real age — sorted as a bare number it is smaller than every real age and
+  // would land AT THE TOP as if it were the most-recently-active run, which
+  // is the opposite of what "unreadable" means. Rank it as +Infinity (last)
+  // instead (#37 D4).
+  const activityRank = (ms: number) => (ms < 0 ? Infinity : ms);
+  found.sort((a, b) => activityRank(a.last_activity_ms) - activityRank(b.last_activity_ms));
   return found;
 }
 

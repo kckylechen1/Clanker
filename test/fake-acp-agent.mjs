@@ -130,14 +130,32 @@ async function runPrompt(id, sessionId, promptText) {
     return;
   }
 
+  if (p.includes("CRASH_SECRET")) {
+    // Same as CRASH below, but the stderr text carries a secret-shaped value
+    // so the redaction path (#37 B1 / issue #8) has something to strip.
+    update(sessionId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-crash-secret",
+      title: "about to crash with a leaked secret",
+      status: "in_progress",
+    });
+    process.stderr.write("auth failure: API_KEY=fake-not-a-real-credential-0000 rejected by upstream\n");
+    setTimeout(() => process.exit(1), 30);
+    return;
+  }
+
   if (p.includes("CRASH")) {
     // Emit one event then exit mid-turn without responding (simulated crash).
+    // The stderr line is evidence-carrying (#37 B1): a mid-turn crash used to
+    // surface only "exited mid-turn (code=... signal=...)" with nothing
+    // about WHY, even though acp-client.ts was already capturing this text.
     update(sessionId, {
       sessionUpdate: "tool_call",
       toolCallId: "tc-crash",
       title: "about to crash",
       status: "in_progress",
     });
+    process.stderr.write("simulated crash: worker unstable\n");
     setTimeout(() => process.exit(1), 30);
     return;
   }

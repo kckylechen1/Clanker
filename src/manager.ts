@@ -17,21 +17,14 @@ import {
   CANCEL_GRACE_MS,
   CAPACITY_RETRY_BACKOFF_MS,
   DEFAULT_STALL_THRESHOLD_MS,
-  DEFAULT_WAIT_MS,
   HANDSHAKE_TIMEOUT_MS,
   isGlmModel,
-  MAX_WAIT_MS,
   RUNS_ROOT,
   TURN_TIMEOUT_MS,
 } from "./constants.js";
 import { buildSpawnSpec } from "./backends.js";
 import { foreignControlRefusal, readForeignRun, scanForeignRuns } from "./foreign.js";
-import {
-  classifyTurnFailure,
-  INFRA_FAILURE_ADVISORY,
-  INFRA_FAILURE_TAG,
-  isCapacityTransient,
-} from "./failure-classifier.js";
+import { classifyTurnFailure, INFRA_FAILURE_TAG, isCapacityTransient } from "./failure-classifier.js";
 import { resolveProfileDispatch, type ProfileDispatchInput } from "./profiles.js";
 import { LaneRun } from "./run.js";
 import type {
@@ -45,6 +38,7 @@ import type {
 import { LANE_NAMES } from "./types.js";
 import { hostLaneBlockedReason, type ClankerHost } from "./host.js";
 import {
+  assertWorktreeOutsideRepo,
   changedFiles,
   createWorktree,
   deriveWorktreePath,
@@ -52,6 +46,15 @@ import {
   removeIfClean,
   resolveTargetRepo,
 } from "./worktree.js";
+import { annotatedError, clampWait, createTimeout, dedupe, envInt, errMessage, stderrSuffix } from "./util.js";
+
+/**
+ * Re-exported so `assertWorktreeOutsideRepo`'s existing direct unit test
+ * (test/manager.test.ts) keeps working unchanged after the #37 A4 move into
+ * worktree.ts — the isolation guard's real home, next to the rest of the
+ * worktree lifecycle logic it enforces.
+ */
+export { assertWorktreeOutsideRepo } from "./worktree.js";
 
 /**
  * Caller-supplied dispatch parameters. `secrets` is deliberately omitted from
@@ -90,6 +93,123 @@ interface MintedCapabilities {
 
 /** Nothing a caller supplies can mint a capability. */
 const NO_CAPABILITIES: MintedCapabilities = { supervision: "none" };
+
+/** Result of the pure pre-flight validation below. */
+interface ValidatedDispatch {
+  /** Normalized params (kimi-crew's lane/model/readOnly override already applied). */
+  params: DispatchParams;
+  profile: "worker" | "kimi-crew";
+  readOnly: boolean;
+  requiresIsolation: boolean;
+}
+
+/**
+ * Pure pre-flight validation for `dispatchStartInternal` (#37 A5) — no I/O, no
+ * runDir, no worktree, nothing that touches disk. Every one of these checks
+ * MUST run and pass before any disk side effect (mkdirSync(runDir),
+ * createWorktree): a caller whose request violates a fail-closed rule here
+ * must never leave a stray run directory or worktree behind it. See the C1
+ * reordering in `dispatchStartInternal` for the lane-specific gates
+ * (resolveSpec/backends.ts) that only run AFTER this — those need the run
+ * directory to already exist (e.g. opencode's per-run config file) and are
+ * deliberately NOT folded in here.
+ */
+function validateDispatchParams(
+  params: DispatchParams,
+  minted: MintedCapabilities,
+  host: ClankerHost,
+): ValidatedDispatch {
+  if (!LANE_NAMES.includes(params.lane)) {
+    throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
+  }
+  const profile = params.profile ?? "worker";
+  if (profile !== "worker" && profile !== "kimi-crew") throw new Error(`unsupported profile '${profile}'`);
+  if (params.lane === "gemini" && profile !== "worker") throw new Error("Clanker: Gemini rejects profile");
+  if (profile === "kimi-crew") {
+    params = { ...params, lane: "opencode", model: "kimi", readOnly: false, profile };
+  }
+  const blockedReason = hostLaneBlockedReason(host, params.lane);
+  if (blockedReason) throw new Error(blockedReason);
+  if (params.lane === "codex" && params.model?.trim().toLowerCase() === "codex") {
+    throw new Error("model='codex' is a lane name, not a Codex model id; omit model to use the configured default");
+  }
+  // Reject an explicit write-capable gemini request BEFORE normalizing, or
+  // the normalization silently downgrades it to read-only and the rejection
+  // below becomes dead code — a refusal that never fires reads to the caller
+  // as "accepted", which is exactly the failure mode a loud gate exists to
+  // prevent. (Found by cold review on 4a8a718.)
+  if (params.lane === "gemini" && params.readOnly === false) {
+    throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
+  }
+  const readOnly = params.lane === "gemini" ? true : (params.readOnly ?? false);
+  if (params.lane === "gemini" && params.worktree) throw new Error("Clanker: Gemini rejects worktree");
+  if (!readOnly && params.lane !== "codex" && !params.model?.trim()) {
+    throw new Error(`an explicit model is required for write lane '${params.lane}'`);
+  }
+  // GLM writes are supervised-only. 0.2.5 expressed this as "GLM writes
+  // require clanker_dispatch_glm_write_start and Sonnet supervision" and
+  // unlocked it with an internal `supervisedGlm` flag no caller could set;
+  // `supervision === "sonnet"` (welded by the oc-glm-write registry row, not
+  // reachable from any tool schema) is that same key. The kimi-crew escape
+  // stays because 0.3.x callers were told to use it, but it is NOT the GLM
+  // path: kimi-crew welds model=kimi and runs a different model entirely.
+  if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew" && minted.supervision !== "sonnet") {
+    throw new Error(
+      "direct GLM write is prohibited; use profile='kimi-crew' for the OpenCode crew, " +
+        "or the supervised 'oc-glm-write' dispatch profile for a GLM write under Sonnet supervision",
+    );
+  }
+  const writeCapableSandbox =
+    params.lane === "codex" &&
+    params.sandbox !== undefined &&
+    params.sandbox !== "read-only";
+  const requiresIsolation = !readOnly || writeCapableSandbox;
+
+  // CP2: every write-capable dispatch is forced into an isolated worktree,
+  // including Codex review seats whose native sandbox permits workspace writes.
+  if (requiresIsolation && !params.worktree) {
+    throw new Error(
+      "write-capable dispatch must run in an isolated worktree: pass `worktree` (a branch name). Strict reads may run in-place.",
+    );
+  }
+  return { params, profile, readOnly, requiresIsolation };
+}
+
+/**
+ * The dispatch-guard telemetry stub (#35 / C1) — written the instant the run
+ * directory exists, before any lane-specific fail-closed gate or worktree
+ * creation gets a chance to reject the dispatch. `run.persistTelemetry()`
+ * (run.ts) fully overwrites this file (tmp+rename, no merge) once a LaneRun
+ * exists and starts its first turn, so key-name compatibility with
+ * RunTelemetry only has to hold for the window between this write and that
+ * one — which is exactly the window a dispatch that dies before a LaneRun
+ * ever exists never leaves.
+ */
+interface TelemetryStub {
+  host: ClankerHost;
+  lane: LaneName;
+  profileId: string;
+  cwd: string;
+  created_at: string;
+  requested_model?: string;
+  /** Present only once the dispatch has been rejected before spawning. */
+  terminal_at?: string;
+  terminal_reason?: string;
+  error?: string;
+}
+
+/** Write (or overwrite) `<runDir>/telemetry.json` atomically via tmp+rename — same pattern as LaneRun.persistTelemetry(). */
+function writeTelemetryStub(runDir: string, stub: TelemetryStub): void {
+  const target = path.join(runDir, "telemetry.json");
+  const tmp = `${target}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(stub, null, 2));
+    fs.renameSync(tmp, target);
+  } catch (error) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort cleanup */ }
+    console.error(`[clanker] telemetry stub write failed for run dir '${runDir}': ${errMessage(error)}`);
+  }
+}
 
 export interface WaitResult {
   id: string;
@@ -277,59 +397,9 @@ export class LaneManager {
     minted: MintedCapabilities,
   ): Promise<{ id: string; warnings: string[] }> {
     if (this.shuttingDown) throw new Error("Clanker manager is shutting down; refusing a new dispatch");
-    if (!LANE_NAMES.includes(params.lane)) {
-      throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
-    }
-    const profile = params.profile ?? "worker";
-    if (profile !== "worker" && profile !== "kimi-crew") throw new Error(`unsupported profile '${profile}'`);
-    if (params.lane === "gemini" && profile !== "worker") throw new Error("Clanker: Gemini rejects profile");
-    if (profile === "kimi-crew") {
-      params = { ...params, lane: "opencode", model: "kimi", readOnly: false, profile };
-    }
-    const blockedReason = hostLaneBlockedReason(this.host, params.lane);
-    if (blockedReason) throw new Error(blockedReason);
-    if (params.lane === "codex" && params.model?.trim().toLowerCase() === "codex") {
-      throw new Error("model='codex' is a lane name, not a Codex model id; omit model to use the configured default");
-    }
-    // Reject an explicit write-capable gemini request BEFORE normalizing, or
-    // the normalization silently downgrades it to read-only and the rejection
-    // below becomes dead code — a refusal that never fires reads to the caller
-    // as "accepted", which is exactly the failure mode a loud gate exists to
-    // prevent. (Found by cold review on 4a8a718.)
-    if (params.lane === "gemini" && params.readOnly === false) {
-      throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
-    }
-    const readOnly = params.lane === "gemini" ? true : (params.readOnly ?? false);
-    if (params.lane === "gemini" && params.worktree) throw new Error("Clanker: Gemini rejects worktree");
-    if (!readOnly && params.lane !== "codex" && !params.model?.trim()) {
-      throw new Error(`an explicit model is required for write lane '${params.lane}'`);
-    }
-    // GLM writes are supervised-only. 0.2.5 expressed this as "GLM writes
-    // require clanker_dispatch_glm_write_start and Sonnet supervision" and
-    // unlocked it with an internal `supervisedGlm` flag no caller could set;
-    // `supervision === "sonnet"` (welded by the oc-glm-write registry row, not
-    // reachable from any tool schema) is that same key. The kimi-crew escape
-    // stays because 0.3.x callers were told to use it, but it is NOT the GLM
-    // path: kimi-crew welds model=kimi and runs a different model entirely.
-    if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew" && minted.supervision !== "sonnet") {
-      throw new Error(
-        "direct GLM write is prohibited; use profile='kimi-crew' for the OpenCode crew, " +
-          "or the supervised 'oc-glm-write' dispatch profile for a GLM write under Sonnet supervision",
-      );
-    }
-    const writeCapableSandbox =
-      params.lane === "codex" &&
-      params.sandbox !== undefined &&
-      params.sandbox !== "read-only";
-    const requiresIsolation = !readOnly || writeCapableSandbox;
-
-    // CP2: every write-capable dispatch is forced into an isolated worktree,
-    // including Codex review seats whose native sandbox permits workspace writes.
-    if (requiresIsolation && !params.worktree) {
-      throw new Error(
-        "write-capable dispatch must run in an isolated worktree: pass `worktree` (a branch name). Strict reads may run in-place.",
-      );
-    }
+    const validated = validateDispatchParams(params, minted, this.host);
+    params = validated.params;
+    const { profile, readOnly } = validated;
 
     // #12: the worktree must be cut from the repo the dispatch *targets*
     // (resolved from params.cwd via `git rev-parse --show-toplevel`), NOT the
@@ -353,20 +423,24 @@ export class LaneManager {
     const runDir = path.join(this.runsRoot, id);
     fs.mkdirSync(runDir, { recursive: true });
 
-    let cwd = params.cwd ?? this.baseRepo;
-    let worktreePath: string | undefined;
-    if (params.worktree) {
-      // CP2 (target-aware isolation invariant): the isolated worktree must never
-      // BE — or contain, or sit inside — the target repo's primary checkout.
-      // deriveWorktreePath keeps it under WORKTREES_ROOT; this guard rejects a
-      // misconfiguration (WORKTREES_ROOT set inside the repo) that would put
-      // writes back on the very checkout the isolation exists to protect.
-      assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree), targetRepo);
-      worktreePath = await createWorktree(params.worktree, targetRepo);
-      cwd = worktreePath;
-    }
+    // #35: write a telemetry stub the instant the run directory exists — BEFORE
+    // resolveSpec's own fail-closed gates (missing model, gemini rules, sandbox
+    // validation) or createWorktree get a chance to reject the dispatch. Without
+    // this, a dispatch that died in that window left either an empty run
+    // directory (no signal a scan could use at all) or, prior to the reordering
+    // below, a real orphaned worktree with nothing tracking it (issue #35 /
+    // C1 — see the try/catch below for the corresponding terminal write).
+    const stub: TelemetryStub = {
+      host: this.host,
+      lane: params.lane,
+      profileId: profile,
+      cwd: params.cwd ?? this.baseRepo,
+      created_at: new Date().toISOString(),
+      requested_model: params.model,
+    };
+    writeTelemetryStub(runDir, stub);
 
-    const opts: LaneRequestOptions = {
+    const requestOpts: LaneRequestOptions = {
       model: params.model,
       effort: params.effort,
       readOnly,
@@ -377,7 +451,38 @@ export class LaneManager {
       // callers get no role routing and the sidecar falls back to recon copy.
       geminiRole: params.lane === "gemini" ? minted.profileId : undefined,
     };
-    const spec = this.resolveSpec(params.lane, opts, runDir);
+
+    let cwd = params.cwd ?? this.baseRepo;
+    let worktreePath: string | undefined;
+    let spec: SpawnSpec;
+    try {
+      // Fail-closed lane-specific gates (opencode requires an explicit model,
+      // gemini's own rules, sandbox validation) live inside resolveSpec — run
+      // it BEFORE createWorktree so a rejection here never leaves a real
+      // worktree behind with nothing tracking it (#35 / C1).
+      spec = this.resolveSpec(params.lane, requestOpts, runDir);
+      if (params.worktree) {
+        // CP2 (target-aware isolation invariant): the isolated worktree must never
+        // BE — or contain, or sit inside — the target repo's primary checkout.
+        // deriveWorktreePath keeps it under WORKTREES_ROOT; this guard rejects a
+        // misconfiguration (WORKTREES_ROOT set inside the repo) that would put
+        // writes back on the very checkout the isolation exists to protect.
+        assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree), targetRepo);
+        worktreePath = await createWorktree(params.worktree, targetRepo);
+        cwd = worktreePath;
+      }
+    } catch (e) {
+      // Leave a readable failure record instead of a silent gap: foreign.ts's
+      // scan treats a stub with `terminal_at` as already-terminal, so this
+      // rejected dispatch never shows up on the orphan board either.
+      writeTelemetryStub(runDir, {
+        ...stub,
+        terminal_at: new Date().toISOString(),
+        terminal_reason: "rejected",
+        error: errMessage(e),
+      });
+      throw e;
+    }
     this.warningsById.set(id, spec.warnings);
 
     const run = new LaneRun({
@@ -390,7 +495,7 @@ export class LaneManager {
       worktreeBranch: params.worktree,
       worktreePath,
       targetRepo: worktreePath ? targetRepo : undefined,
-      requestOpts: opts,
+      requestOpts,
       initialPrompt: params.prompt,
       turnTimeoutMs: minted.turnTimeoutMs,
       supervised: minted.supervision === "sonnet",
@@ -440,6 +545,25 @@ export class LaneManager {
           `(only the supervised shape accepts one — see profiles.ts supervision)`,
       );
     }
+    // #37 A2: neither of these is covered by the checks below. `shuttingDown`
+    // can go true between a caller reading a run's status and issuing the
+    // correction; `this.closing` covers the narrower window where the reaper
+    // (or an operator) already started close(id) — closeAndWait() is a real
+    // async subprocess teardown, so at this point sessionClosed is still
+    // false and `conn` is still in `this.connections`, and without this gate
+    // a correction would be sent down a connection that a SIGTERM is racing
+    // to kill, with the worktree possibly removed out from under it moments
+    // later. Both are true answers, not retry prompts — same register as the
+    // "session is gone" sentence below.
+    if (this.shuttingDown) {
+      throw new Error(`Clanker manager is shutting down; refusing a correction turn for '${id}'`);
+    }
+    if (this.closing.has(id)) {
+      throw new Error(
+        `session for '${id}' is closing right now — the correction window has already passed. ` +
+          `The worker cannot be corrected mid-teardown; report the blocker instead of retrying.`,
+      );
+    }
     if (run.turnStatus === "running" || this.turnDrives.has(id)) {
       throw new Error(`a turn is already running for '${id}'; wait for it to reach a terminal state first`);
     }
@@ -479,6 +603,27 @@ export class LaneManager {
   }
 
   /**
+   * Shared teardown for the three "cancellation/shutdown raced setup" spots in
+   * `attemptInitialTurn` below (#37 A3) — before connect, after connect throws,
+   * and after connect succeeds. Only the third has a live `conn` to close;
+   * the first two race in before one exists. Behavior is byte-for-byte what
+   * all three call sites did inline before this extraction.
+   */
+  private async abortDuringSetup(run: LaneRun, conn?: LaneConnection): Promise<void> {
+    if (!run.cancellationRequested) run.requestCancellation();
+    if (conn) {
+      try {
+        await conn.closeAndWait();
+      } catch (err) {
+        console.error(`[clanker] subprocess shutdown failed for '${run.id}': ${errMessage(err)}`);
+      }
+    }
+    await this.computeTouched(run);
+    await this.close(run.id);
+    run.cancelTurn();
+  }
+
+  /**
    * Drive the first turn of a fresh dispatch, with one automatic retry when
    * the failure looks like a transient backend-capacity condition (see
    * failure-classifier.ts isCapacityTransient). CLANKER-INFRA-FAILURE never
@@ -489,10 +634,7 @@ export class LaneManager {
    */
   private async attemptInitialTurn(run: LaneRun, spec: SpawnSpec, prompt: string, attempt: number): Promise<void> {
     if (run.cancellationRequested || this.shuttingDown) {
-      if (!run.cancellationRequested) run.requestCancellation();
-      await this.computeTouched(run);
-      await this.close(run.id);
-      run.cancelTurn();
+      await this.abortDuringSetup(run);
       return;
     }
     let conn: LaneConnection;
@@ -510,10 +652,7 @@ export class LaneManager {
       });
     } catch (e) {
       if (run.cancellationRequested || this.shuttingDown) {
-        if (!run.cancellationRequested) run.requestCancellation();
-        await this.computeTouched(run);
-        await this.close(run.id);
-        run.cancelTurn();
+        await this.abortDuringSetup(run);
         return;
       }
       const message = errMessage(e);
@@ -529,17 +668,7 @@ export class LaneManager {
       if (this.pendingConnects.get(run.id) === controller) this.pendingConnects.delete(run.id);
     }
     if (run.cancellationRequested || this.shuttingDown) {
-      if (!run.cancellationRequested) run.requestCancellation();
-      try {
-        await conn.closeAndWait();
-      } catch (err) {
-        console.error(
-          `[clanker] subprocess shutdown failed for '${run.id}': ${errMessage(err)}`,
-        );
-      }
-      await this.computeTouched(run);
-      await this.close(run.id);
-      run.cancelTurn();
+      await this.abortDuringSetup(run, conn);
       return;
     }
     this.connections.set(run.id, conn);
@@ -617,8 +746,13 @@ export class LaneManager {
           turnTimer.promise.then(() => ({ kind: "timeout" as const })),
         ]);
         if (outcome.kind === "timeout") {
+          // #37 B1: the stderr tail is readable evidence (conn.stderr()) even
+          // when the process hasn't exited — a turn stuck on a backend that
+          // logged a warning before hanging used to lose that evidence
+          // entirely; only the exit-with-info branch below ever carried it.
           throw new Error(
-            `turn exceeded CLANKER_TURN_TIMEOUT_MS (${turnTimeoutMs}ms) with no completion; killing the Clanker`,
+            `turn exceeded CLANKER_TURN_TIMEOUT_MS (${turnTimeoutMs}ms) with no completion; killing the Clanker` +
+              stderrSuffix(conn.stderr()),
           );
         }
         if (outcome.kind === "exit" || outcome.kind === "closed") {
@@ -630,12 +764,17 @@ export class LaneManager {
               : await Promise.race([conn.exited, createTimeout(500).promise.then(() => null)]);
           if (info) {
             const { code, signal, stderr } = info;
-            throw new Error(
-              `lane process exited mid-turn (code=${code} signal=${signal})${stderr.trim() ? `; stderr: ${stderr.trim().slice(-400)}` : ""}`,
-            );
+            throw new Error(`lane process exited mid-turn (code=${code} signal=${signal})${stderrSuffix(stderr)}`);
           }
+          // #37 B1: no exit info arrived within the 500ms grace above — the
+          // stream closed but the process's own exit event is still pending.
+          // The stderr tail was previously dropped on this specific branch
+          // even though acp-client.ts had been accumulating it the whole
+          // time; conn.stderr() reads the same live buffer the exit-info
+          // branch above reads from `info.stderr`.
           throw new Error(
-            `ACP connection closed mid-turn: ${outcome.kind === "closed" ? errMessage(outcome.err) : "process exited"}`,
+            `ACP connection closed mid-turn: ${outcome.kind === "closed" ? errMessage(outcome.err) : "process exited"}` +
+              stderrSuffix(conn.stderr()),
           );
         }
         if (outcome.m.kind === "stop") {
@@ -836,7 +975,17 @@ export class LaneManager {
     const mine = new Set<string>();
     for (const run of this.runs.values()) {
       mine.add(run.id);
-      if (run.sessionClosed) continue;
+      // #37 A1: `close(id)` runs its real async teardown (closeAndWait — up to
+      // ~4s of subprocess/git shell-out) BEFORE the matching completeTurn() /
+      // failTurn() / cancelTurn() flips turnStatus off "running" (see every
+      // call site above). `sessionClosed` alone is true partway through that
+      // window while the job is still genuinely running — filtering on it by
+      // itself hid an in-flight job from list() entirely (it is also in
+      // `mine`, so the foreign scan below correctly stays silent about it
+      // too): status/wait still answered "running" while list() said nothing
+      // was there at all. Only skip once the turn has ALSO reached a terminal
+      // state.
+      if (run.sessionClosed && run.isTerminalTurn()) continue;
       out.push({
         id: run.id,
         lane: run.lane,
@@ -973,6 +1122,14 @@ export class LaneManager {
     const reaped: string[] = [];
     for (const run of [...this.runs.values()]) {
       if (run.sessionClosed) continue;
+      // #37 A2: a run with an in-flight drive (attemptInitialTurn/
+      // driveContinuation still running) owns its own close()+terminal
+      // transition. Reaping it here would race that drive's own close() call
+      // — same target, same dedup map, harmless on its own — but against a
+      // drive that has NOT yet reached `run.isTerminalTurn()`, e.g. mid
+      // promptExisting continuation, which is exactly the shape A2 exists to
+      // protect.
+      if (this.turnDrives.has(run.id)) continue;
       if (run.turnStatus !== "running" && run.idleMs() > this.sessionTtlMs) {
         await this.close(run.id);
         reaped.push(run.id);
@@ -1002,86 +1159,7 @@ export class LaneManager {
   }
 }
 
-function errMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
-/**
- * Resolve symlinks in a path that may not exist yet: realpath the deepest
- * ancestor that DOES exist, then re-append the not-yet-created tail. A bare
- * `path.resolve` leaves symlinks unresolved, so a WORKTREES_ROOT that is a
- * symlink pointing inside the target repo would pass a literal-string overlap
- * check while git still lands the worktree inside the checkout (#12 hardening).
- */
-function realpathBestEffort(p: string): string {
-  let cur = path.resolve(p);
-  const tail: string[] = [];
-  for (;;) {
-    try {
-      const real = fs.realpathSync(cur);
-      return tail.length ? path.join(real, ...tail) : real;
-    } catch {
-      const parent = path.dirname(cur);
-      if (parent === cur) return path.resolve(p); // reached the root; nothing resolved
-      tail.unshift(path.basename(cur));
-      cur = parent;
-    }
-  }
-}
-
-/**
- * Enforce the target-aware isolation invariant (#12): the worktree a write
- * dispatch runs in must be a distinct path from the target repo's primary
- * checkout — never equal to it, inside it, or containing it. Under normal
- * config (WORKTREES_ROOT under ~/.cache) this always holds; the guard exists to
- * reject a misconfiguration that would route writes back onto the checkout the
- * isolation is meant to protect. Both sides are realpath-resolved first so a
- * symlinked WORKTREES_ROOT cannot slip a worktree inside the repo undetected.
- * Exported for a direct unit test.
- */
-export function assertWorktreeOutsideRepo(worktreePath: string, targetRepo: string): void {
-  const wt = realpathBestEffort(worktreePath);
-  const repo = realpathBestEffort(targetRepo);
-  if (wt === repo || wt.startsWith(repo + path.sep) || repo.startsWith(wt + path.sep)) {
-    throw new Error(
-      `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; ` +
-        `refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT ` +
-        `outside the repo)`,
-    );
-  }
-}
-
-/** Append the human-readable infra-failure advisory to an error message when classified. */
-function annotatedError(message: string, failureClass: string | undefined): string {
-  if (failureClass === INFRA_FAILURE_TAG) {
-    return `${message}\n\n[${INFRA_FAILURE_TAG}] ${INFRA_FAILURE_ADVISORY}`;
-  }
-  return message;
-}
-
-/** A cancelable timeout whose promise resolves after `ms`. */
-function createTimeout(ms: number): { promise: Promise<void>; cancel: () => void } {
-  let handle: NodeJS.Timeout;
-  const promise = new Promise<void>((resolve) => {
-    handle = setTimeout(resolve, ms);
-    handle.unref?.();
-  });
-  return { promise, cancel: () => clearTimeout(handle) };
-}
-
-function dedupe(items: string[]): string[] {
-  return [...new Set(items)];
-}
-
-function clampWait(ms?: number): number {
-  if (ms === undefined) return DEFAULT_WAIT_MS;
-  if (!Number.isFinite(ms) || ms < 0) return DEFAULT_WAIT_MS;
-  return Math.min(ms, MAX_WAIT_MS);
-}
-
-function envInt(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined) return fallback;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
+// errMessage / annotatedError / createTimeout / dedupe / clampWait / envInt
+// live in util.ts (#37 A4) — zero coupling to LaneManager's instance state.
+// assertWorktreeOutsideRepo / realpathBestEffort live in worktree.ts, next to
+// the rest of the worktree lifecycle logic the guard enforces.
