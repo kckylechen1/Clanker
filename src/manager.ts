@@ -212,6 +212,13 @@ interface TelemetryStub {
   lane: LaneName;
   profileId: string;
   cwd: string;
+  /**
+   * The server process that minted this dispatch (#32). Written here — in the
+   * stub, before a LaneRun or a worker exists — because "whose session is this"
+   * is a question a dispatch that died at a fail-closed gate still has to
+   * answer; RunTelemetry.server_pid carries the same value afterwards.
+   */
+  server_pid: number;
   created_at: string;
   requested_model?: string;
   /** Present only once the dispatch has been rejected before spawning. */
@@ -470,6 +477,7 @@ export class LaneManager {
       lane: params.lane,
       profileId: profile,
       cwd: params.cwd ?? this.baseRepo,
+      server_pid: process.pid,
       created_at: new Date().toISOString(),
       requested_model: params.model,
     };
@@ -778,6 +786,10 @@ export class LaneManager {
         handshakeTimeoutMs: this.handshakeTimeoutMs,
         terminateGraceMs: this.processTerminateGraceMs,
         signal: controller.signal,
+        // #32: persist the worker's identity at spawn time, not after the
+        // handshake — the durable record has to name a process that may still
+        // be alive when this server is not.
+        onSpawn: ({ pid, startedAt }) => run.noteWorkerSpawned(pid, startedAt),
       });
     } catch (e) {
       if (run.cancellationRequested || this.shuttingDown) {
@@ -791,7 +803,15 @@ export class LaneManager {
       }
       await this.computeTouched(run);
       await this.close(run.id);
-      run.failTurn(message);
+      // A connect failure is a real classifiable failure and used to be the one
+      // terminal path that carried NO failure_class at all. It is also the only
+      // path CLANKER-ENV-DRIFT (#37) can ever arrive on — a spawn that dies with
+      // ENOENT never gets far enough to run a turn — so leaving it unclassified
+      // would have made that tag unreachable code. classifyTurnFailure is not
+      // consulted here on purpose: its CLANKER-INFRA-FAILURE describes a backend
+      // that rejected the request SHAPE, which presupposes a backend that was
+      // reached; nothing here ever got that far.
+      run.failTurn(message, classifyBackendFailure(message));
       return;
     } finally {
       if (this.pendingConnects.get(run.id) === controller) this.pendingConnects.delete(run.id);

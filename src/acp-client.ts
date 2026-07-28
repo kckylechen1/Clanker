@@ -7,7 +7,7 @@
  * (`prompt()` + `nextUpdate()` loop yielding `session_update` / `stop`) maps
  * 1:1 onto spec §6, so hand-rolling the JSON-RPC core is unnecessary.
  */
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -23,6 +23,7 @@ import type {
   WriteTextFileResponse,
 } from "@agentclientprotocol/sdk";
 import { HANDSHAKE_TIMEOUT_MS, PROCESS_TERM_GRACE_MS } from "./constants.js";
+import { resolveNodeBinary } from "./node-binary.js";
 import type { SpawnSpec } from "./types.js";
 
 /** Minimal promise-with-resolvers helper (Node's Promise.withResolvers exists on 22+ but kept explicit). */
@@ -42,6 +43,59 @@ export interface ExitInfo {
   code: number | null;
   signal: NodeJS.Signals | null;
   stderr: string;
+}
+
+/**
+ * Signal a worker's whole PROCESS GROUP, falling back to the bare pid (#32).
+ *
+ * A lane worker is not a leaf: codex-acp spawns `codex app-server`, opencode
+ * and grok start helpers of their own. Killing only `child.pid` leaves those
+ * grandchildren running — still holding the worktree, still burning tokens,
+ * invisible to every lifecycle tool. `connect()` therefore spawns each worker
+ * `detached`, which makes it the leader of a new group whose pgid equals its
+ * pid, and every kill path in this file signals `-pid` so the whole tree goes
+ * down together.
+ *
+ * This is deliberately NOT scoped to the foreign-adoption protocol #32 adds on
+ * top of it: own and foreign workers grow the same grandchildren, so the
+ * owner's own teardown (close / closeAndWait / handshake abort) needs the same
+ * knife. Adoption just reuses it.
+ *
+ * Two guards, both load-bearing:
+ *  - An already-reaped child gets NOTHING. Once the OS has reaped the worker
+ *    its pid — and therefore the pgid derived from it — may already have been
+ *    recycled onto an unrelated process, and `process.kill(-pid)` would signal
+ *    a whole group of innocents. `child.kill()` is safe there because Node
+ *    knows the child is gone; the raw syscall has no such knowledge.
+ *  - A failed group kill (ESRCH: group already gone; EPERM; or a platform/spawn
+ *    shape where the worker never led a group at all — win32, or any spawn that
+ *    predates `detached`) falls through to the single-pid kill rather than
+ *    leaving a live worker unsignaled. Losing the grandchildren is bad; losing
+ *    the worker too would be worse.
+ *
+ * (The gemini sidecar leans on this function rather than duplicating it. Since
+ * PR #40's cold review it spawns `agy` UNDETACHED, so agy and its descendants
+ * inherit the sidecar's group and this one kill(-pid) reaps the whole tree;
+ * gemini-acp.ts's own `signalAgy` therefore signals a bare pid and never a
+ * group. Its reaped-child gate is a copy of the one below, not an import: it is
+ * a standalone sidecar with no imports from src/, and sharing a module would
+ * drag this file into the sidecar bundle. Change one gate, change both.)
+ */
+function signalWorkerGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform !== "win32" && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      /* group gone or never existed — fall through to the direct pid */
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    /* process may already be gone */
+  }
 }
 
 /** Permission option shape we depend on (subset of ACP PermissionOption). */
@@ -83,6 +137,17 @@ export interface LaneConnectionOptions {
   terminateGraceMs?: number;
   /** Cancels a subprocess that is still completing the ACP handshake. */
   signal?: AbortSignal;
+  /**
+   * Invoked the instant `spawn` hands back a pid, BEFORE the handshake (#32).
+   *
+   * The handshake can take up to HANDSHAKE_TIMEOUT_MS, and a worker is a real,
+   * running, grandchild-growing process for every millisecond of it. If this
+   * server dies in that window, whoever finds the leftovers can only kill them
+   * with a pid that was written down — so the pid is published here rather
+   * than on the success path. `pid` is also the worker's process GROUP id (the
+   * spawn is detached; see signalWorkerGroup).
+   */
+  onSpawn?: (info: { pid: number; startedAt: number }) => void;
 }
 
 /**
@@ -144,10 +209,10 @@ export class LaneConnection {
       /* already disposed */
     }
     if (!this.exitedProcess) {
-      this.child.kill("SIGTERM");
+      signalWorkerGroup(this.child, "SIGTERM");
       // Escalate if the child ignores SIGTERM.
       setTimeout(() => {
-        if (!this.exitedProcess) this.child.kill("SIGKILL");
+        if (!this.exitedProcess) signalWorkerGroup(this.child, "SIGKILL");
       }, this.terminateGraceMs).unref();
     }
   }
@@ -198,16 +263,35 @@ export class LaneConnection {
       );
     }
 
-    const nodeBinDir = path.dirname(process.execPath);
+    // #37: through resolveNodeBinary, so the prepended directory is the one
+    // that still EXISTS. When the recorded binary is gone the fallback is the
+    // bare name `node` (PATH resolves it), which has no directory to prepend —
+    // and prepending the dead one would only re-assert the vanished layout.
+    const nodeBin = resolveNodeBinary();
+    const nodeBinDir = path.isAbsolute(nodeBin) ? path.dirname(nodeBin) + path.delimiter : "";
     const child = spawn(spec.command, spec.args, {
       cwd,
       env: {
         ...process.env,
         ...spec.env,
-        PATH: `${nodeBinDir}${path.delimiter}${spec.env?.PATH ?? process.env.PATH ?? ""}`,
+        PATH: `${nodeBinDir}${spec.env?.PATH ?? process.env.PATH ?? ""}`,
       },
+      // Give every worker its own process group (pgid === worker pid) so the
+      // kill paths above can take down the grandchildren it spawns — see
+      // signalWorkerGroup. `detached` changes NOTHING else here: stdio stays
+      // piped (the ACP transport is these pipes), and the child is
+      // deliberately NOT unref'd — this server must keep waiting on its exit.
+      // The one real consequence is that a worker no longer receives signals
+      // sent to the SERVER's group (e.g. a terminal Ctrl-C); that is handled
+      // by index.ts's SIGINT/SIGTERM handlers, which run manager.shutdown()
+      // and come back through these same kill paths.
+      detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams;
+    const spawnedAt = Date.now();
+    // No pid means spawn itself failed; the 'error' event below is the honest
+    // report of that, and there is no process to publish.
+    if (child.pid !== undefined) options.onSpawn?.({ pid: child.pid, startedAt: spawnedAt });
 
     let stderrTail = "";
     child.stderr.setEncoding("utf8");
@@ -224,11 +308,9 @@ export class LaneConnection {
     const terminatePending = () => {
       if (resolvedReady) return;
       aborted = true;
-      try { child.kill("SIGTERM"); } catch { /* process may already be gone */ }
+      signalWorkerGroup(child, "SIGTERM");
       const killTimer = setTimeout(() => {
-        if (!resolvedReady) {
-          try { child.kill("SIGKILL"); } catch { /* process may already be gone */ }
-        }
+        if (!resolvedReady) signalWorkerGroup(child, "SIGKILL");
       }, options.terminateGraceMs ?? PROCESS_TERM_GRACE_MS);
       killTimer.unref?.();
       void exited.promise.finally(() => clearTimeout(killTimer));
@@ -238,11 +320,7 @@ export class LaneConnection {
 
     const hsTimer = setTimeout(() => {
       if (!resolvedReady) {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          /* noop */
-        }
+        signalWorkerGroup(child, "SIGKILL");
         ready.reject(new Error(`handshake timed out after ${handshakeTimeoutMs}ms for '${spec.command}'`));
       }
     }, handshakeTimeoutMs);
@@ -326,8 +404,11 @@ export class LaneConnection {
         if (!resolvedReady) {
           // A JSON-RPC handshake rejection can leave the subprocess alive
           // with stdio pipes open. Kill it so the parent's event loop cannot
-          // leak a failed backend connection.
-          if (!child.killed) child.kill("SIGKILL");
+          // leak a failed backend connection. No `child.killed` guard: that
+          // flag only tracks single-pid `child.kill()` calls, so it stays
+          // false after a group kill and would gate this on the wrong fact —
+          // signalWorkerGroup's own already-reaped check is the real guard.
+          signalWorkerGroup(child, "SIGKILL");
           ready.reject(e);
         }
       });

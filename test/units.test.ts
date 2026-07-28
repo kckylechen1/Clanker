@@ -8,6 +8,7 @@ import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { choosePermissionOption } from "../src/acp-client.js";
 import { DIGEST_CHAR_BUDGET, isGlmModel, SERVER_VERSION, resolveOcModel } from "../src/constants.js";
 import { buildSpawnSpec } from "../src/backends.js";
+import { resolveNodeBinary } from "../src/node-binary.js";
 import { LaneRun } from "../src/run.js";
 
 // ---- CP3: opencode model shortname single source ------------------------
@@ -17,7 +18,7 @@ test("runtime, package, and plugin versions agree", () => {
   const pluginVersion = JSON.parse(
     fs.readFileSync(path.resolve("plugin/.claude-plugin/plugin.json"), "utf8"),
   ).version;
-  assert.equal(SERVER_VERSION, "0.3.7");
+  assert.equal(SERVER_VERSION, "0.3.8");
   assert.equal(packageVersion, SERVER_VERSION);
   assert.equal(pluginVersion, SERVER_VERSION);
   const codexPluginVersion = JSON.parse(
@@ -181,7 +182,10 @@ test("opencode spawn without an explicit model fails closed", () => {
 test("codex and grok lane spawn commands remain direct", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oauth-lanes-"));
   const codexSpec = buildSpawnSpec("codex", {}, runDir);
-  assert.equal(codexSpec.command, process.execPath);
+  // resolveNodeBinary(), not process.execPath: since #37 the spawn command is
+  // the recorded-and-still-existing node, so THAT is the true source this
+  // assertion has to follow.
+  assert.equal(codexSpec.command, resolveNodeBinary());
   const grokSpec = buildSpawnSpec("grok", { readOnly: true }, runDir);
   assert.equal(grokSpec.command, "grok");
 });
@@ -339,7 +343,7 @@ test("codex lane's explicit model/effort override wins over the pinned default",
 test("codex lane resolves the pinned local codex-acp dependency in source mode, not npx", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-codex-npx-"));
   const spec = buildSpawnSpec("codex", {}, runDir);
-  assert.equal(spec.command, process.execPath, "spawns via the running node binary, not `npx`");
+  assert.equal(spec.command, resolveNodeBinary(), "spawns via the running node binary, not `npx`");
   assert.equal(spec.args.length, 1, "single arg: the resolved entry script path");
   assert.ok(
     spec.args[0].endsWith(path.join("@agentclientprotocol", "codex-acp", "dist", "index.js")),

@@ -120,6 +120,26 @@ export interface RunTelemetry {
   base_sha?: string;
   /** Hard per-turn ceiling actually in force for this run (per-profile, see profiles.ts). */
   turn_timeout_ms?: number;
+  /**
+   * Process identity of this run, written so a LATER process can tell whether
+   * the run is still owned by anyone (#32's orphan-adoption ground floor).
+   * Nothing in the codebase reads these yet — the adoption protocol (foreign
+   * cancel/wait) is a separate segment; today they are pure disk forensics.
+   *
+   * - `server_pid` — the MCP server that minted the run. Present from the
+   *   dispatch stub onward, i.e. before any worker exists, because "which
+   *   session owns this" is exactly the question a dispatch that died early
+   *   also has to answer.
+   * - `worker_pid` — the spawned lane worker. Also its PROCESS GROUP id: the
+   *   worker is spawned `detached` (acp-client.ts), so `kill(-worker_pid)`
+   *   reaches its grandchildren too. Written the moment spawn returns a pid,
+   *   NOT after the handshake — a server that dies mid-handshake leaves a live
+   *   worker behind just the same, and an unrecorded pid is an unkillable one.
+   * - `worker_started_at` — ms epoch of that spawn. The pid-reuse guard: a pid
+   *   alone cannot say whether the process answering to it today is the worker
+   *   or something the OS handed the number to afterwards.
+   */
+  server_pid?: number; worker_pid?: number; worker_started_at?: number;
   created_at: string; started_at?: string;
   terminal_at?: string; duration_ms?: number; turns: number; retries: number; corrections: number;
   continuation_turns: number; cancellation_requested: boolean; forced_kill: boolean;

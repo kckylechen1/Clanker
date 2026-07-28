@@ -14580,15 +14580,37 @@ ${prompt}`);
     const child = spawn(invocation.command, invocation.args, {
       cwd: session.cwd,
       env: agyEnv,
-      // A headless agent may launch terminal/search helpers of its own. Give
-      // the turn a process group so cancellation tears down the whole tree
-      // instead of orphaning a grandchild that keeps stdout/stderr open.
-      detached: process.platform !== "win32",
+      // NOT detached, deliberately (PR #40 cold review, run codex-62e86).
+      //
+      // acp-client.ts spawns THIS sidecar detached, so the sidecar leads a
+      // process group whose pgid is its own pid, and every manager teardown
+      // signals `-sidecarPid`. Leaving agy undetached puts it in that same
+      // group: one kill(-sidecarPid) covers the sidecar, agy, and every
+      // descendant agy did not setsid away — atomically, in one syscall,
+      // needing no cooperation from this process.
+      //
+      // Giving agy a group of its own (the shape this replaces) looked
+      // stronger and was weaker. The manager's escalation to SIGKILL is
+      // uncatchable and lands on the SIDECAR's group only, so whenever the
+      // manager's grace elapsed before terminateChild's fixed 1s inner
+      // escalation below, this process died first and agy's entire group was
+      // orphaned with nothing left alive that knew its pgid.
+      //
+      // The price, paid knowingly: a session/cancel can no longer take down
+      // agy's own helpers, because a group kill from in here would kill this
+      // sidecar too. terminateChild signals agy's pid alone, so a helper agy
+      // leaves behind lives until the manager's group kill — bounded by the
+      // connection (manager.ts's cancel() closes it after CANCEL_GRACE_MS),
+      // rather than orphaned past every process that knew its pgid.
+      detached: false,
       stdio: ["ignore", "pipe", "pipe"]
     });
     session.active = child;
     let stdout = "";
     let stderr = "";
+    const releaseSlot = () => {
+      if (session.active === child) session.active = void 0;
+    };
     child.stdout.setEncoding("utf8").on("data", (chunk) => {
       stdout += chunk;
     });
@@ -14596,11 +14618,16 @@ ${prompt}`);
       stderr += chunk;
     });
     child.once("error", (error40) => {
-      session.active = void 0;
+      releaseSlot();
       reject(new Error(`Clanker: Gemini failed to start agy: ${error40.message}`));
     });
+    child.once("exit", () => {
+      if (!session.cancellationRequested) return;
+      releaseSlot();
+      reject(new TurnCancelled("Clanker: Gemini turn cancelled"));
+    });
     child.once("close", (code, signal) => {
-      session.active = void 0;
+      releaseSlot();
       if (session.cancellationRequested) {
         reject(new TurnCancelled("Clanker: Gemini turn cancelled"));
         return;
@@ -14682,21 +14709,15 @@ function gitPath(cwd, flag) {
 }
 function terminateChild(session) {
   const child = session.active;
-  if (!child || child.exitCode !== null) return;
-  signalChildTree(child, "SIGTERM");
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  signalAgy(child, "SIGTERM");
   const timer = setTimeout(() => {
-    if (session.active === child && child.exitCode === null) signalChildTree(child, "SIGKILL");
+    if (session.active === child && child.exitCode === null && child.signalCode === null) signalAgy(child, "SIGKILL");
   }, 1e3);
   timer.unref?.();
 }
-function signalChildTree(child, signal) {
-  if (process.platform !== "win32" && child.pid !== void 0) {
-    try {
-      process.kill(-child.pid, signal);
-      return;
-    } catch {
-    }
-  }
+function signalAgy(child, signal) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
   try {
     child.kill(signal);
   } catch {

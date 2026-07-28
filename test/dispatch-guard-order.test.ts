@@ -106,6 +106,9 @@ test("C1: a successful dispatch has a telemetry.json with created_at before the 
     assert.ok(immediate.created_at, "the telemetry stub must exist with created_at before spawn/connect completes");
     assert.equal(immediate.host, "standalone");
     assert.equal(immediate.lane, "codex");
+    // #32: the stub names its owner from the very first write — a dispatch
+    // that dies before a worker exists still has to say whose session it was.
+    assert.equal(immediate.server_pid, process.pid);
 
     await until(() => m.status(id).status !== "running", 5_000);
     const final = JSON.parse(fs.readFileSync(telemetryPath, "utf8"));

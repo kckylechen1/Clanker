@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LaneManager, assertWorktreeOutsideRepo, type SpecResolver, type WaitResult } from "../src/manager.js";
-import { INFRA_FAILURE_TAG } from "../src/failure-classifier.js";
+import { ENV_DRIFT_TAG, INFRA_FAILURE_TAG } from "../src/failure-classifier.js";
 import { LaneRun } from "../src/run.js";
 import type { LaneRequestOptions } from "../src/types.js";
 import { fakeResolver, fakeSpec, until } from "./helpers.js";
@@ -123,6 +123,44 @@ test("plan events project into status + touched_files from tool locations", asyn
       (r.touched_files ?? []).some((f) => f.endsWith("planned.txt")),
       `touched_files should include planned.txt, got ${JSON.stringify(r.touched_files)}`,
     );
+  } finally {
+    await m.shutdown();
+  }
+});
+
+/**
+ * #32: the durable record has to name the processes involved, or a later
+ * session that finds an in-flight run on disk can see it and still not touch
+ * it. The three fields are written by exactly two places — the dispatch stub
+ * (server_pid, manager.ts) and the spawn hook (worker pair, run.ts
+ * noteWorkerSpawned) — and, this segment, read by nobody: the adoption
+ * protocol that consumes them is a separate change. So the assertion has to be
+ * that they are on disk, live, and true, while the worker is still running.
+ */
+test("#32: telemetry.json names the server pid and the live worker's pid/start time", async () => {
+  const m = makeManager();
+  try {
+    // STALL never answers, so the worker is guaranteed alive while we look at it.
+    const { id } = await m.dispatchStart({ lane: "codex", prompt: "STALL forever", cwd: os.tmpdir(), readOnly: true });
+    const telemetryPath = path.join(process.env.CLANKER_RUNS_ROOT!, id, "telemetry.json");
+    const read = () => JSON.parse(fs.readFileSync(telemetryPath, "utf8"));
+    await until(() => read().worker_pid !== undefined, 5_000);
+
+    const t = read();
+    assert.equal(t.server_pid, process.pid, "server_pid must be THIS process — the one holding the worker's stdio");
+    assert.ok(Number.isInteger(t.worker_pid) && t.worker_pid > 0, `worker_pid must be a real pid, got ${t.worker_pid}`);
+    assert.notEqual(t.worker_pid, process.pid, "the worker is a separate process, not the server");
+    // The pid on disk must be the process that is actually running the lane,
+    // not merely a number of the right shape.
+    assert.doesNotThrow(() => process.kill(t.worker_pid, 0), "worker_pid must name a process that is alive right now");
+
+    const createdAtMs = Date.parse(t.created_at);
+    assert.ok(Number.isFinite(createdAtMs), "created_at must parse");
+    assert.ok(
+      Math.abs(t.worker_started_at - createdAtMs) < 60_000,
+      `worker_started_at (${t.worker_started_at}) must be ms-epoch near created_at (${createdAtMs})`,
+    );
+    assert.ok(t.worker_started_at <= Date.now(), "worker_started_at must not be in the future");
   } finally {
     await m.shutdown();
   }
@@ -277,6 +315,31 @@ test("CP1: a subprocess that exits mid-turn drives the run to error and dispatch
     const r = await waitTerminal(m, id, 5000);
     assert.equal(r.status, "error");
     assert.match(r.error ?? "", /exited mid-turn/);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+/**
+ * #37: the 2026-07-28 shape end to end — the command a long-lived server spawns
+ * is gone, so connect() never gets a process at all. That failure used to be
+ * the ONE terminal path carrying no failure_class, which is how an environment
+ * break reached the dispatcher wearing a task failure's clothes.
+ */
+test("#37: a spawn ENOENT reaches the dispatcher tagged CLANKER-ENV-DRIFT", async () => {
+  const gone = path.join(os.tmpdir(), "clanker-node-bumped-away", "bin", "node");
+  const m = new LaneManager({
+    resolveSpec: () => ({ command: gone, args: ["whatever.mjs"], env: {}, warnings: [] }),
+    disableReaper: true,
+    baseRepo: os.tmpdir(),
+  });
+  try {
+    const { id } = await m.dispatchStart({ lane: "codex", prompt: "hello", cwd: os.tmpdir(), readOnly: true });
+    const r = await waitTerminal(m, id, 5000);
+    assert.equal(r.status, "error");
+    assert.match(r.error ?? "", /ENOENT/);
+    assert.equal(r.failure_class, ENV_DRIFT_TAG, "an ENOENT spawn is the environment, not the task");
+    assert.equal(m.status(id).failure_class, ENV_DRIFT_TAG, "status must carry the same verdict as wait");
   } finally {
     await m.shutdown();
   }
