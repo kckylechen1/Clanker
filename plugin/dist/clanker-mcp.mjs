@@ -3226,8 +3226,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path8) {
-      let input = path8;
+    function removeDotSegments(path9) {
+      let input = path9;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3479,8 +3479,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path8, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path8 && path8 !== "/" ? path8 : void 0;
+        const [path9, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path9 && path9 !== "/" ? path9 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -6873,12 +6873,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs7, exportName) {
+    function addFormats(ajv, list, fs8, exportName) {
       var _a;
       var _b;
       (_a = (_b = ajv.opts.code).formats) !== null && _a !== void 0 ? _a : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs7[f]);
+        ajv.addFormat(f, fs8[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -7364,8 +7364,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path8, errorMaps, issueData } = params;
-  const fullPath = [...path8, ...issueData.path || []];
+  const { data, path: path9, errorMaps, issueData } = params;
+  const fullPath = [...path9, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7481,11 +7481,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path8, key) {
+  constructor(parent, value, path9, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path8;
+    this._path = path9;
     this._key = key;
   }
   get path() {
@@ -11367,10 +11367,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path8) {
-  if (!path8)
+function getElementAtPath(obj, path9) {
+  if (!path9)
     return obj;
-  return path8.reduce((acc, key) => acc?.[key], obj);
+  return path9.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11690,11 +11690,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path8, issues) {
+function prefixIssues(path9, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path8);
+    iss.path.unshift(path9);
     return iss;
   });
 }
@@ -11831,7 +11831,7 @@ function treeifyError(error40, _mapper) {
     return issue2.message;
   };
   const result = { errors: [] };
-  const processError = (error41, path8 = []) => {
+  const processError = (error41, path9 = []) => {
     var _a, _b;
     for (const issue2 of error41.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
@@ -11841,7 +11841,7 @@ function treeifyError(error40, _mapper) {
       } else if (issue2.code === "invalid_element") {
         processError({ issues: issue2.issues }, issue2.path);
       } else {
-        const fullpath = [...path8, ...issue2.path];
+        const fullpath = [...path9, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -11871,9 +11871,9 @@ function treeifyError(error40, _mapper) {
   processError(error40);
   return result;
 }
-function toDotPath(path8) {
+function toDotPath(path9) {
   const segs = [];
-  for (const seg of path8) {
+  for (const seg of path9) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -27757,10 +27757,11 @@ var FINAL_MESSAGE_CHAR_BUDGET = envInt(
 var CAPACITY_RETRY_BACKOFF_MS = envInt("CLANKER_CAPACITY_RETRY_BACKOFF_MS", 3e4);
 var PROGRESS_EXPERIMENTAL = process.env.CLANKER_PROGRESS_EXPERIMENTAL === "1";
 var RUNS_ROOT = process.env.CLANKER_RUNS_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "runs");
+var RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 864e5;
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.3.4";
+var SERVER_VERSION = "0.3.5";
 var DEFAULT_CODEX_MODEL = "gpt-5.5";
 var DEFAULT_CODEX_EFFORT = "xhigh";
 var OC_MODEL_ALIASES = {
@@ -31968,6 +31969,9 @@ function logHookError(runId, error40) {
 // src/run.ts
 var RESULT_FILE = "result.md";
 var RESULT_FINAL_MESSAGE_HEADING = "## final_message";
+var EVENTS_FILE = "events.jsonl";
+var CHUNKS_FILE = "chunks.log";
+var RUN_STREAM_FILES = [EVENTS_FILE, CHUNKS_FILE];
 var EMPTY_PLAN = {
   entries: [],
   completed: 0,
@@ -32551,12 +32555,12 @@ var LaneRun = class {
     const line = JSON.stringify({ ts: Date.now(), ...obj }) + "\n";
     if (this.sessionClosed) {
       fs4.mkdirSync(this.runDir, { recursive: true });
-      fs4.appendFileSync(path5.join(this.runDir, "events.jsonl"), line);
+      fs4.appendFileSync(path5.join(this.runDir, EVENTS_FILE), line);
       return;
     }
     if (!this.eventsStream) {
       fs4.mkdirSync(this.runDir, { recursive: true });
-      this.eventsStream = fs4.createWriteStream(path5.join(this.runDir, "events.jsonl"), { flags: "a" });
+      this.eventsStream = fs4.createWriteStream(path5.join(this.runDir, EVENTS_FILE), { flags: "a" });
     }
     this.eventsStream.write(line);
   }
@@ -32566,12 +32570,12 @@ var LaneRun = class {
 `;
     if (this.sessionClosed) {
       fs4.mkdirSync(this.runDir, { recursive: true });
-      fs4.appendFileSync(path5.join(this.runDir, "chunks.log"), line);
+      fs4.appendFileSync(path5.join(this.runDir, CHUNKS_FILE), line);
       return;
     }
     if (!this.chunksStream) {
       fs4.mkdirSync(this.runDir, { recursive: true });
-      this.chunksStream = fs4.createWriteStream(path5.join(this.runDir, "chunks.log"), { flags: "a" });
+      this.chunksStream = fs4.createWriteStream(path5.join(this.runDir, CHUNKS_FILE), { flags: "a" });
     }
     this.chunksStream.write(line);
   }
@@ -33546,6 +33550,63 @@ function registerTools(server, manager) {
   }, async () => ok({ clankers: manager.list() }));
 }
 
+// src/retention.ts
+import fs7 from "node:fs";
+import path8 from "node:path";
+function sweepRunStreams(options = {}) {
+  const runsRoot = options.runsRoot ?? RUNS_ROOT;
+  const ttlMs = options.ttlMs ?? RUN_STREAM_TTL_MS;
+  const now = options.now ?? Date.now();
+  const report = { scanned: 0, sweptRuns: 0, sweptFiles: 0, bytesFreed: 0, failures: 0 };
+  if (!(ttlMs > 0)) return report;
+  let entries;
+  try {
+    entries = fs7.readdirSync(runsRoot, { withFileTypes: true });
+  } catch {
+    return report;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    report.scanned++;
+    const runDir = path8.join(runsRoot, entry.name);
+    const streams = [];
+    let newestMtimeMs = 0;
+    for (const name of RUN_STREAM_FILES) {
+      const file2 = path8.join(runDir, name);
+      let stat;
+      try {
+        stat = fs7.statSync(file2);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      newestMtimeMs = Math.max(newestMtimeMs, stat.mtimeMs);
+      streams.push({ file: file2, size: stat.size });
+    }
+    if (streams.length === 0) continue;
+    if (now - newestMtimeMs <= ttlMs) continue;
+    let swept = 0;
+    for (const stream of streams) {
+      try {
+        fs7.rmSync(stream.file);
+        report.sweptFiles++;
+        report.bytesFreed += stream.size;
+        swept++;
+      } catch {
+        report.failures++;
+      }
+    }
+    if (swept > 0) report.sweptRuns++;
+  }
+  return report;
+}
+function formatSweepReport(report) {
+  if (report.sweptFiles === 0 && report.failures === 0) return null;
+  const mb = (report.bytesFreed / 1048576).toFixed(1);
+  const failed = report.failures > 0 ? `, ${report.failures} failed` : "";
+  return `retention: reclaimed ${report.sweptFiles} stream file(s) from ${report.sweptRuns} run(s), ${mb} MB${failed} (${report.scanned} scanned)`;
+}
+
 // src/index.ts
 async function main() {
   const host = parseHostArgs(process.argv.slice(2));
@@ -33564,6 +33625,8 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`${SERVER_NAME} v${SERVER_VERSION} host=${host} running on stdio`);
+  const sweep = formatSweepReport(sweepRunStreams());
+  if (sweep) console.error(`[clanker] ${sweep}`);
 }
 main().catch((error40) => {
   console.error("clanker fatal:", error40);

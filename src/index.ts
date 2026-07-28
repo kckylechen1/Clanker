@@ -13,6 +13,7 @@ import { SERVER_NAME, SERVER_VERSION } from "./constants.js";
 import { LaneManager } from "./manager.js";
 import { registerTools } from "./tools.js";
 import { parseHostArgs } from "./host.js";
+import { formatSweepReport, sweepRunStreams } from "./retention.js";
 
 async function main(): Promise<void> {
   const host = parseHostArgs(process.argv.slice(2));
@@ -34,6 +35,14 @@ async function main(): Promise<void> {
   await server.connect(transport);
   // stderr is safe for diagnostics; stdout is the MCP channel.
   console.error(`${SERVER_NAME} v${SERVER_VERSION} host=${host} running on stdio`);
+
+  // Reclaim cold run streams once per process, AFTER the transport is up: a
+  // host spawns one server per session, so startup is the only moment that is
+  // guaranteed to happen, and doing it here means a slow scan delays no
+  // handshake and can race no dispatch (none exists yet). Sweep failures are
+  // already folded into the report — it never throws.
+  const sweep = formatSweepReport(sweepRunStreams());
+  if (sweep) console.error(`[clanker] ${sweep}`);
 }
 
 main().catch((error) => {

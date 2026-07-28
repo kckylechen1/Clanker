@@ -51,6 +51,17 @@ export const RESULT_FILE = "result.md";
 /** Marker that opens the verbatim final-message section of `result.md`. */
 export const RESULT_FINAL_MESSAGE_HEADING = "## final_message";
 
+/**
+ * The two per-run forensic streams, named here rather than as literals at the
+ * four write sites below, because `retention.ts` deletes exactly the members of
+ * this list and nothing else. What a run directory is made of is one decision;
+ * a sweep that learned the names separately from the writer is one rename away
+ * from either missing a file forever or deleting the verdict.
+ */
+export const EVENTS_FILE = "events.jsonl";
+export const CHUNKS_FILE = "chunks.log";
+export const RUN_STREAM_FILES = [EVENTS_FILE, CHUNKS_FILE] as const;
+
 interface DigestEntry {
   seq: number;
   text: string;
@@ -690,12 +701,12 @@ export class LaneRun {
     const line = JSON.stringify({ ts: Date.now(), ...(obj as object) }) + "\n";
     if (this.sessionClosed) {
       fs.mkdirSync(this.runDir, { recursive: true });
-      fs.appendFileSync(path.join(this.runDir, "events.jsonl"), line);
+      fs.appendFileSync(path.join(this.runDir, EVENTS_FILE), line);
       return;
     }
     if (!this.eventsStream) {
       fs.mkdirSync(this.runDir, { recursive: true });
-      this.eventsStream = fs.createWriteStream(path.join(this.runDir, "events.jsonl"), { flags: "a" });
+      this.eventsStream = fs.createWriteStream(path.join(this.runDir, EVENTS_FILE), { flags: "a" });
     }
     this.eventsStream.write(line);
   }
@@ -705,12 +716,12 @@ export class LaneRun {
     const line = `[${new Date().toISOString()}] ${kind}: ${text}\n`;
     if (this.sessionClosed) {
       fs.mkdirSync(this.runDir, { recursive: true });
-      fs.appendFileSync(path.join(this.runDir, "chunks.log"), line);
+      fs.appendFileSync(path.join(this.runDir, CHUNKS_FILE), line);
       return;
     }
     if (!this.chunksStream) {
       fs.mkdirSync(this.runDir, { recursive: true });
-      this.chunksStream = fs.createWriteStream(path.join(this.runDir, "chunks.log"), { flags: "a" });
+      this.chunksStream = fs.createWriteStream(path.join(this.runDir, CHUNKS_FILE), { flags: "a" });
     }
     this.chunksStream.write(line);
   }

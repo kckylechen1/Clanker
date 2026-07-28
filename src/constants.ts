@@ -59,6 +59,14 @@ export const RUNS_ROOT =
   process.env.CLANKER_RUNS_ROOT ??
   path.join(os.homedir(), ".cache", "clanker", "runs");
 
+/**
+ * Age after which a run's cold forensic streams are reclaimed (see
+ * `retention.ts`). `0` disables the sweep entirely. Only `events.jsonl` and
+ * `chunks.log` are ever affected; `telemetry.json` and `result.md` are kept for
+ * the life of the run directory.
+ */
+export const RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 86_400_000;
+
 /** Root under which server-managed git worktrees are created. */
 export const WORKTREES_ROOT =
   process.env.CLANKER_WORKTREES_ROOT ??
@@ -75,7 +83,7 @@ export const WORKTREES_ROOT =
 export const BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 
 export const SERVER_NAME = "clanker-mcp-server";
-export const SERVER_VERSION = "0.3.4";
+export const SERVER_VERSION = "0.3.5";
 
 /**
  * Load-bearing default: without an explicit override, the codex lane must
