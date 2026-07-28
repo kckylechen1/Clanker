@@ -58,6 +58,11 @@ function alive(pid: number): boolean {
   }
 }
 
+/** Every pid a fake agy has appended so far — one line per turn. */
+function readPids(file: string): number[] {
+  return fs.readFileSync(file, "utf8").split("\n").map((line) => line.trim()).filter(Boolean).map(Number);
+}
+
 function readPid(file: string): number {
   const pid = Number.parseInt(fs.readFileSync(file, "utf8").trim(), 10);
   assert.equal(Number.isInteger(pid) && pid > 0, true, `expected a pid in ${file}, got ${JSON.stringify(fs.readFileSync(file, "utf8"))}`);
@@ -544,6 +549,82 @@ test("Gemini cancel settles on the child's exit, not on pipes an orphaned helper
     assert.doesNotMatch(conn.stderr(), /ESRCH|EPERM|Uncaught|UnhandledPromiseRejection/);
   } finally {
     killIfAlive(agyPid, helperPid);
+    conn.close();
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(captureDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The failure mode the exit-path settle introduces, and the guard against it.
+ *
+ * Settling a cancelled turn on `exit` means its `close` can now arrive AFTER
+ * the next turn has started and claimed `session.active`. A `close` handler
+ * that clears that slot unconditionally would strand the running turn's agy:
+ * terminateChild reads `session.active`, so from that moment on nothing —
+ * neither session/cancel nor the sidecar's own SIGTERM handler — can signal it.
+ * That is a leak of exactly the kind this review exists to close, so the slot is
+ * only ever cleared by the turn that filled it.
+ */
+test("a late `close` from a cancelled turn must not strand the turn that replaced it", { skip: !workspaceSandboxAvailable }, async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-gemini-relay-workspace-"));
+  const { dir: captureDir, path: capture } = tmpCaptureFile("relay-args");
+  const pidFile = path.join(captureDir, "pid");
+  const helperPidFile = path.join(captureDir, "helper");
+  // One script, two behaviours, keyed off the (appended) pid file:
+  //  - turn 1 leaves a helper that outlives it by a couple of seconds and then
+  //    exits ON ITS OWN. That exit is the moment turn 1's `close` is finally
+  //    free to fire, and the test arranges for it to land mid-turn-2.
+  //  - turn 2 must be endable ONLY by a signal — no self-exit, or the test goes
+  //    green without anything having reached it, which is exactly the bug.
+  // Turn 2 backgrounds its sleep and `wait`s on it rather than running it in the
+  // foreground, purely so the pid is RECORDED: `trap '' TERM` is inherited, so
+  // an unrecorded descendant survives both the group SIGTERM and (once the test
+  // process is gone) the unref'd escalation behind it — measured as one stray
+  // `sleep 45` reparented to launchd.
+  const agy = fakeAgy([
+    `trap '' TERM`,
+    `if [ -s "$CLANKER_AGY_PID_FILE" ]; then`,
+    `  sleep 45 &`,
+    `  echo $! >> "$CLANKER_AGY_HELPER_PID_FILE"`,
+    `  echo $$ >> "$CLANKER_AGY_PID_FILE"`,
+    `  wait`,
+    `else`,
+    `  sleep 3 &`,
+    `  echo $! >> "$CLANKER_AGY_HELPER_PID_FILE"`,
+    `  echo $$ >> "$CLANKER_AGY_PID_FILE"`,
+    `  wait`,
+    `fi`,
+  ].join("\n"));
+  const conn = await LaneConnection.connect({
+    spec: sidecarSpec(agy, capture, { CLANKER_AGY_PID_FILE: pidFile, CLANKER_AGY_HELPER_PID_FILE: helperPidFile }),
+    cwd: workspace,
+    readOnly: true,
+  });
+  let pids: number[] = [];
+  try {
+    const first = conn.session.prompt("first research");
+    first.catch(() => {});
+    await waitUntil(() => fs.existsSync(pidFile) && readPids(pidFile).length === 1, 15_000);
+    const helperOne = readPids(helperPidFile)[0];
+    pids = readPids(pidFile);
+    await conn.cancel();
+    assert.equal(await stopReasonWithin(conn, first, 15_000), "cancelled");
+
+    const second = conn.session.prompt("second research");
+    second.catch(() => {});
+    await waitUntil(() => readPids(pidFile).length === 2, 15_000);
+    pids = readPids(pidFile);
+    // Turn 1's last pipe-holder is gone, so turn 1's `close` fires now — while
+    // turn 2 is the live turn. Clear the slot unconditionally there and the
+    // cancel below reaches nothing at all.
+    await waitUntil(() => !alive(helperOne), 15_000);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await conn.cancel();
+    assert.equal(await stopReasonWithin(conn, second, 15_000), "cancelled");
+    await waitUntil(() => !alive(pids[1]), 15_000);
+  } finally {
+    killIfAlive(...pids, ...(fs.existsSync(helperPidFile) ? readPids(helperPidFile) : []));
     conn.close();
     fs.rmSync(workspace, { recursive: true, force: true });
     fs.rmSync(captureDir, { recursive: true, force: true });
