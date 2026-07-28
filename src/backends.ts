@@ -97,6 +97,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_CODEX_EFFORT, DEFAULT_CODEX_MODEL, isGlmModel, resolveOcModel } from "./constants.js";
+import { resolveGrokHome } from "./grok-diagnostics.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "./types.js";
 
 const nodeRequire = createRequire(import.meta.url);
@@ -369,6 +370,22 @@ export function buildSpawnSpec(
       // interactive work, so Clanker must override that state explicitly.
       // Keep top-level flags before `agent`; the Grok CLI parser does not
       // accept them on the agent subcommand.
+      //
+      // Pin GROK_HOME explicitly (issue #9). The interactive `grok` command
+      // on this machine is a shell function (`HOME=~/.grok-home
+      // GROK_HOME=~/.grok command grok`) — execFile spawns the real `grok`
+      // binary directly and never sees shell functions, so without this the
+      // lane would run under the bare login HOME instead of the interactive
+      // GROK_HOME, i.e. a different credential/config/log context than the
+      // one the operator actually authenticated. Deliberately NOT touching
+      // HOME itself: HOME affects far more than Grok's config resolution,
+      // whereas Grok's own binary honors GROK_HOME (verified via `strings`
+      // on the installed binary: "GROK_HOME | Override config directory
+      // (default: `~/.grok`)") — so pinning just this one var reproduces the
+      // interactive context without the wider blast radius of overriding
+      // HOME. grok-diagnostics.ts's log tail reads this same resolved path
+      // (resolveGrokHome), so the two must stay in sync.
+      env.GROK_HOME = resolveGrokHome();
       const args = [
         "--sandbox",
         opts.readOnly === true ? "read-only" : "workspace",

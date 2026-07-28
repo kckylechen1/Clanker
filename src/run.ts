@@ -51,6 +51,17 @@ export const RESULT_FILE = "result.md";
 /** Marker that opens the verbatim final-message section of `result.md`. */
 export const RESULT_FINAL_MESSAGE_HEADING = "## final_message";
 
+/**
+ * The two per-run forensic streams, named here rather than as literals at the
+ * four write sites below, because `retention.ts` deletes exactly the members of
+ * this list and nothing else. What a run directory is made of is one decision;
+ * a sweep that learned the names separately from the writer is one rename away
+ * from either missing a file forever or deleting the verdict.
+ */
+export const EVENTS_FILE = "events.jsonl";
+export const CHUNKS_FILE = "chunks.log";
+export const RUN_STREAM_FILES = [EVENTS_FILE, CHUNKS_FILE] as const;
+
 interface DigestEntry {
   seq: number;
   text: string;
@@ -104,6 +115,14 @@ export class LaneRun {
    * then falls back to the global CLANKER_TURN_TIMEOUT_MS.
    */
   readonly turnTimeoutMs?: number;
+  /**
+   * Whether this run's profile is the supervised shape. Only a supervised run
+   * accepts a correction turn (manager.promptExisting): the capability is
+   * checked against the registry row that minted the run, not against which
+   * tool the caller happens to hold, so a seat cannot talk its way into
+   * steering an unsupervised worker.
+   */
+  readonly supervised: boolean;
 
   turnStatus: RunStatus = "running";
   turnsCount = 0;
@@ -116,6 +135,14 @@ export class LaneRun {
   cancellationRequested = false;
   private terminalAt?: number;
   private startedAt?: number;
+  /**
+   * Wall-clock time the CURRENT turn began (set fresh on every beginTurn
+   * call, unlike `startedAt` above which is job-level and set once via
+   * `??=`). Exists so grok-diagnostics.ts's log tail (issue #9) can bound
+   * its search to the failing turn's own window instead of the whole job's
+   * lifetime.
+   */
+  private turnStartedAt?: number;
   private retries = 0;
   private corrections = 0;
   private forcedKill = false;
@@ -161,6 +188,8 @@ export class LaneRun {
     initialPrompt?: string;
     /** Per-profile hard turn ceiling (profiles.ts); undefined falls back to the global default. */
     turnTimeoutMs?: number;
+    /** True only for the supervised profile shape; gates correction turns. */
+    supervised?: boolean;
   }) {
     this.id = init.id;
     this.lane = init.lane;
@@ -174,6 +203,7 @@ export class LaneRun {
     this.requestOpts = init.requestOpts ?? {};
     this.initialPrompt = init.initialPrompt ?? "";
     this.turnTimeoutMs = init.turnTimeoutMs;
+    this.supervised = init.supervised ?? false;
   }
 
   // ---- lifecycle ----------------------------------------------------------
@@ -181,6 +211,7 @@ export class LaneRun {
   beginTurn(prompt: string, correction = false): void {
     if (this.isTerminalTurn() && this.sessionClosed) return;
     this.startedAt ??= Date.now();
+    this.turnStartedAt = Date.now();
     this.cancellationRequested = false;
     this.terminalAt = undefined;
     this.stopReason = undefined;
@@ -198,6 +229,11 @@ export class LaneRun {
     this.pushDigest(`▶ turn ${this.turnsCount}: ${truncate(prompt, 160)}`, true);
     this.writeEvent({ t: "turn_start", turn: this.turnsCount, prompt });
     this.persistTelemetry();
+  }
+
+  /** Wall-clock start of the current turn (see `turnStartedAt` field doc). */
+  get turnStartedAtMs(): number | undefined {
+    return this.turnStartedAt;
   }
 
   completeTurn(): void {
@@ -607,7 +643,28 @@ export class LaneRun {
     }
   }
 
+  /**
+   * One ledger row per DISPATCH, not per terminal transition.
+   *
+   * "Once" used to be an emergent property rather than a rule: `completeTurn`
+   * and `failTurn` both return early on an already-terminal run, so with a
+   * strictly one-shot controller they could only fire once. A correction turn
+   * (manager.promptExisting) breaks that arithmetic — it clears `terminalAt`
+   * and reaches a second terminal transition — so a supervised run would have
+   * appended two rows describing one dispatch, quietly double-counting every
+   * GLM write in the ledger's stats. The invariant now belongs to a flag that
+   * says so, instead of to a coincidence of control flow.
+   *
+   * Deliberately NOT symmetric with `writeResultFileOnce`, which has no such
+   * flag and must not have one: the verdict file has to hold the LATEST turn's
+   * result, or a corrected run would hand its reader the very output the
+   * correction was issued to replace.
+   */
+  private ledgerRowWritten = false;
+
   private writeLedgerRowOnce(): void {
+    if (this.ledgerRowWritten) return;
+    this.ledgerRowWritten = true;
     appendLedgerRow({
       id: this.id,
       lane: this.lane,
@@ -686,33 +743,35 @@ export class LaneRun {
     if (this.digestLog.length > 500) this.digestLog.splice(0, this.digestLog.length - 500);
   }
 
-  private writeEvent(obj: unknown): void {
-    const line = JSON.stringify({ ts: Date.now(), ...(obj as object) }) + "\n";
+  /**
+   * Shared append template for both forensic streams (#37 A6): once
+   * `sessionClosed`, append synchronously (no stream to keep open past
+   * teardown); otherwise lazily open a durable append stream and write
+   * through it. `streamField` names which of the two per-instance
+   * WriteStream slots (`eventsStream` / `chunksStream`) this call owns.
+   */
+  private appendToStream(file: string, streamField: "eventsStream" | "chunksStream", line: string): void {
     if (this.sessionClosed) {
       fs.mkdirSync(this.runDir, { recursive: true });
-      fs.appendFileSync(path.join(this.runDir, "events.jsonl"), line);
+      fs.appendFileSync(path.join(this.runDir, file), line);
       return;
     }
-    if (!this.eventsStream) {
+    if (!this[streamField]) {
       fs.mkdirSync(this.runDir, { recursive: true });
-      this.eventsStream = fs.createWriteStream(path.join(this.runDir, "events.jsonl"), { flags: "a" });
+      this[streamField] = fs.createWriteStream(path.join(this.runDir, file), { flags: "a" });
     }
-    this.eventsStream.write(line);
+    this[streamField]!.write(line);
+  }
+
+  private writeEvent(obj: unknown): void {
+    const line = JSON.stringify({ ts: Date.now(), ...(obj as object) }) + "\n";
+    this.appendToStream(EVENTS_FILE, "eventsStream", line);
   }
 
   private logChunk(kind: "thought" | "message", text: string): void {
     if (!text) return;
     const line = `[${new Date().toISOString()}] ${kind}: ${text}\n`;
-    if (this.sessionClosed) {
-      fs.mkdirSync(this.runDir, { recursive: true });
-      fs.appendFileSync(path.join(this.runDir, "chunks.log"), line);
-      return;
-    }
-    if (!this.chunksStream) {
-      fs.mkdirSync(this.runDir, { recursive: true });
-      this.chunksStream = fs.createWriteStream(path.join(this.runDir, "chunks.log"), { flags: "a" });
-    }
-    this.chunksStream.write(line);
+    this.appendToStream(CHUNKS_FILE, "chunksStream", line);
   }
 
   closeStreams(): void {

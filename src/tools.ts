@@ -130,7 +130,7 @@ function describe(profile: DispatchProfile): string {
       ? `Credentials: ${profile.secrets.join(", ")} materialized from the OS keychain via \`tachi vault exec\` at spawn time — never passed as a parameter.`
       : undefined,
     profile.supervision === "sonnet"
-      ? "Requires a Sonnet supervisor seat holding clanker_prompt/clanker_cancel."
+      ? "Requires a Sonnet supervisor seat holding clanker_cancel."
       : undefined,
     `Hard turn ceiling: ${Math.round(profile.turnTimeoutMs / 60_000)} minutes${profile.readOnly ? "" : " — commit periodically so a timeout still leaves reviewable work in the worktree"}.`,
     profile.status === "dormant" ? `DORMANT: ${profile.dormantReason}.` : undefined,
@@ -176,6 +176,27 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
       const result = await manager.wait(args.id, args.timeout_ms, args.quiet);
       progressSender(extra)?.(result);
       return ok(result);
+    } catch (error) { return fail(error); }
+  });
+
+  server.registerTool("clanker_prompt", {
+    title: "Send a correction turn to a supervised Clanker job",
+    description:
+      "Run another turn on a job whose session is still open — the supervised correction flow. This is " +
+      "turn-by-turn supervision, not mid-flight steering: issue it only after the previous turn has come " +
+      "back terminal, then poll the same id with clanker_wait. Refused when the job did not come from a " +
+      "supervised profile, when a turn is still running, or once the idle-TTL reaper has closed the " +
+      "session. The run keeps its id, its worktree and its single ledger row; result.md is rewritten with " +
+      "the corrected turn's verdict.",
+    inputSchema: {
+      id: z.string(),
+      prompt: z.string().min(1),
+      correction: z.boolean().optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  }, async (args) => {
+    try {
+      return ok(await manager.promptExisting(args.id, args.prompt, args.correction ?? false));
     } catch (error) { return fail(error); }
   });
 

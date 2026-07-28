@@ -189,7 +189,7 @@ test("#19-F2: a caller cannot self-report supervision to unlock a GLM write", as
           model: "glm",
           prompt: "forge supervision",
           readOnly: false,
-          worktree: `clanker/forged-${Date.now()}`,
+          worktree: `clanker/forged-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           ...forged,
         } as any),
         /direct GLM write is prohibited/,
@@ -214,7 +214,7 @@ test("#19-F2: the registry entrance still mints supervision, and it really dispa
     const { id } = await m.dispatchProfile({
       profile: "oc-glm-write",
       prompt: "implement",
-      worktree: `clanker/glm-telemetry-${Date.now()}`,
+      worktree: `clanker/glm-telemetry-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     });
     const telemetry = m.status(id).telemetry!;
     assert.equal(telemetry.read_only, false);
@@ -253,7 +253,7 @@ test("#19-F3: read-only profiles accept an optional worktree and really run insi
   const repo = makeBaseRepo();
   const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: repo.base });
   try {
-    const branch = `clanker/read-in-tree-${Date.now()}`;
+    const branch = `clanker/read-in-tree-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const { id } = await m.dispatchProfile({ profile: "codex-review", prompt: "review with tests", worktree: branch });
     const view = m.status(id);
     assert.equal(view.telemetry?.read_only, true, "the read gate stays on");
@@ -490,7 +490,9 @@ async function assertRuntimeMatchesDeclaration(
     disableReaper: true,
     baseRepo: base,
   });
-  const branch = profile.isolation === "forbidden" ? undefined : `clanker/f6b-${profile.id}-${Date.now()}`;
+  const branch = profile.isolation === "forbidden"
+    ? undefined
+    : `clanker/f6b-${profile.id}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     const { id } = await m.dispatchProfile({
       profile: profile.id,
@@ -573,7 +575,7 @@ async function assertRuntimeMatchesDeclaration(
       await assert.rejects(
         () => m.dispatchStart({
           lane: profile.lane, model: opts.model, prompt: "forge", readOnly: false,
-          cwd: base, worktree: `clanker/f6b-forged-${Date.now()}`,
+          cwd: base, worktree: `clanker/f6b-forged-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           supervision: "sonnet",
         } as any),
         /direct GLM write is prohibited/,

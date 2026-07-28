@@ -26,6 +26,17 @@ function fakeAgy(body: string): string {
   return executable;
 }
 
+/**
+ * A capture/pid file living in its own fresh mkdtempSync directory, matching
+ * the rest of this file's per-call isolation (fakeAgy, prompt()'s cwd). The
+ * previous fixed `os.tmpdir()` + `process.pid` name could collide across
+ * tests or loop iterations in the same process and left every file behind.
+ */
+function tmpCaptureFile(prefix: string, name = "capture"): { dir: string; path: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `clanker-agy-${prefix}-`));
+  return { dir, path: path.join(dir, name) };
+}
+
 function sidecarSpec(agy: string, capture: string, env: Record<string, string> = {}) {
   return {
     command: process.execPath,
@@ -119,20 +130,28 @@ test("Gemini spec forwards CLANKER_GEMINI_ROLE only when the dispatch carries on
 });
 
 test("Gemini ACP sidecar picks the research role copy on CLANKER_GEMINI_ROLE=gemini-research, recon otherwise", { skip: !workspaceSandboxAvailable }, async () => {
-  const researchCapture = path.join(os.tmpdir(), `clanker-agy-role-research-${process.pid}`);
-  await prompt(sidecarSpec(fakeAgy("echo grounded-result"), researchCapture, { CLANKER_GEMINI_ROLE: "gemini-research" }));
-  const researchArgs = fs.readFileSync(researchCapture, "utf8");
-  assert.match(researchArgs, /read-only online research lane/);
-  assert.match(researchArgs, /every conclusion must carry its source URL/);
-  assert.match(researchArgs, /Do not modify workspace files or run destructive commands/);
+  const research = tmpCaptureFile("role-research");
+  try {
+    await prompt(sidecarSpec(fakeAgy("echo grounded-result"), research.path, { CLANKER_GEMINI_ROLE: "gemini-research" }));
+    const researchArgs = fs.readFileSync(research.path, "utf8");
+    assert.match(researchArgs, /read-only online research lane/);
+    assert.match(researchArgs, /every conclusion must carry its source URL/);
+    assert.match(researchArgs, /Do not modify workspace files or run destructive commands/);
+  } finally {
+    fs.rmSync(research.dir, { recursive: true, force: true });
+  }
 
   for (const env of [{}, { CLANKER_GEMINI_ROLE: "gemini-recon" }, { CLANKER_GEMINI_ROLE: "bogus" }] as Record<string, string>[]) {
-    const capture = path.join(os.tmpdir(), `clanker-agy-role-recon-${process.pid}-${Math.random()}`);
-    await prompt(sidecarSpec(fakeAgy("echo grounded-result"), capture, env));
-    const args = fs.readFileSync(capture, "utf8");
-    assert.match(args, /read-only reconnaissance lane/);
-    assert.match(args, /conclusions, source URLs or repository evidence, uncertainties, and the recommended next lane/);
-    assert.match(args, /Do not modify workspace files or run destructive commands/);
+    const recon = tmpCaptureFile("role-recon");
+    try {
+      await prompt(sidecarSpec(fakeAgy("echo grounded-result"), recon.path, env));
+      const args = fs.readFileSync(recon.path, "utf8");
+      assert.match(args, /read-only reconnaissance lane/);
+      assert.match(args, /conclusions, source URLs or repository evidence, uncertainties, and the recommended next lane/);
+      assert.match(args, /Do not modify workspace files or run destructive commands/);
+    } finally {
+      fs.rmSync(recon.dir, { recursive: true, force: true });
+    }
   }
 });
 
@@ -158,57 +177,73 @@ test("Gemini spec forwards only an explicit CLANKER_GEMINI_PRINT_TIMEOUT overrid
 });
 
 test("Gemini ACP sidecar projects stdout and forces plan, sandbox, print, and timeout", { skip: !workspaceSandboxAvailable }, async () => {
-  const capture = path.join(os.tmpdir(), `clanker-agy-args-${process.pid}`);
-  const output = await prompt(sidecarSpec(
-    fakeAgy(`
+  const { dir, path: capture } = tmpCaptureFile("args");
+  try {
+    const output = await prompt(sidecarSpec(
+      fakeAgy(`
 if [ -n "\${GEMINI_API_KEY:-}\${GOOGLE_API_KEY:-}\${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
   echo inherited-credential-leak >&2
   exit 9
 fi
 echo grounded-result`),
-    capture,
-    {
-      GEMINI_API_KEY: "must-not-reach-agy",
-      GOOGLE_API_KEY: "must-not-reach-agy",
-      GOOGLE_APPLICATION_CREDENTIALS: "/must/not/reach/agy.json",
-    },
-  ));
-  assert.equal(output, "grounded-result");
-  const args = fs.readFileSync(capture, "utf8");
-  assert.match(args, /--mode\nplan\n/);
-  assert.match(args, /--sandbox\n/);
-  assert.match(args, /--print-timeout\n10m\n/);
-  assert.match(args, /--print\n/);
-  assert.match(args, /conclusions, source URLs or repository evidence, uncertainties, and the recommended next lane/);
-  assert.match(args, /Do not modify workspace files or run destructive commands/);
+      capture,
+      {
+        GEMINI_API_KEY: "must-not-reach-agy",
+        GOOGLE_API_KEY: "must-not-reach-agy",
+        GOOGLE_APPLICATION_CREDENTIALS: "/must/not/reach/agy.json",
+      },
+    ));
+    assert.equal(output, "grounded-result");
+    const args = fs.readFileSync(capture, "utf8");
+    assert.match(args, /--mode\nplan\n/);
+    assert.match(args, /--sandbox\n/);
+    assert.match(args, /--print-timeout\n10m\n/);
+    assert.match(args, /--print\n/);
+    assert.match(args, /conclusions, source URLs or repository evidence, uncertainties, and the recommended next lane/);
+    assert.match(args, /Do not modify workspace files or run destructive commands/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("Gemini ACP sidecar honors CLANKER_GEMINI_PRINT_TIMEOUT override over the 10m default", { skip: !workspaceSandboxAvailable }, async () => {
-  const capture = path.join(os.tmpdir(), `clanker-agy-timeout-override-${process.pid}`);
-  await prompt(sidecarSpec(fakeAgy("echo grounded-result"), capture, { CLANKER_GEMINI_PRINT_TIMEOUT: "20m" }));
-  const args = fs.readFileSync(capture, "utf8");
-  assert.match(args, /--print-timeout\n20m\n/);
+  const { dir, path: capture } = tmpCaptureFile("timeout-override");
+  try {
+    await prompt(sidecarSpec(fakeAgy("echo grounded-result"), capture, { CLANKER_GEMINI_PRINT_TIMEOUT: "20m" }));
+    const args = fs.readFileSync(capture, "utf8");
+    assert.match(args, /--print-timeout\n20m\n/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("Gemini ACP sidecar fails loudly on nonzero and empty output", { skip: !workspaceSandboxAvailable }, async () => {
   for (const [body, expected] of [["echo boom >&2; exit 7", /exit 7.*boom/], ["exit 0", /empty output/]] as const) {
-    const capture = path.join(os.tmpdir(), `clanker-agy-fail-${process.pid}-${Math.random()}`);
-    await assert.rejects(prompt(sidecarSpec(fakeAgy(body), capture)), expected);
+    const { dir, path: capture } = tmpCaptureFile("fail");
+    try {
+      await assert.rejects(prompt(sidecarSpec(fakeAgy(body), capture)), expected);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 
 test("Gemini ACP sidecar classifies a print-timeout hit distinctly from a backend crash", { skip: !workspaceSandboxAvailable }, async () => {
-  const capture = path.join(os.tmpdir(), `clanker-agy-timeout-classify-${process.pid}`);
-  // agy exits 1 with this exact stderr phrase when its own --print-timeout
-  // ceiling elapses; the wrapping error must not read as a generic crash.
-  await assert.rejects(
-    prompt(sidecarSpec(fakeAgy("echo 'timeout waiting for response' >&2; exit 1"), capture)),
-    /print-timeout/,
-  );
-  await assert.rejects(
-    prompt(sidecarSpec(fakeAgy("echo 'timeout waiting for response' >&2; exit 1"), capture)),
-    (error: Error) => !/Clanker: Gemini agy failed \(exit/.test(error.message),
-  );
+  const { dir, path: capture } = tmpCaptureFile("timeout-classify");
+  try {
+    // agy exits 1 with this exact stderr phrase when its own --print-timeout
+    // ceiling elapses; the wrapping error must not read as a generic crash.
+    await assert.rejects(
+      prompt(sidecarSpec(fakeAgy("echo 'timeout waiting for response' >&2; exit 1"), capture)),
+      /print-timeout/,
+    );
+    await assert.rejects(
+      prompt(sidecarSpec(fakeAgy("echo 'timeout waiting for response' >&2; exit 1"), capture)),
+      (error: Error) => !/Clanker: Gemini agy failed \(exit/.test(error.message),
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("Gemini ACP sidecar denies writes beneath the inspected workspace on macOS", { skip: !workspaceSandboxAvailable }, async () => {
@@ -222,7 +257,7 @@ test("Gemini ACP sidecar denies writes beneath the inspected workspace on macOS"
   assert.equal(spawnSync("git", ["worktree", "add", "-q", "-b", `clanker-gemini-test-${process.pid}-${Date.now()}`, workspace], { cwd: main }).status, 0);
   const subdirectory = path.join(workspace, "nested");
   fs.mkdirSync(subdirectory);
-  const capture = path.join(os.tmpdir(), `clanker-agy-deny-args-${process.pid}`);
+  const { dir: captureDir, path: capture } = tmpCaptureFile("deny-args");
   const workspaceTarget = path.join(workspace, "must-not-exist.txt");
   const primaryWorktreeTarget = path.join(main, "must-not-exist.txt");
   const commonGitTarget = path.join(main, ".git", "must-not-exist.txt");
@@ -256,15 +291,14 @@ echo workspace-protected`);
     spawnSync("git", ["worktree", "remove", "--force", workspace], { cwd: main });
     fs.rmSync(workspace, { force: true, recursive: true });
     fs.rmSync(main, { force: true, recursive: true });
+    fs.rmSync(captureDir, { recursive: true, force: true });
   }
 });
 
 test("Gemini ACP cancellation terminates agy and returns cancelled", { skip: !workspaceSandboxAvailable }, async () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-gemini-cancel-workspace-"));
-  const capture = path.join(os.tmpdir(), `clanker-agy-cancel-args-${process.pid}`);
-  const pidFile = path.join(os.tmpdir(), `clanker-agy-cancel-pid-${process.pid}`);
-  fs.rmSync(capture, { force: true });
-  fs.rmSync(pidFile, { force: true });
+  const { dir: captureDir, path: capture } = tmpCaptureFile("cancel-args");
+  const pidFile = path.join(captureDir, "pid");
   const agy = fakeAgy(`echo $$ > "$CLANKER_AGY_PID_FILE"\ntrap 'exit 143' TERM\nsleep 30`);
   const conn = await LaneConnection.connect({
     spec: sidecarSpec(agy, capture, { CLANKER_AGY_PID_FILE: pidFile }),
@@ -274,7 +308,11 @@ test("Gemini ACP cancellation terminates agy and returns cancelled", { skip: !wo
   try {
     const turn = conn.session.prompt("long research");
     turn.catch(() => {});
-    await waitUntil(() => fs.existsSync(pidFile));
+    // 15s, not the 2s default: this waits on the OS actually spawning and
+    // running the sidecar's shell far enough to reach the `echo $$ >` line —
+    // process-launch latency, not this-process work — same class as #29
+    // below.
+    await waitUntil(() => fs.existsSync(pidFile), 15_000);
     const agyPid = Number.parseInt(fs.readFileSync(pidFile, "utf8"), 10);
     await conn.cancel();
     for (;;) {
@@ -282,6 +320,19 @@ test("Gemini ACP cancellation terminates agy and returns cancelled", { skip: !wo
       if (update.kind === "stop") break;
     }
     assert.equal((await turn).stopReason, "cancelled");
+    // 15s, not the 2s default (#29). This is the only wait in the file whose
+    // subject is the OS reaping a process GROUP rather than this process
+    // writing a file, and the fake agy sits in `trap ... TERM` + `sleep 30`:
+    // the signal has to be delivered, the trap has to run, and the group has
+    // to be torn down, none of which this process schedules. Under load — a
+    // full suite on a busy machine — that measured 1 red in 6 runs against a
+    // 2s budget, i.e. a test that fails for being on a slow machine, and CI
+    // treats it as a product regression.
+    //
+    // The budget is an upper bound, not a sleep: waitUntil returns the moment
+    // the group is gone, so a healthy machine pays nothing for the headroom.
+    // Raising it weakens nothing — the assertion is still "the group dies",
+    // never "the group dies fast".
     await waitUntil(() => {
       try {
         process.kill(-agyPid, 0);
@@ -289,9 +340,11 @@ test("Gemini ACP cancellation terminates agy and returns cancelled", { skip: !wo
       } catch {
         return true;
       }
-    });
+    }, 15_000);
   } finally {
     conn.close();
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(captureDir, { recursive: true, force: true });
   }
 });
 

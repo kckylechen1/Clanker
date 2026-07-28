@@ -129,6 +129,68 @@ export async function changedFiles(cwd: string): Promise<string[]> {
 }
 
 /**
+ * Does this worktree hold commits that exist nowhere but here?
+ *
+ * Fallback judge for branches with no upstream (#17). `true` also on any error:
+ * if we cannot prove the tree holds nothing, we must not remove it — a leaked
+ * worktree costs disk, a wrongly removed one costs a deliverable (2026-07-10).
+ */
+async function holdsUnmergedWork(worktreePath: string, targetRepo: string): Promise<boolean> {
+  try {
+    const baseRef = await resolveBaseRef(targetRepo);
+    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseRef}..HEAD`])).trim();
+    return ahead !== "0";
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Resolve symlinks in a path that may not exist yet: realpath the deepest
+ * ancestor that DOES exist, then re-append the not-yet-created tail. A bare
+ * `path.resolve` leaves symlinks unresolved, so a WORKTREES_ROOT that is a
+ * symlink pointing inside the target repo would pass a literal-string overlap
+ * check while git still lands the worktree inside the checkout (#12 hardening).
+ */
+export function realpathBestEffort(p: string): string {
+  let cur = path.resolve(p);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync(cur);
+      return tail.length ? path.join(real, ...tail) : real;
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return path.resolve(p); // reached the root; nothing resolved
+      tail.unshift(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+/**
+ * Enforce the target-aware isolation invariant (#12): the worktree a write
+ * dispatch runs in must be a distinct path from the target repo's primary
+ * checkout — never equal to it, inside it, or containing it. Under normal
+ * config (WORKTREES_ROOT under ~/.cache) this always holds; the guard exists to
+ * reject a misconfiguration that would route writes back onto the checkout the
+ * isolation is meant to protect. Both sides are realpath-resolved first so a
+ * symlinked WORKTREES_ROOT cannot slip a worktree inside the repo undetected.
+ * Exported for a direct unit test.
+ */
+export function assertWorktreeOutsideRepo(worktreePath: string, targetRepo: string): void {
+  const wt = realpathBestEffort(worktreePath);
+  const repo = realpathBestEffort(targetRepo);
+  if (wt === repo || wt.startsWith(repo + path.sep) || repo.startsWith(wt + path.sep)) {
+    throw new Error(
+      `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; ` +
+        `refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT ` +
+        `outside the repo)`,
+    );
+  }
+}
+
+/**
  * Remove a worktree if it has no changes. Returns true if removed, false if it
  * was retained because of local changes.
  */
@@ -150,8 +212,22 @@ export async function removeIfClean(worktreePath: string, targetRepo = BASE_REPO
     ).trim();
     if (ahead !== "0") return false;
   } catch {
-    // If we cannot prove the tree holds nothing unpushed, keep it.
-    return false;
+    // NO UPSTREAM IS THE NORMAL STATE, NOT AN EXCEPTION (#17).
+    //
+    // A worktree branch created by `createWorktree` tracks nothing, and a repo
+    // with no remote can never give it an upstream. Retaining unconditionally
+    // here made the guard unsatisfiable for those repos, so `removeIfClean`
+    // silently degraded into `neverRemove` and every worktree it was asked to
+    // reclaim became immortal. A cleanup path that can only ever answer "kept"
+    // is worse than no cleanup path: callers read the `false` as "the lane left
+    // work behind", which was never true.
+    //
+    // Ask the question the upstream probe was really asking — does this tree
+    // hold commits that exist nowhere else? — against the ref the tree was CUT
+    // from, resolved exactly as `createWorktree` resolved it. That works with
+    // no remote at all, and it stays correct when the base has since advanced:
+    // a branch whose commits are already merged into it counts zero.
+    if (await holdsUnmergedWork(worktreePath, targetRepo)) return false;
   }
   try {
     await git(targetRepo, ["worktree", "remove", worktreePath]);
