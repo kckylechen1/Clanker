@@ -27761,7 +27761,7 @@ var RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 864e5;
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.3.6";
+var SERVER_VERSION = "0.3.7";
 var DEFAULT_CODEX_MODEL = "gpt-5.5";
 var DEFAULT_CODEX_EFFORT = "xhigh";
 var WRITE_DISCIPLINE_PREFIX = `Workspace discipline, enforced by the dispatching contract \u2014 these override any
@@ -32934,9 +32934,18 @@ async function git(cwd, args) {
   const { stdout } = await exec("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 });
   return stdout;
 }
-function deriveWorktreePath(branch) {
-  const safe = branch.replace(/[^A-Za-z0-9._-]/g, "-");
-  return path8.join(WORKTREES_ROOT, safe);
+var OWNER_MARKER = ".clanker-owner";
+var sanitize = (s) => s.replace(/[^A-Za-z0-9._-]/g, "-");
+function deriveWorktreePath(branch, runId) {
+  return path8.join(WORKTREES_ROOT, `${sanitize(branch)}-${sanitize(runId).slice(-6)}`);
+}
+function readWorktreeOwner(worktreePath) {
+  try {
+    const first = fs7.readFileSync(path8.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
+    return first || null;
+  } catch {
+    return null;
+  }
 }
 async function isGitWorkTree(cwd) {
   try {
@@ -32956,7 +32965,15 @@ async function resolveTargetRepo(cwd) {
     `cwd '${cwd}' is not inside a git work tree; a write dispatch cannot be isolated into a worktree cut from a non-repo directory (refusing to silently fall back to the host checkout \u2014 see issue #12)`
   );
 }
-async function resolveBaseRef(targetRepo) {
+async function localHeadRef(targetRepo) {
+  try {
+    const head = (await git(targetRepo, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
+    return head || null;
+  } catch {
+    return null;
+  }
+}
+async function remoteDefaultRef(targetRepo) {
   try {
     const head = (await git(targetRepo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).trim();
     if (head) return head;
@@ -32969,13 +32986,15 @@ async function resolveBaseRef(targetRepo) {
     } catch {
     }
   }
-  try {
-    const head = (await git(targetRepo, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
-    if (head) return head;
-  } catch {
-  }
+  return null;
+}
+async function resolveBaseRef(targetRepo) {
+  const head = await localHeadRef(targetRepo);
+  if (head) return head;
+  const remote = await remoteDefaultRef(targetRepo);
+  if (remote) return remote;
   throw new Error(
-    `target repo '${targetRepo}' has no origin/HEAD, origin/main, origin/master, or local HEAD commit to cut a worktree from (a repo with zero commits cannot be worktree'd)`
+    `target repo '${targetRepo}' has no local HEAD commit, origin/HEAD, origin/main, or origin/master to cut a worktree from (a repo with zero commits cannot be worktree'd)`
   );
 }
 async function resolveBaseCommit(targetRepo, base) {
@@ -32991,14 +33010,16 @@ async function resolveBaseCommit(targetRepo, base) {
 async function headSha(cwd) {
   return (await git(cwd, ["rev-parse", "--verify", "HEAD"])).trim();
 }
-async function createWorktree(branch, targetRepo = BASE_REPO, base) {
-  const wtPath = deriveWorktreePath(branch);
+async function createWorktree(branch, runId, targetRepo = BASE_REPO, base) {
+  const wtPath = deriveWorktreePath(branch, runId);
   if (fs7.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
   const baseRef = base ?? await resolveBaseRef(targetRepo);
   fs7.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
+  fs7.writeFileSync(path8.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
+`);
   return wtPath;
 }
 function parsePorcelainZ(out) {
@@ -33022,14 +33043,17 @@ function parsePorcelainZ(out) {
   }
   return files;
 }
+function isGovernanceFile(file2) {
+  return file2 === OWNER_MARKER;
+}
 async function changedFiles(cwd) {
   const out = await git(cwd, ["status", "--porcelain=v1", "-z"]);
-  return parsePorcelainZ(out);
+  return parsePorcelainZ(out).filter((file2) => !isGovernanceFile(file2));
 }
-async function holdsUnmergedWork(worktreePath, targetRepo) {
+async function holdsUnmergedWork(worktreePath, targetRepo, baseSha) {
+  if (!baseSha) return true;
   try {
-    const baseRef = await resolveBaseRef(targetRepo);
-    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseRef}..HEAD`])).trim();
+    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseSha}..HEAD`])).trim();
     return ahead !== "0";
   } catch {
     return true;
@@ -33075,19 +33099,50 @@ function matchDoNotTouch(patterns, files) {
   }
   return violations;
 }
-async function removeIfClean(worktreePath, targetRepo = BASE_REPO) {
+async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runId) {
+  if (fs7.existsSync(worktreePath)) {
+    const owner = readWorktreeOwner(worktreePath);
+    if (!runId || owner !== runId) {
+      console.error(
+        `[clanker] refusing to remove worktree '${worktreePath}': it is owned by ${owner === null ? `no readable ${OWNER_MARKER} marker` : `run '${owner}'`}, and the caller claims ${runId === void 0 ? "no run id at all" : `run '${runId}'`} (a worktree is only ever reclaimed by the run it was created for \u2014 issue #3)`
+      );
+      return false;
+    }
+  }
   const changes = await changedFiles(worktreePath);
   if (changes.length > 0) return false;
   try {
     const ahead = (await git(worktreePath, ["rev-list", "--count", "@{upstream}..HEAD"])).trim();
     if (ahead !== "0") return false;
   } catch {
-    if (await holdsUnmergedWork(worktreePath, targetRepo)) return false;
+    if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return false;
+  }
+  const markerPath = path8.join(worktreePath, OWNER_MARKER);
+  const marker = (() => {
+    try {
+      return fs7.readFileSync(markerPath, "utf8");
+    } catch {
+      return null;
+    }
+  })();
+  try {
+    fs7.rmSync(markerPath, { force: true });
+  } catch {
   }
   try {
-    await git(targetRepo, ["worktree", "remove", worktreePath]);
-  } catch {
-    await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
+    try {
+      await git(targetRepo, ["worktree", "remove", worktreePath]);
+    } catch {
+      await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
+    }
+  } catch (err) {
+    if (marker !== null && fs7.existsSync(worktreePath)) {
+      try {
+        fs7.writeFileSync(markerPath, marker);
+      } catch {
+      }
+    }
+    throw err;
   }
   return true;
 }
@@ -33328,6 +33383,7 @@ ${params.prompt}`;
     let baseSha;
     let worktreePath;
     let worktreeBaseSha;
+    const dispatchWarnings = [];
     let spec;
     try {
       if (params.worktree && params.cwd) {
@@ -33338,8 +33394,8 @@ ${params.prompt}`;
       }
       spec = this.resolveSpec(params.lane, requestOpts, runDir);
       if (params.worktree) {
-        assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree), targetRepo);
-        worktreePath = await createWorktree(params.worktree, targetRepo, baseSha);
+        assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree, id), targetRepo);
+        worktreePath = await createWorktree(params.worktree, id, targetRepo, baseSha);
         cwd = worktreePath;
         if (baseSha !== void 0) {
           worktreeBaseSha = baseSha;
@@ -33349,6 +33405,19 @@ ${params.prompt}`;
           } catch {
             worktreeBaseSha = void 0;
           }
+        }
+        try {
+          const dirty = await changedFiles(targetRepo);
+          if (dirty.length > 0) {
+            const cutFrom = params.base !== void 0 ? `base '${params.base}'` : "HEAD";
+            dispatchWarnings.push(
+              `worktree cut from ${cutFrom} ${(worktreeBaseSha ?? "(unknown)").slice(0, 7)}; ${dirty.length} uncommitted change(s) in ${targetRepo} are NOT included`
+            );
+          }
+        } catch (err) {
+          dispatchWarnings.push(
+            `could not inspect ${targetRepo} for uncommitted changes (${errMessage(err)}); any uncommitted work there is NOT in the worktree`
+          );
         }
       }
     } catch (e) {
@@ -33360,7 +33429,8 @@ ${params.prompt}`;
       });
       throw e;
     }
-    this.warningsById.set(id, spec.warnings);
+    const warnings = [...spec.warnings, ...dispatchWarnings];
+    this.warningsById.set(id, warnings);
     const run = new LaneRun({
       id,
       lane: params.lane,
@@ -33382,7 +33452,7 @@ ${params.prompt}`;
     this.runs.set(id, run);
     const drive = this.driveNewSession(run, spec, lanePrompt);
     this.trackDrive(id, drive);
-    return { id, warnings: spec.warnings };
+    return { id, warnings };
   }
   trackDrive(id, drive) {
     this.turnDrives.set(id, drive);
@@ -33825,7 +33895,18 @@ ${grokDetail}` : "";
   async cancel(id) {
     const run = this.runs.get(id);
     if (!run) this.throwUnknownRun(id);
-    if (run.turnStatus !== "running") return { id, status: run.turnStatus };
+    if (run.turnStatus !== "running") {
+      if (!run.sessionClosed) {
+        await this.close(id);
+        return {
+          id,
+          status: run.turnStatus,
+          run_dir: run.runDir,
+          ...run.worktreeRetained ? { worktree_retained: run.worktreeRetained } : {}
+        };
+      }
+      return { id, status: run.turnStatus };
+    }
     run.requestCancellation();
     const pending = this.pendingConnects.get(id);
     if (pending) {
@@ -33951,7 +34032,12 @@ ${grokDetail}` : "";
         run.worktreeRetained = run.worktreePath;
       } else {
         try {
-          const removed = await removeIfClean(run.worktreePath, run.targetRepo ?? this.baseRepo);
+          const removed = await removeIfClean(
+            run.worktreePath,
+            run.targetRepo ?? this.baseRepo,
+            run.worktreeBaseSha,
+            run.id
+          );
           if (!removed) run.worktreeRetained = run.worktreePath;
         } catch (err) {
           console.error(
@@ -34014,7 +34100,7 @@ function narrowShape(profile) {
   }
   if (profile.isolation !== "forbidden") {
     shape.base = external_exports.string().trim().min(1).optional().describe(
-      "Optional ref to cut the worktree from (branch, tag, or SHA). Verified server-side before the worker starts; omit to use the repo's default base."
+      "Optional ref to cut the worktree from (branch, tag, or SHA). Verified server-side before the worker starts; omit to cut from the dispatch cwd's current HEAD (uncommitted changes there are NOT included \u2014 the dispatch reports how many were left behind)."
     );
     shape.doNotTouch = external_exports.array(external_exports.string()).optional().describe(
       'Optional paths the worker must not touch (exact file, or directory prefix: "src/" matches "src/foo.ts"). Checked server-side against the worktree diff when the run ends; any hit is reported as contract_violations on the terminal result.'

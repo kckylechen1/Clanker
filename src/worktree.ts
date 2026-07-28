@@ -3,10 +3,16 @@
  * and cleanup so worktrees no longer scatter across lane-run / companion / hand
  * git. A worktree is cut from the repository its dispatch *targets* (resolved
  * from the dispatch cwd — see manager.ts / issue #12), never from an unrelated
- * host checkout, and its base ref is resolved per target repo (origin/HEAD →
- * origin/main → origin/master → the repo's local HEAD) rather than a hardcoded
- * origin/main, so a repo with a different default branch or no remote at all can
- * still be worktree'd.
+ * host checkout, and its base ref is resolved per target repo (that repo's own
+ * HEAD → origin/HEAD → origin/main → origin/master, see resolveBaseRef / #33)
+ * rather than a hardcoded origin/main, so a repo with a different default
+ * branch or no remote at all can still be worktree'd.
+ *
+ * A tree also has an OWNER (#3): its path carries the id of the run it was cut
+ * for, and its root carries a `.clanker-owner` marker naming that run. Both
+ * exist because a tree used to be identified by branch NAME alone, which two
+ * dispatches can share — and cleanup of the dead one then deleted the live
+ * one's tree out from under it (three lanes killed in one night, 2026-07-16).
  */
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -21,9 +27,47 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout;
 }
 
-export function deriveWorktreePath(branch: string): string {
-  const safe = branch.replace(/[^A-Za-z0-9._-]/g, "-");
-  return path.join(WORKTREES_ROOT, safe);
+/**
+ * Ownership marker written at a worktree's root: one line, `<runId> <ISO
+ * timestamp>`. Lives and dies with the tree.
+ */
+export const OWNER_MARKER = ".clanker-owner";
+
+const sanitize = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, "-");
+
+/**
+ * Where the worktree for `branch`, cut for run `runId`, lives.
+ *
+ * Keyed by branch name AND run id (#3). Branch-name-only paths are shared by
+ * every dispatch that ever reuses the name, and cleanup of a finished run then
+ * removes a DIFFERENT, live run's tree: `…/worktrees/<branch>` was deleted
+ * under three separate lanes in one night, each of which then failed every
+ * subsequent tool call on files it had read minutes earlier. Two dispatches on
+ * one branch name now get two distinct paths and cannot collide at all.
+ *
+ * The BRANCH name is deliberately NOT uniquified: it is the deliverable the
+ * worker pushes and the dispatcher merges, and a run-id suffix would make it
+ * unguessable. A second live dispatch on the same branch name is rejected by
+ * git itself (`worktree add -b <branch>` on an existing branch), loudly, at
+ * creation — which is the correct outcome, not a bug to route around.
+ */
+export function deriveWorktreePath(branch: string, runId: string): string {
+  return path.join(WORKTREES_ROOT, `${sanitize(branch)}-${sanitize(runId).slice(-6)}`);
+}
+
+/**
+ * The run id a worktree claims to belong to, or null when the tree carries no
+ * readable marker (never created by this server, created by an older one, or
+ * the marker was deleted). Null is a REFUSAL input, not a permissive default —
+ * see removeIfClean.
+ */
+export function readWorktreeOwner(worktreePath: string): string | null {
+  try {
+    const first = fs.readFileSync(path.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
+    return first || null;
+  } catch {
+    return null;
+  }
 }
 
 export async function isGitWorkTree(cwd: string): Promise<boolean> {
@@ -57,17 +101,18 @@ export async function resolveTargetRepo(cwd: string): Promise<string> {
   );
 }
 
-/**
- * Resolve the base ref a worktree for `targetRepo` should be cut from. Order:
- *   1. origin/HEAD  — the remote's default branch, whatever it is named
- *   2. origin/main  — preserves Clanker's own historical cut point
- *   3. origin/master
- *   4. the repo's current local HEAD commit — for repos with no remote at all
- *      (e.g. DispatchLedger), which previously could not be worktree'd because
- *      the base ref was hardcoded to origin/main.
- * Only throws when the repo has zero commits (nothing to cut from).
- */
-export async function resolveBaseRef(targetRepo: string): Promise<string> {
+/** The target repo's current HEAD commit, or null when HEAD resolves to nothing. */
+async function localHeadRef(targetRepo: string): Promise<string | null> {
+  try {
+    const head = (await git(targetRepo, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
+    return head || null;
+  } catch {
+    return null; // unborn branch / zero-commit repo
+  }
+}
+
+/** origin/HEAD → origin/main → origin/master, or null when the repo has none of them. */
+async function remoteDefaultRef(targetRepo: string): Promise<string | null> {
   try {
     const head = (
       await git(targetRepo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
@@ -84,15 +129,40 @@ export async function resolveBaseRef(targetRepo: string): Promise<string> {
       /* ref absent; keep looking */
     }
   }
-  try {
-    const head = (await git(targetRepo, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
-    if (head) return head;
-  } catch {
-    /* no commits at all */
-  }
+  return null;
+}
+
+/**
+ * Resolve the base ref a worktree for `targetRepo` should be cut from when the
+ * dispatcher named no explicit `base` (an explicit `base` still wins over all
+ * of this — see resolveBaseCommit / createWorktree).
+ *
+ * Order — the DISPATCH CWD's own commit first, the remote's default branch only
+ * as a fallback:
+ *   1. the target repo's current local HEAD commit
+ *   2. origin/HEAD → origin/main → origin/master, reached only when HEAD
+ *      resolves to nothing (a repo whose current branch has no commits yet)
+ *
+ * This order is the reverse of the original, and the reversal is the fix for
+ * issue #33. A dispatcher writes its dispatch while looking at ITS OWN
+ * checkout; when that checkout sits on a feature branch, cutting from
+ * origin/HEAD hands the isolated worker a tree that does not contain the code
+ * the dispatch is about. That misfired twice for real: once a worker stopped
+ * 11s in because the symbols it was pointed at did not exist in its tree, once
+ * a worker spent 7 minutes and built its own off-books worktree to get around
+ * it. The remote's default branch is a guess about intent that is only right
+ * when the dispatcher happens to be standing on it; HEAD is not a guess.
+ *
+ * Only throws when the repo has no commit anywhere (nothing to cut from).
+ */
+export async function resolveBaseRef(targetRepo: string): Promise<string> {
+  const head = await localHeadRef(targetRepo);
+  if (head) return head;
+  const remote = await remoteDefaultRef(targetRepo);
+  if (remote) return remote;
   throw new Error(
-    `target repo '${targetRepo}' has no origin/HEAD, origin/main, origin/master, or local ` +
-      `HEAD commit to cut a worktree from (a repo with zero commits cannot be worktree'd)`,
+    `target repo '${targetRepo}' has no local HEAD commit, origin/HEAD, origin/main, or ` +
+      `origin/master to cut a worktree from (a repo with zero commits cannot be worktree'd)`,
   );
 }
 
@@ -126,24 +196,38 @@ export async function headSha(cwd: string): Promise<string> {
 }
 
 /**
- * Create a worktree for `branch`, cut from `targetRepo`'s resolved base ref
- * (see resolveBaseRef). `targetRepo` is the repo the dispatch targets; it
- * defaults to the host BASE_REPO only for callers with no dispatch cwd.
+ * Create a worktree for `branch`, owned by run `runId`, cut from `targetRepo`'s
+ * resolved base ref (see resolveBaseRef). `targetRepo` is the repo the dispatch
+ * targets; it defaults to the host BASE_REPO only for callers with no dispatch
+ * cwd.
  *
  * When `base` is given it wins: the worktree is cut from exactly that ref
  * (already verified server-side via resolveBaseCommit before this call). When
- * omitted, the resolveBaseRef chain runs EXACTLY as before (frozen, #12).
+ * omitted, the resolveBaseRef chain runs (#33).
+ *
+ * `runId` is REQUIRED, and is both half of the path (#3, see
+ * deriveWorktreePath) and the content of the `.clanker-owner` marker written at
+ * the tree's root. The marker is what makes ownership survive outside this
+ * process's memory: `removeIfClean` refuses to delete a tree whose marker does
+ * not name the run asking, so a future caller that bypasses the closeRun
+ * single exit still cannot reclaim somebody else's live tree.
  *
  * @returns the absolute worktree path.
  */
-export async function createWorktree(branch: string, targetRepo = BASE_REPO, base?: string): Promise<string> {
-  const wtPath = deriveWorktreePath(branch);
+export async function createWorktree(
+  branch: string,
+  runId: string,
+  targetRepo = BASE_REPO,
+  base?: string,
+): Promise<string> {
+  const wtPath = deriveWorktreePath(branch, runId);
   if (fs.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
   const baseRef = base ?? (await resolveBaseRef(targetRepo));
   fs.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
+  fs.writeFileSync(path.join(wtPath, OWNER_MARKER), `${runId} ${new Date().toISOString()}\n`);
   return wtPath;
 }
 
@@ -208,10 +292,27 @@ export function parsePorcelainZ(out: string): string[] {
   return files;
 }
 
-/** Porcelain-parsed list of changed paths in `cwd` (tracked + untracked). See `parsePorcelainZ`. */
+/**
+ * Paths belonging to the server's own governance of a tree rather than to the
+ * work done inside it. Only `.clanker-owner` today.
+ *
+ * Excluded everywhere changes are reported or judged, for three separate
+ * reasons: a tree would otherwise be permanently "dirty" and therefore never
+ * reclaimable; the marker would show up in every run's `touched_files` as
+ * though the worker wrote it; and it would count as a doNotTouch violation
+ * against contracts the worker never breached.
+ */
+function isGovernanceFile(file: string): boolean {
+  return file === OWNER_MARKER;
+}
+
+/**
+ * Porcelain-parsed list of changed paths in `cwd` (tracked + untracked), minus
+ * the server's own governance files. See `parsePorcelainZ` / `isGovernanceFile`.
+ */
 export async function changedFiles(cwd: string): Promise<string[]> {
   const out = await git(cwd, ["status", "--porcelain=v1", "-z"]);
-  return parsePorcelainZ(out);
+  return parsePorcelainZ(out).filter((file) => !isGovernanceFile(file));
 }
 
 /**
@@ -220,11 +321,37 @@ export async function changedFiles(cwd: string): Promise<string[]> {
  * Fallback judge for branches with no upstream (#17). `true` also on any error:
  * if we cannot prove the tree holds nothing, we must not remove it — a leaked
  * worktree costs disk, a wrongly removed one costs a deliverable (2026-07-10).
+ *
+ * `baseSha` is the commit the tree was RECORDED as being cut from at creation
+ * time (run.worktreeBaseSha). Prefer it over re-resolving: resolving the base
+ * twice — once when the tree was created, once here when it is reclaimed — asks
+ * a moving ref the same question at two different moments, and anything that
+ * moved the ref in between (a fetch advancing origin/HEAD, or, now that #33
+ * cuts from the dispatcher's own HEAD, simply the dispatcher committing or
+ * switching branches) makes the ahead-count answer about the wrong base. Both
+ * error directions are real: a tree judged ahead is retained forever, a tree
+ * judged level can be removed while it still holds the only copy of its
+ * commits. Re-resolution stays only as the fallback for callers that recorded
+ * no base.
  */
-async function holdsUnmergedWork(worktreePath: string, targetRepo: string): Promise<boolean> {
+async function holdsUnmergedWork(
+  worktreePath: string,
+  targetRepo: string,
+  baseSha?: string,
+): Promise<boolean> {
+  // NO RE-RESOLVE FALLBACK (PR #38 cold review, codex-58298). The earlier
+  // shape fell back to resolveBaseRef(targetRepo) when the frozen SHA was
+  // missing — which is the create/cleanup double-resolution drift all over
+  // again, made WORSE by the local-HEAD-first ordering: the dispatcher's
+  // checkout moving between creation and cleanup changes the answer in
+  // exactly the case that reaches the fallback. A tree whose cut point was
+  // never captured cannot PROVE it holds nothing unmerged, and unprovable is
+  // retained, same as every other guard in this file. The cost is that a
+  // capture-failed tree waits for manual reclaim; the alternative cost is
+  // judging a deliverable against a ref it was never cut from.
+  if (!baseSha) return true;
   try {
-    const baseRef = await resolveBaseRef(targetRepo);
-    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseRef}..HEAD`])).trim();
+    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseSha}..HEAD`])).trim();
     return ahead !== "0";
   } catch {
     return true;
@@ -298,6 +425,14 @@ export function assertWorktreeOutsideRepo(worktreePath: string, targetRepo: stri
  */
 export async function changedFilesSince(worktreePath: string, base: string): Promise<string[]> {
   const out = await git(worktreePath, ["diff", "--name-only", base, "HEAD"]);
+  // The committed half is deliberately NOT filtered through isGovernanceFile
+  // (PR #38 cold review, codex-58298). The marker's LEGITIMATE state is
+  // untracked — that is why the porcelain half inside changedFiles ignores it,
+  // or every tree would read dirty forever. But a marker that shows up in the
+  // COMMITTED diff got there because the worker swept it into a commit
+  // (`git add -A`), and a worker committing the governance file is precisely
+  // the tampering the doNotTouch report must not blind itself to. Ignore the
+  // marker where it belongs; surface it where it does not.
   const committed = out.split("\n").filter((line) => line.trim().length > 0);
   const uncommitted = await changedFiles(worktreePath);
   return [...new Set([...committed, ...uncommitted])];
@@ -327,8 +462,45 @@ export function matchDoNotTouch(
 /**
  * Remove a worktree if it has no changes. Returns true if removed, false if it
  * was retained because of local changes.
+ *
+ * `baseSha` is the commit this tree was cut from, as recorded on the run at
+ * creation time (manager.ts passes `run.worktreeBaseSha`). Passing it makes the
+ * unmerged-work judgement compare against the tree's REAL cut point instead of
+ * re-resolving a ref that may have moved since — see holdsUnmergedWork. Callers
+ * with no recorded base keep the previous re-resolving behaviour.
+ *
+ * `runId` is the caller's OWNERSHIP CLAIM (#3), checked against the tree's
+ * `.clanker-owner` marker before anything else. A claim that does not match —
+ * including no claim at all — is refused loudly and nothing is deleted. That is
+ * deliberately fail-closed in both directions: this function used to trust
+ * whatever path it was handed, and a dead run's cleanup deleting a live run's
+ * tree is precisely how three lanes died in one night. The occupancy check
+ * therefore cannot live in the CALLER (a bypassing caller is the failure mode);
+ * it lives here, keyed on a fact that survives on disk.
  */
-export async function removeIfClean(worktreePath: string, targetRepo = BASE_REPO): Promise<boolean> {
+export async function removeIfClean(
+  worktreePath: string,
+  targetRepo = BASE_REPO,
+  baseSha?: string,
+  runId?: string,
+): Promise<boolean> {
+  // The ownership gate applies to trees that are actually THERE. A path that
+  // does not exist is not somebody else's tree, it is a broken cleanup, and the
+  // loud reporting for that already lives downstream (the git call below throws
+  // and closeRun logs it). Answering "not mine" here would demote a real
+  // failure into a quiet refusal.
+  if (fs.existsSync(worktreePath)) {
+    const owner = readWorktreeOwner(worktreePath);
+    if (!runId || owner !== runId) {
+      console.error(
+        `[clanker] refusing to remove worktree '${worktreePath}': it is owned by ` +
+          `${owner === null ? `no readable ${OWNER_MARKER} marker` : `run '${owner}'`}, ` +
+          `and the caller claims ${runId === undefined ? "no run id at all" : `run '${runId}'`} ` +
+          `(a worktree is only ever reclaimed by the run it was created for — issue #3)`,
+      );
+      return false;
+    }
+  }
   const changes = await changedFiles(worktreePath);
   if (changes.length > 0) return false;
   // A clean tree can still hold UNPUSHED commits (the lane committed its
@@ -357,16 +529,48 @@ export async function removeIfClean(worktreePath: string, targetRepo = BASE_REPO
     // work behind", which was never true.
     //
     // Ask the question the upstream probe was really asking — does this tree
-    // hold commits that exist nowhere else? — against the ref the tree was CUT
-    // from, resolved exactly as `createWorktree` resolved it. That works with
+    // hold commits that exist nowhere else? — against the commit the tree was
+    // CUT from: the SHA recorded at creation when the caller has one, and only
+    // otherwise a fresh resolution. That works with
     // no remote at all, and it stays correct when the base has since advanced:
     // a branch whose commits are already merged into it counts zero.
-    if (await holdsUnmergedWork(worktreePath, targetRepo)) return false;
+    if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return false;
+  }
+  // Drop the ownership marker only now, with every retention question already
+  // answered. Leaving it in place would make the plain `git worktree remove`
+  // below fail on EVERY reclamation ("contains untracked files") and route all
+  // of them through the --force fallback, quietly retiring a guard that is
+  // still doing real work. If the removal fails anyway the marker goes back:
+  // a retained tree must not be left unowned, or the next caller — the very
+  // bypassing caller this check exists for — would find it unprotected.
+  const markerPath = path.join(worktreePath, OWNER_MARKER);
+  const marker = (() => {
+    try {
+      return fs.readFileSync(markerPath, "utf8");
+    } catch {
+      return null;
+    }
+  })();
+  try {
+    fs.rmSync(markerPath, { force: true });
+  } catch {
+    /* nothing to drop; the removal below decides the outcome either way */
   }
   try {
-    await git(targetRepo, ["worktree", "remove", worktreePath]);
-  } catch {
-    await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
+    try {
+      await git(targetRepo, ["worktree", "remove", worktreePath]);
+    } catch {
+      await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
+    }
+  } catch (err) {
+    if (marker !== null && fs.existsSync(worktreePath)) {
+      try {
+        fs.writeFileSync(markerPath, marker);
+      } catch {
+        /* best effort: the loud throw below is the report that matters */
+      }
+    }
+    throw err;
   }
   return true;
 }

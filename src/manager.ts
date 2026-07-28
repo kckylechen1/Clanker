@@ -511,6 +511,13 @@ export class LaneManager {
     let baseSha: string | undefined;
     let worktreePath: string | undefined;
     let worktreeBaseSha: string | undefined;
+    /**
+     * Dispatch-time advisories the SPEC knows nothing about (the dispatcher's
+     * checkout state, #33 A3). Kept separate from `spec.warnings` so a resolver
+     * that hands back a shared/cached spec object cannot accumulate one run's
+     * advisories onto the next run's dispatch.
+     */
+    const dispatchWarnings: string[] = [];
     let spec: SpawnSpec;
     try {
       if (params.worktree && params.cwd) {
@@ -535,8 +542,12 @@ export class LaneManager {
         // deriveWorktreePath keeps it under WORKTREES_ROOT; this guard rejects a
         // misconfiguration (WORKTREES_ROOT set inside the repo) that would put
         // writes back on the very checkout the isolation exists to protect.
-        assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree), targetRepo);
-        worktreePath = await createWorktree(params.worktree, targetRepo, baseSha);
+        //
+        // `id` is passed to BOTH calls on purpose: the guard must inspect the
+        // very path createWorktree will create (#3 keys that path on the run
+        // id), or the isolation check and the creation drift apart.
+        assertWorktreeOutsideRepo(deriveWorktreePath(params.worktree, id), targetRepo);
+        worktreePath = await createWorktree(params.worktree, id, targetRepo, baseSha);
         cwd = worktreePath;
         // The diff base for doNotTouch terminal validation: the exact commit the
         // tree was cut from, captured NOW (before the worker's first commit can
@@ -552,6 +563,31 @@ export class LaneManager {
             worktreeBaseSha = undefined;
           }
         }
+        // #33 A3: a worktree is cut from a COMMIT, so anything the dispatcher
+        // has not committed in its own checkout is simply not in the worker's
+        // tree. Now that the default cut point follows the dispatch cwd (A1),
+        // that gap sits exactly where a dispatcher's current work is — say it
+        // out loud at dispatch time instead of letting the worker discover it
+        // as a file that mysteriously does not exist. TELLING, NOT GATING: a
+        // dirty checkout is a normal state to dispatch from, and refusing here
+        // would only push dispatchers into off-books worktrees (the very
+        // behaviour #33 recorded a worker resorting to).
+        try {
+          const dirty = await changedFiles(targetRepo);
+          if (dirty.length > 0) {
+            const cutFrom = params.base !== undefined ? `base '${params.base}'` : "HEAD";
+            dispatchWarnings.push(
+              `worktree cut from ${cutFrom} ${(worktreeBaseSha ?? "(unknown)").slice(0, 7)}; ` +
+                `${dirty.length} uncommitted change(s) in ${targetRepo} are NOT included`,
+            );
+          }
+        } catch (err) {
+          // A check that could not run must not read as "nothing to report".
+          dispatchWarnings.push(
+            `could not inspect ${targetRepo} for uncommitted changes (${errMessage(err)}); ` +
+              `any uncommitted work there is NOT in the worktree`,
+          );
+        }
       }
     } catch (e) {
       // Leave a readable failure record instead of a silent gap: foreign.ts's
@@ -565,7 +601,8 @@ export class LaneManager {
       });
       throw e;
     }
-    this.warningsById.set(id, spec.warnings);
+    const warnings = [...spec.warnings, ...dispatchWarnings];
+    this.warningsById.set(id, warnings);
 
     const run = new LaneRun({
       id,
@@ -589,7 +626,7 @@ export class LaneManager {
 
     const drive = this.driveNewSession(run, spec, lanePrompt);
     this.trackDrive(id, drive);
-    return { id, warnings: spec.warnings };
+    return { id, warnings };
   }
 
   private trackDrive(id: string, drive: Promise<void>): void {
@@ -1152,10 +1189,42 @@ export class LaneManager {
 
   // ---- cancel / close -----------------------------------------------------
 
-  async cancel(id: string): Promise<{ id: string; status: RunStatus }> {
+  async cancel(id: string): Promise<{ id: string; status: RunStatus; worktree_retained?: string; run_dir?: string }> {
     const run = this.runs.get(id);
     if (!run) this.throwUnknownRun(id);
-    if (run.turnStatus !== "running") return { id, status: run.turnStatus };
+    // A run whose turn is already terminal has no turn to cancel — but it can
+    // still be HOLDING things. The supervised profile deliberately keeps its
+    // session (and therefore its worktree) alive past a successful turn so a
+    // correction turn stays possible, until the idle-TTL reaper closes it
+    // minutes later. In that window `clanker_cancel` used to return without
+    // doing anything at all, so a seat that had decided "no correction needed"
+    // could not give the tree back and had to wait the TTL out — the one
+    // remaining window where a live tree is held by nothing but a timer (#3).
+    //
+    // Cancel here means RECLAIM THE SESSION AND THE TREE, not "undo the work":
+    // the work already finished and its terminal status is the truth of what
+    // happened, so that status is reported back unchanged (a done run stays
+    // done; it is never rewritten to cancelled). An already-closed run keeps
+    // returning immediately — there is nothing left to hand back.
+    if (run.turnStatus !== "running") {
+      if (!run.sessionClosed) {
+        await this.close(id);
+        // The close above may have retained the tree (dirty / unmerged /
+        // capture-failed). Report that HERE, on cancel's own return — the
+        // packaged supervisor delivers fields off the last result it holds,
+        // and a seat that already decided "no correction needed" has no
+        // reason to issue another wait just to learn what this call already
+        // knows (PR #38 cold review: a cancel-then-report seat handed back
+        // stale pre-close evidence).
+        return {
+          id,
+          status: run.turnStatus,
+          run_dir: run.runDir,
+          ...(run.worktreeRetained ? { worktree_retained: run.worktreeRetained } : {}),
+        };
+      }
+      return { id, status: run.turnStatus };
+    }
     run.requestCancellation();
     const pending = this.pendingConnects.get(id);
     if (pending) {
@@ -1296,7 +1365,20 @@ export class LaneManager {
         run.worktreeRetained = run.worktreePath;
       } else {
         try {
-          const removed = await removeIfClean(run.worktreePath, run.targetRepo ?? this.baseRepo);
+          // Pass the cut point this run RECORDED (#33): cleanup must judge
+          // "does this tree hold commits that exist nowhere else" against the
+          // commit the tree was really cut from, not against a re-resolution of
+          // a ref that has been free to move since the tree was created.
+          // `run.id` is this run's ownership claim (#3): removeIfClean refuses
+          // any tree whose `.clanker-owner` marker names a different run, so
+          // closing a dead run can no longer delete a live one's tree even if
+          // both were dispatched on the same branch name.
+          const removed = await removeIfClean(
+            run.worktreePath,
+            run.targetRepo ?? this.baseRepo,
+            run.worktreeBaseSha,
+            run.id,
+          );
           if (!removed) run.worktreeRetained = run.worktreePath;
         } catch (err) {
           // Never let cleanup failure vanish silently — this is a stdio MCP

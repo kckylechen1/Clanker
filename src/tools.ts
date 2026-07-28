@@ -67,7 +67,8 @@ function narrowShape(profile: DispatchProfile): Record<string, z.ZodTypeAny> {
       .optional()
       .describe(
         "Optional ref to cut the worktree from (branch, tag, or SHA). Verified server-side before the worker " +
-          "starts; omit to use the repo's default base.",
+          "starts; omit to cut from the dispatch cwd's current HEAD (uncommitted changes there are NOT " +
+          "included — the dispatch reports how many were left behind).",
       );
     // `doNotTouch` is checked server-side at terminal time against the real
     // worktree diff (committed AND uncommitted), so it only exists where a
