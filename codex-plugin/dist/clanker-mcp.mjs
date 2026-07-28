@@ -32756,7 +32756,11 @@ var ENV_DRIFT_PATTERNS = [
   // itself contain spaces, hence `.+` rather than `\S+`).
   /spawn .+ ENOENT/i
 ];
+var SPAWN_FAILURE_PATTERNS = [
+  /failed to spawn .+ ENOENT/i
+];
 function classifyBackendFailure(message) {
+  if (SPAWN_FAILURE_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   if (BACKEND_BILLING_PATTERNS.some((re) => re.test(message))) return BACKEND_BILLING_TAG;
   if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;
   if (ENV_DRIFT_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
