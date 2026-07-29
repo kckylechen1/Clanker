@@ -181,7 +181,10 @@ test("#27: an over-long verdict is cut at the budget and SAYS it was cut", () =>
   assert.ok(!body.includes("X".repeat(ISSUE_COMMENT_VERDICT_BUDGET + 1)), "and stops at the budget");
   // "Truncated silently" is the failure this repo has already paid for once:
   // a clipped verdict that does not announce itself reads as a whole verdict.
-  assert.match(body, /truncated at 400 of 537 characters/);
+  assert.match(
+    body,
+    new RegExp(`truncated at ${ISSUE_COMMENT_VERDICT_BUDGET} of ${ISSUE_COMMENT_VERDICT_BUDGET + 137} characters`),
+  );
   assert.match(body, /result\.md/, "and points at the lossless artifact");
 });
 
@@ -468,7 +471,7 @@ test("#27: the second terminal transition APPENDS a turn-2 comment carrying the 
   // Driven on LaneRun directly so the two turns' MESSAGES differ: the
   // end-to-end test below runs a write profile, whose fake worker echoes the
   // server-prepended write-discipline preamble and therefore produces two
-  // verdicts with an identical first 400 characters.
+  // verdicts with an identical first ISSUE_COMMENT_VERDICT_BUDGET characters.
   const rec = recorder();
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-issue-correction-"));
   const run = new LaneRun({

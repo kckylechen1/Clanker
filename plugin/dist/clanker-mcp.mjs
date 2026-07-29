@@ -28308,7 +28308,7 @@ function stderrSuffix(stderr) {
 
 // src/issue-comment.ts
 var ISSUE_REF_PATTERN = /^(?:[\w.-]+\/[\w.-]+#)?\d+$/;
-var ISSUE_COMMENT_VERDICT_BUDGET = 400;
+var ISSUE_COMMENT_VERDICT_BUDGET = 3e3;
 var ISSUE_COMMENT_TIMEOUT_MS = 1e4;
 function parseIssueRef(raw) {
   const value = raw.trim();

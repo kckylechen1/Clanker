@@ -65,8 +65,22 @@ import { createTimeout, errMessage, redact } from "./util.js";
  */
 export const ISSUE_REF_PATTERN = /^(?:[\w.-]+\/[\w.-]+#)?\d+$/;
 
-/** How much of the verdict a comment carries before it defers to result.md. */
-export const ISSUE_COMMENT_VERDICT_BUDGET = 400;
+/**
+ * How much of the verdict a comment carries before it defers to result.md.
+ *
+ * 3000, not the 400 the packet first guessed — the live smoke that produced
+ * https://github.com/kckylechen1/Clanker/issues/27#issuecomment-5116110865
+ * truncated a 408-character message, and a real cold-review verdict runs
+ * thousands. At 400 the comment says "a verdict happened" and nothing about
+ * WHAT, so every reader has to open result.md anyway and the accounting closure
+ * closes nothing. The point of landing it in the thread is that the next person
+ * reading the issue learns the outcome without leaving it.
+ *
+ * Still bounded: an unbounded quote would let one runaway worker's output
+ * dominate a ticket, and result.md remains the lossless copy (the comment says
+ * so when it truncates).
+ */
+export const ISSUE_COMMENT_VERDICT_BUDGET = 3000;
 
 /** Default hard ceiling on the whole `gh` call; `CLANKER_ISSUE_COMMENT_TIMEOUT_MS` overrides. */
 export const ISSUE_COMMENT_TIMEOUT_MS = 10_000;
