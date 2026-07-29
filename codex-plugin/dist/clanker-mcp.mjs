@@ -33179,6 +33179,12 @@ function isCapacityTransient(message) {
 var BACKEND_BILLING_TAG = "CLANKER-BACKEND-BILLING";
 var BACKEND_AUTH_TAG = "CLANKER-BACKEND-AUTH";
 var ENV_DRIFT_TAG = "CLANKER-ENV-DRIFT";
+var BACKEND_MODEL_TAG = "CLANKER-BACKEND-MODEL";
+var BACKEND_MODEL_PATTERNS = [
+  /cannot use this model/i,
+  /model .{0,80}(is )?(not available|unavailable|not supported|unknown model)/i,
+  /no access to model/i
+];
 var BACKEND_BILLING_PATTERNS = [
   /\b402\b|balance|billing|payment required|usage balance exhausted|insufficient credit/i
 ];
@@ -33206,6 +33212,7 @@ function classifyBackendFailure(message) {
   if (SPAWN_FAILURE_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   if (BACKEND_BILLING_PATTERNS.some((re) => re.test(message))) return BACKEND_BILLING_TAG;
   if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;
+  if (BACKEND_MODEL_PATTERNS.some((re) => re.test(message))) return BACKEND_MODEL_TAG;
   if (ENV_DRIFT_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   return void 0;
 }

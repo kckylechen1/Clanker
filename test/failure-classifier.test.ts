@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   BACKEND_AUTH_TAG,
   BACKEND_BILLING_TAG,
+  BACKEND_MODEL_TAG,
   ENV_DRIFT_TAG,
   classifyBackendFailure,
   classifyTurnFailure,
@@ -174,4 +175,27 @@ test("a real billing/auth rejection with no spawn-failure wrapper still classifi
 test("ordinary failures are still untagged — ENOENT alone is not enough", () => {
   assert.equal(classifyBackendFailure("ENOENT: no such file or directory, open 'result.md'"), undefined);
   assert.equal(classifyBackendFailure("turn exceeded CLANKER_TURN_TIMEOUT_MS (2700000ms)"), undefined);
+});
+
+test("a model the backend refuses is its own class — not billing, not auth, not env drift", () => {
+  // Measured 2026-07-29 from a real cursor smoke run that died in 10s while
+  // the identical next run passed in 28s: the vendor's own text, verbatim.
+  assert.equal(
+    classifyBackendFailure(
+      "Clanker: Cursor cursor-agent failed (exit 1): Cannot use this model: composer-2.5. Available models:",
+    ),
+    BACKEND_MODEL_TAG,
+  );
+  assert.equal(classifyBackendFailure("model gpt-9 is not available on your plan"), BACKEND_MODEL_TAG);
+  // Billing still outranks it: an account out of money frequently SAYS the
+  // model is unavailable, and the money is the actionable truth.
+  assert.equal(
+    classifyBackendFailure("model x unavailable: usage balance exhausted (402)"),
+    BACKEND_BILLING_TAG,
+  );
+  // And a spawn failure still short-circuits ahead of everything.
+  assert.equal(
+    classifyBackendFailure("failed to spawn '/x/node': spawn /x/node ENOENT — cannot use this model"),
+    ENV_DRIFT_TAG,
+  );
 });

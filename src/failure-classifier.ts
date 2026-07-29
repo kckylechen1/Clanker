@@ -85,6 +85,31 @@ export const BACKEND_AUTH_TAG = "CLANKER-BACKEND-AUTH";
 export const ENV_DRIFT_TAG = "CLANKER-ENV-DRIFT";
 
 /**
+ * The backend refused the MODEL, not the request: the id is unknown to it, or
+ * this account/plan cannot reach it right now. Permanent for that id, but
+ * distinct from billing (the account is fine) and from auth (credentials are
+ * fine) — and, measured 2026-07-29, sometimes TRANSIENT at the vendor: one
+ * cursor smoke run died in 10s on `Cannot use this model: composer-2.5` and
+ * the very next identical run passed in 28s. A dispatcher that cannot tell
+ * "my dispatch is wrong" from "the vendor is having a moment" retries the
+ * wrong thing, or gives up on a lane that is actually fine.
+ */
+export const BACKEND_MODEL_TAG = "CLANKER-BACKEND-MODEL";
+
+/**
+ * Model-rejection signatures. Kept narrow and vendor-quoted: these are the
+ * exact shapes seen from real CLIs, not a guess at what a rejection reads
+ * like. Checked AFTER billing/auth — an account that is out of money often
+ * reports it as a model it can no longer reach, and the money is the more
+ * actionable truth.
+ */
+const BACKEND_MODEL_PATTERNS: readonly RegExp[] = [
+  /cannot use this model/i,
+  /model .{0,80}(is )?(not available|unavailable|not supported|unknown model)/i,
+  /no access to model/i,
+];
+
+/**
  * Backend billing-account failure signatures. 2026-07-24 incident (issue
  * #9): Grok's ACP bridge returned HTTP 402 ("API error (status 402 Payment
  * Required): Grok Build usage balance exhausted") from its backend, but its
@@ -207,10 +232,16 @@ const SPAWN_FAILURE_PATTERNS: readonly RegExp[] = [
  */
 export function classifyBackendFailure(
   message: string,
-): typeof BACKEND_BILLING_TAG | typeof BACKEND_AUTH_TAG | typeof ENV_DRIFT_TAG | undefined {
+):
+  | typeof BACKEND_BILLING_TAG
+  | typeof BACKEND_AUTH_TAG
+  | typeof ENV_DRIFT_TAG
+  | typeof BACKEND_MODEL_TAG
+  | undefined {
   if (SPAWN_FAILURE_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   if (BACKEND_BILLING_PATTERNS.some((re) => re.test(message))) return BACKEND_BILLING_TAG;
   if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;
+  if (BACKEND_MODEL_PATTERNS.some((re) => re.test(message))) return BACKEND_MODEL_TAG;
   if (ENV_DRIFT_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   return undefined;
 }
