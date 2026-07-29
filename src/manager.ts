@@ -49,6 +49,7 @@ import type {
 } from "./types.js";
 import { LANE_NAMES } from "./types.js";
 import { hostLaneBlockedReason, type ClankerHost } from "./host.js";
+import { TurnDriver, type TurnHost } from "./turn-driver.js";
 import {
   assertWorktreeOutsideRepo,
   changedFiles,
@@ -428,6 +429,8 @@ export class LaneManager {
   private readonly pendingConnects = new Map<string, AbortController>();
   private readonly turnDrives = new Map<string, Promise<void>>();
   private readonly closing = new Map<string, Promise<void>>();
+  /** The turn engine (turn-driver.ts); every per-turn method below forwards to it. */
+  private readonly turnDriver: TurnDriver;
   private shuttingDown = false;
   /** CP6: at most one active clanker_wait per id (single-consumer contract). */
   private readonly activeWaits = new Set<string>();
@@ -447,11 +450,55 @@ export class LaneManager {
     this.capacityRetryBackoffMs = opts.capacityRetryBackoffMs ?? CAPACITY_RETRY_BACKOFF_MS;
     this.cancelGraceMs = opts.cancelGraceMs ?? CANCEL_GRACE_MS;
     this.processTerminateGraceMs = opts.processTerminateGraceMs;
+    this.turnDriver = new TurnDriver(this.turnHost());
     if (!opts.disableReaper) {
       const period = Math.max(5_000, Math.floor(this.sessionTtlMs / 10));
       this.reaperTimer = setInterval(() => void this.reap(), period);
       this.reaperTimer.unref?.();
     }
+  }
+
+  /**
+   * The manager's side of the TurnDriver split: the exact set of manager
+   * capabilities the turn engine is allowed to reach, and nothing else.
+   *
+   * Every function member delegates through an arrow so the receiver stays the
+   * MANAGER — `resolveSpec` in particular is caller-injected and must keep
+   * being invoked exactly as `this.resolveSpec(...)` was. The scalars are read
+   * once here because each is `readonly` and assigned in the constructor above;
+   * `shuttingDown` is the one mutable flag, so it is a getter and stays live.
+   */
+  private turnHost(): TurnHost {
+    const manager = this;
+    return {
+      turnTimeoutMs: this.turnTimeoutMs,
+      turnTimeoutOverrideMs: this.turnTimeoutOverrideMs,
+      handshakeTimeoutMs: this.handshakeTimeoutMs,
+      processTerminateGraceMs: this.processTerminateGraceMs,
+      capacityRetryBackoffMs: this.capacityRetryBackoffMs,
+      sessionTtlMs: this.sessionTtlMs,
+      get shuttingDown(): boolean {
+        return manager.shuttingDown;
+      },
+      resolveSpec: (lane, opts, runDir) => this.resolveSpec(lane, opts, runDir),
+      getRun: (id) => this.runs.get(id),
+      throwUnknownRun: (id): never => this.throwUnknownRun(id),
+      isClosing: (id) => this.closing.has(id),
+      getConnection: (id) => this.connections.get(id),
+      setConnection: (id, conn) => {
+        this.connections.set(id, conn);
+      },
+      dropConnection: (id, expected) => {
+        if (this.connections.get(id) === expected) this.connections.delete(id);
+      },
+      close: (id) => this.close(id),
+      computeTouched: (run) => this.computeTouched(run),
+      computeContractViolations: (run) => this.computeContractViolations(run),
+      getWarnings: (id) => this.warningsById.get(id),
+      setWarnings: (id, warnings) => {
+        this.warningsById.set(id, warnings);
+      },
+    };
   }
 
   // ---- dispatch -----------------------------------------------------------
