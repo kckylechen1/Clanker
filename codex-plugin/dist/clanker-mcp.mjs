@@ -27783,7 +27783,7 @@ var RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 864e5;
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.4.5";
+var SERVER_VERSION = "0.4.6";
 var DEFAULT_CODEX_MODEL = "gpt-5.5";
 var DEFAULT_CODEX_EFFORT = "xhigh";
 var WRITE_DISCIPLINE_PREFIX = `Workspace discipline, enforced by the dispatching contract \u2014 these override any
@@ -30430,9 +30430,9 @@ var DISPATCH_PROFILES = [
   {
     id: "codex-review",
     title: "Codex cold review (read-only, in place)",
-    description: "Read-only Codex review. lane, read_only=true and sandbox=read-only are welded server-side: the sandbox is welded because a Codex dispatch with read_only=true but a write-capable native sandbox can still write the workspace, so leaving sandbox callable would be a way around the read-only gate. Runs in place by default; an optional worktree branch runs the review inside an isolated tree instead.",
+    description: "Read-only Codex review. lane, read_only=true and sandbox=read-only are welded server-side: the sandbox is welded because a Codex dispatch with read_only=true but a write-capable native sandbox can still write the workspace, so leaving sandbox callable would be a way around the read-only gate. Runs in place by default; an optional worktree branch runs the review inside an isolated tree instead. Model is a free parameter: name one to run this review on a specific Codex model, omit it to run Clanker's pinned default.",
     lane: "codex",
-    model: { kind: "lane-default" },
+    model: { kind: "caller-optional", defaultId: DEFAULT_CODEX_MODEL },
     readOnly: true,
     sandbox: { kind: "welded", mode: "read-only" },
     isolation: "optional",
@@ -30445,9 +30445,9 @@ var DISPATCH_PROFILES = [
   {
     id: "codex-write",
     title: "Codex implementation (isolated worktree)",
-    description: "Write-capable Codex worker. read_only=false is welded and a managed worktree branch is mandatory, so writes are boxed to the worktree. Sandbox strictness stays caller-selectable across all three Codex tiers and defaults to workspace-write. Model omitted on purpose: Codex runs its configured default.",
+    description: "Write-capable Codex worker. read_only=false is welded and a managed worktree branch is mandatory, so writes are boxed to the worktree. Sandbox strictness stays caller-selectable across all three Codex tiers and defaults to workspace-write. Model is a free parameter: name one to run this worker on a specific Codex model, omit it to run Clanker's pinned default rather than whatever `~/.codex/config.toml` currently says.",
     lane: "codex",
-    model: { kind: "lane-default" },
+    model: { kind: "caller-optional", defaultId: DEFAULT_CODEX_MODEL },
     readOnly: false,
     sandbox: { kind: "caller", defaultMode: "workspace-write" },
     isolation: "required",
@@ -30655,7 +30655,7 @@ function resolveProfileDispatch(input, env = process.env) {
       break;
     case "lane-default":
       if (input.model !== void 0) {
-        throw new Error(`profile '${profile.id}' uses the lane's configured default model; it takes no model argument`);
+        throw new Error(`profile '${profile.id}' pins its model server-side; it takes no model argument`);
       }
       model = void 0;
       break;

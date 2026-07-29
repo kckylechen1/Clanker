@@ -20,7 +20,7 @@ test("runtime, package, and plugin versions agree", () => {
   const pluginVersion = JSON.parse(
     fs.readFileSync(path.resolve("plugin/.claude-plugin/plugin.json"), "utf8"),
   ).version;
-  assert.equal(SERVER_VERSION, "0.4.5");
+  assert.equal(SERVER_VERSION, "0.4.6");
   assert.equal(packageVersion, SERVER_VERSION);
   assert.equal(pluginVersion, SERVER_VERSION);
   const codexPluginVersion = JSON.parse(

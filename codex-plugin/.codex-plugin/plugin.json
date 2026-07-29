@@ -1,6 +1,6 @@
 {
   "name": "clanker",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Codex dispatcher adapter for external Opencode, Grok, Cursor, and read-only Gemini Clankers over ACP.",
   "author": {
     "name": "kckylechen1"
