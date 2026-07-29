@@ -24,6 +24,7 @@
  * with its group, that a SIGTERM was ignored. A faked `kill` would prove that
  * the code calls a function.
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -59,7 +60,7 @@ async function killAndReap(child: ChildProcess): Promise<void> {
     try { process.kill(child.pid!, "SIGKILL"); } catch { /* already gone */ }
     await exited;
   }
-  await until(() => !alive(child.pid!), 4_000);
+  await until(() => !alive(child.pid!));
 }
 
 /**
@@ -97,7 +98,7 @@ async function spawnWorker(opts: { ignoreTerm?: boolean } = {}): Promise<WorkerF
   });
   const startedAt = Date.now();
   child.unref();
-  await until(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8").includes("grandchild"), 8_000);
+  await until(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8").includes("grandchild"));
   const pids = JSON.parse(fs.readFileSync(pidFile, "utf8")) as { worker: number; grandchild: number };
   assert.equal(pids.worker, child.pid, "fixture must report its own pid");
   assert.ok(alive(pids.grandchild), "the grandchild must be running before anything is killed");
@@ -201,7 +202,7 @@ test("mutant: inverting the owner-liveness verdict kills a LIVE session's worker
   try {
     const result = await m.cancel("codex-live-owner");
     assert.equal(result.adopted, true, "the mutant adopts a run whose owner is alive");
-    await until(() => !alive(worker.pid), 4_000);
+    await until(() => !alive(worker.pid));
     assert.ok(
       !alive(worker.pid),
       "with the liveness check inverted the worker dies — so the previous test observes the gate, not luck",
@@ -251,10 +252,10 @@ test("owner dead: the worker's whole group dies and the record is closed", async
     assert.equal(result.owner_pid, owner.pid);
     assert.equal(result.worker_pid, worker.pid);
 
-    await until(() => !alive(worker.pid), 4_000);
+    await until(() => !alive(worker.pid));
     // The grandchild is the reason the kill is a GROUP kill: a single-pid kill
     // leaves it holding the worktree with nothing left that knows it exists.
-    await until(() => !alive(worker.grandchildPid), 4_000);
+    await until(() => !alive(worker.grandchildPid));
 
     const telemetry = readTelemetry(root, "codex-orphan");
     assert.ok(telemetry.terminal_at, "an adopted run must be closed, or it haunts the orphan board forever");
@@ -328,7 +329,7 @@ test("mutant: without archival the killed orphan stays 'in flight' forever (prov
   });
   try {
     await m.cancel("codex-board");
-    await until(() => !alive(worker.pid), 4_000);
+    await until(() => !alive(worker.pid));
     assert.equal(
       scanForeignRuns({ runsRoot: root }).length,
       1,
@@ -400,7 +401,7 @@ test("mutant: removing the identity guard kills the stranger (proves the guard a
   try {
     const result = await m.cancel("codex-recycled");
     assert.equal(result.killed, true, "the mutant signals a pid it cannot identify");
-    await until(() => !alive(worker.pid), 4_000);
+    await until(() => !alive(worker.pid));
   } finally {
     await m.shutdown();
     worker.cleanup();
@@ -451,8 +452,8 @@ test("a worker that ignores SIGTERM is re-verified and then SIGKILLed", async ()
     assert.equal(result.identity_verified, true, "the SECOND check is what authorized the SIGKILL");
     assert.match(result.note!, /survived SIGTERM/);
     assert.match(result.note!, /SIGKILLed/);
-    await until(() => !alive(worker.pid), 4_000);
-    await until(() => !alive(worker.grandchildPid), 4_000);
+    await until(() => !alive(worker.pid));
+    await until(() => !alive(worker.grandchildPid));
   } finally {
     await m.shutdown();
     worker.cleanup();
@@ -518,7 +519,7 @@ test("mutant: escalating on the FIRST check instead of re-checking kills the rec
   try {
     const result = await m.cancel("codex-stubborn");
     assert.equal(result.killed, true);
-    await until(() => !alive(worker.pid), 4_000);
+    await until(() => !alive(worker.pid));
     assert.ok(!alive(worker.pid), "without the re-check the escalation lands on whatever holds the pid now");
   } finally {
     await m.shutdown();
@@ -888,7 +889,7 @@ test("mutant: pre-fix, that same id kills the nominated worker and archives outs
   try {
     const result = await m.cancel(escapingId);
     assert.equal(result.killed, true, "pre-fix, a planted record gets its nominated pid signalled");
-    await until(() => !alive(worker.pid), 4_000);
+    await until(() => !alive(worker.pid));
     const after = JSON.parse(fs.readFileSync(path.join(outsideDir, "telemetry.json"), "utf8"));
     assert.equal(after.terminal_reason, "cancelled-foreign", "…and the write lands outside the runs root");
   } finally {
@@ -913,7 +914,7 @@ async function spawnNonLeader(): Promise<{ pid: number; startedAt: number; clean
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], { stdio: "ignore" });
   const startedAt = Date.now();
   child.unref();
-  await until(() => alive(child.pid!), 4_000);
+  await until(() => alive(child.pid!));
   assert.throws(() => process.kill(-child.pid!, 0), "fixture must NOT be a group leader");
   return {
     pid: child.pid!,
@@ -984,7 +985,7 @@ test("mutant: the old bare-pid fallback signals exactly the process it must not"
   try {
     const result = await m.cancel("codex-recycledpid");
     assert.equal(result.killed, true, "the fallback delivers a signal…");
-    await until(() => !alive(stranger.pid), 4_000);
+    await until(() => !alive(stranger.pid));
     assert.ok(!alive(stranger.pid), "…straight into a process that is not the worker");
   } finally {
     await m.shutdown();

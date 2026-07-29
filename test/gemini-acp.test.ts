@@ -1,3 +1,4 @@
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -8,7 +9,7 @@ import { LaneConnection } from "../src/acp-client.js";
 import { buildSpawnSpec } from "../src/backends.js";
 import { LaneManager } from "../src/manager.js";
 import { resolveNodeBinary } from "../src/node-binary.js";
-import { fakeResolver, fakeSpec } from "./helpers.js";
+import { OS_WAIT_BUDGET_MS, fakeResolver, fakeSpec } from "./helpers.js";
 
 const workspaceSandboxAvailable = (() => {
   if (process.platform !== "darwin") return false;
@@ -126,7 +127,13 @@ async function stopReasonWithin(
   }
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+// Every predicate this file waits on is OS-bound — a sidecar's shell reaching
+// an `echo $$`, a signal being delivered, a pid disappearing — so the default
+// is the suite's standard budget (helpers.ts OS_WAIT_BUDGET_MS, #29) instead of
+// the 2s that measured 1 red in 6 runs on a loaded machine (see the note at the
+// cancellation test below). The call sites that already spell 15_000 out are
+// the same number; upper bound, not a sleep.
+async function waitUntil(predicate: () => boolean, timeoutMs = OS_WAIT_BUDGET_MS): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(predicate(), true, `condition not met within ${timeoutMs}ms`);
@@ -196,7 +203,7 @@ test("dispatchProfile routes the gemini role from the profile id into the spawn 
     const a = await m.dispatchProfile({ profile: "gemini-research", prompt: "research", cwd: os.tmpdir() });
     const b = await m.dispatchProfile({ profile: "gemini-recon", prompt: "survey", cwd: os.tmpdir() });
     assert.deepEqual(seen, ["gemini-research", "gemini-recon"]);
-    await waitUntil(() => m.status(a.id).status !== "running" && m.status(b.id).status !== "running", 4_000);
+    await waitUntil(() => m.status(a.id).status !== "running" && m.status(b.id).status !== "running");
   } finally {
     await m.shutdown();
   }

@@ -14,6 +14,7 @@
  * agy's command line. Reporting the wrong thing confidently would be worse than
  * reporting nothing.
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

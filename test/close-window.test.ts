@@ -19,6 +19,7 @@
  * SIGTERM is racing to kill, on a worktree `removeIfClean` might delete out
  * from under it.
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -61,7 +62,7 @@ test("A1: list() still shows a run during the close()-before-terminal window", a
   const m = new LaneManager({ resolveSpec: fakeResolver, disableReaper: true, baseRepo: os.tmpdir() });
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "STALL a1", cwd: os.tmpdir(), readOnly: true });
-    await until(() => m.status(id).tool_calls > 0, 4_000);
+    await until(() => m.status(id).tool_calls > 0);
 
     // close() disposes the session and kills the subprocess, but does NOT
     // itself touch turnStatus — only the drive loop's own completeTurn/
@@ -86,7 +87,7 @@ async function startSupervised(m: LaneManager, tag: string): Promise<string> {
     prompt: "implement the frozen spec",
     worktree: `clanker/close-window-${tag}-${Math.random().toString(36).slice(2, 8)}`,
   });
-  await until(() => m.status(id).status !== "running", 6_000);
+  await until(() => m.status(id).status !== "running");
   return id;
 }
 

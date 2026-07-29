@@ -1,3 +1,9 @@
+// First, and above the `../src/constants.js` import below: constants.ts reads
+// the root env vars at module scope, so isolation has to be applied before it
+// is evaluated (#29). This does NOT make importing helpers sufficient — most
+// test files import a src module before they import helpers — which is why
+// every test file carries the same first import.
+import "./isolate.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -130,16 +136,48 @@ export function dropMutant(name: string): void {
 }
 
 /**
+ * The suite's budget for waiting on something this process does NOT schedule:
+ * a spawned worker reaching a state, a signal being delivered, a process group
+ * being reaped, a file becoming visible. 15s (#29).
+ *
+ * The triage rule, and the reason this is a named constant rather than a number
+ * per call site: a budget that waits on the OS has no upper bound this process
+ * can compute, so its only job is to be far enough above the worst plausible
+ * scheduling delay that a red result means "the thing never happened" and not
+ * "the machine was busy". Every wall-clock red this repo has had was of that
+ * second kind — gemini's process-group reclaim (2s), enforced-contract's
+ * waitTerminal (5s, measured 8/12 red under parallel load), the cancel grace
+ * (40ms) — each raised singly, after CI had already gone red.
+ *
+ * A budget is an UPPER BOUND, not a sleep: `until` returns the moment the
+ * condition holds, so a healthy machine pays nothing for the headroom, and the
+ * assertion stays "it happens", never "it happens fast".
+ *
+ * The other class — a deadline on work this process itself schedules (a timer
+ * it set, a promise it holds, in-memory state) — stays tight on purpose, and so
+ * does any assertion whose SUBJECT is a duration ("this wait must return before
+ * its budget", "cancel must not resolve before the grace"). Those keep their
+ * literal number and a comment saying why; do not fold them in here.
+ */
+export const OS_WAIT_BUDGET_MS = 15_000;
+
+/**
  * Poll `fn` until it returns true, or throw if the deadline passes first.
+ *
+ * Every call site in this suite waits on a spawned fake-agent process, a pid's
+ * liveness, or a file appearing — all OS-bound — so the default is
+ * OS_WAIT_BUDGET_MS and call sites pass no number at all. An explicit budget
+ * here therefore means "this site is deliberately different", which is what
+ * makes the exceptions greppable.
  *
  * A silent-timeout version of this used to return `false` here, but none of
  * the ~30 call sites across the suite checked the return value — a timeout
  * would fall through to a downstream assertion that failed with an unrelated
  * message instead of naming the condition that never became true. Fail loudly
  * at the point of the actual timeout instead (mirrors the `waitUntil` in
- * test/gemini-acp.test.ts:38-42).
+ * test/gemini-acp.test.ts).
  */
-export async function until(fn: () => boolean, timeoutMs = 4000, stepMs = 20): Promise<true> {
+export async function until(fn: () => boolean, timeoutMs = OS_WAIT_BUDGET_MS, stepMs = 20): Promise<true> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (fn()) return true;

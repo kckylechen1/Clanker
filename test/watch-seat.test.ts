@@ -10,6 +10,7 @@
  * the property #19/#20 restored (capability is the tool surface, not a
  * parameter) has to hold for a seat the older test cannot see.
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";

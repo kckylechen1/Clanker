@@ -1,3 +1,4 @@
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -8,7 +9,7 @@ import { LaneManager, assertWorktreeOutsideRepo, type SpecResolver, type WaitRes
 import { ENV_DRIFT_TAG, INFRA_FAILURE_TAG } from "../src/failure-classifier.js";
 import { LaneRun } from "../src/run.js";
 import type { LaneRequestOptions } from "../src/types.js";
-import { fakeResolver, fakeSpec, until } from "./helpers.js";
+import { OS_WAIT_BUDGET_MS, fakeResolver, fakeSpec, until } from "./helpers.js";
 
 function makeCrewBaseRepo(): { base: string; root: string } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-kimi-crew-manager-"));
@@ -59,7 +60,11 @@ function makeManager(
   });
 }
 
-async function waitTerminal(m: LaneManager, id: string, timeoutMs = 5000): Promise<WaitResult> {
+// OS-bound, so it takes the suite's standard budget (helpers.ts
+// OS_WAIT_BUDGET_MS, #29): every call spawns a worker process and waits for it
+// to reach a terminal turn. It was 5s — the same 5s that measured 8/12 red
+// under parallel load in enforced-contract.test.ts. Upper bound, not a sleep.
+async function waitTerminal(m: LaneManager, id: string, timeoutMs = OS_WAIT_BUDGET_MS): Promise<WaitResult> {
   const deadline = Date.now() + timeoutMs;
   let last!: WaitResult;
   while (Date.now() < deadline) {
@@ -144,7 +149,7 @@ test("#32: telemetry.json names the server pid and the live worker's pid/start t
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "STALL forever", cwd: os.tmpdir(), readOnly: true });
     const telemetryPath = path.join(process.env.CLANKER_RUNS_ROOT!, id, "telemetry.json");
     const read = () => JSON.parse(fs.readFileSync(telemetryPath, "utf8"));
-    await until(() => read().worker_pid !== undefined, 5_000);
+    await until(() => read().worker_pid !== undefined);
 
     const t = read();
     assert.equal(t.server_pid, process.pid, "server_pid must be THIS process — the one holding the worker's stdio");
@@ -223,7 +228,7 @@ test("quiet mode (default): a lone tool_call (grep/read-shaped) does not cut a w
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "STALL now", cwd: os.tmpdir(), readOnly: true });
     // "STALL now" emits exactly one tool_call, then the fake agent hangs
     // forever — the shape of "codex fires a tool_call for every grep/read".
-    await until(() => m.status(id).tool_calls >= 1, 4000);
+    await until(() => m.status(id).tool_calls >= 1);
     // Prime-drain: turn_start is itself a significant digest entry, so the
     // very first wait on a fresh run always wakes fast regardless of quiet
     // mode. Drain it here so the *timed* wait below measures only what
@@ -248,7 +253,7 @@ test("quiet:false restores the legacy any-event wake-up on the same trivial tool
   const m = makeManager({ stallThresholdMs: 60_000 });
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "STALL now", cwd: os.tmpdir(), readOnly: true });
-    await until(() => m.status(id).tool_calls >= 1, 4000);
+    await until(() => m.status(id).tool_calls >= 1);
     const t0 = Date.now();
     const r = await m.wait(id, 2000, false);
     const elapsed = Date.now() - t0;
@@ -267,7 +272,7 @@ test("quiet mode: a trivial tool_call doesn't wake a wait, but a later plan even
   const m = makeManager({ stallThresholdMs: 60_000 });
   try {
     const { id } = await m.dispatchStart({ lane: "opencode", prompt: "TRICKLE please", cwd: os.tmpdir(), readOnly: true });
-    await until(() => m.status(id).tool_calls >= 1, 4000);
+    await until(() => m.status(id).tool_calls >= 1);
     const primed = await m.wait(id, 50); // drain turn_start + the trivial tool_call
     assert.equal(primed.status, "running");
 
@@ -288,11 +293,19 @@ test("quiet mode: a trivial tool_call doesn't wake a wait, but a later plan even
 test("silence flags suspected_stall (warning) then the turn timeout forces a terminal state", async () => {
   // CP1: suspected_stall stays a warning, but a silent turn must still reach a
   // terminal state — here via the hard per-turn timeout.
-  const m = makeManager({ stallThresholdMs: 150, turnTimeoutMs: 1500 });
+  // 4s, not 1500ms (#29): the turn timer is armed at turn start
+  // (turn-driver.ts runTurn), and this test then spends ~700ms of that same
+  // window on its own two waits before it asserts the run is STILL running. A
+  // 2x margin between "the test's waits" and "the ceiling they must fit inside"
+  // is the kind that survives a quiet machine and loses on a loaded one — and
+  // `node --test test/*.test.ts` runs the files in parallel. Nothing here
+  // asserts the ceiling's value, only that it eventually fires, so widening the
+  // margin costs ~2.5s in this one test and removes a race.
+  const m = makeManager({ stallThresholdMs: 150, turnTimeoutMs: 4_000 });
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "STALL now", cwd: os.tmpdir(), readOnly: true });
     // Ensure the tool_call event is ingested, then drain pending digest.
-    await until(() => m.status(id).tool_calls >= 1, 4000);
+    await until(() => m.status(id).tool_calls >= 1);
     await m.wait(id, 300);
     // Silent: warning fires while still running.
     const warning = await m.wait(id, 400);
@@ -300,7 +313,7 @@ test("silence flags suspected_stall (warning) then the turn timeout forces a ter
     assert.equal(warning.suspected_stall, true);
     assert.ok(warning.last_event_age_ms >= 150);
     // The turn timeout provides the guaranteed terminal path.
-    const terminal = await waitTerminal(m, id, 4000);
+    const terminal = await waitTerminal(m, id);
     assert.equal(terminal.status, "error");
     assert.match(terminal.error ?? "", /CLANKER_TURN_TIMEOUT_MS/);
   } finally {
@@ -312,7 +325,7 @@ test("CP1: a subprocess that exits mid-turn drives the run to error and dispatch
   const m = makeManager();
   try {
     const { id } = await m.dispatchStart({ lane: "grok", prompt: "CRASH now", cwd: os.tmpdir(), readOnly: true });
-    const r = await waitTerminal(m, id, 5000);
+    const r = await waitTerminal(m, id);
     assert.equal(r.status, "error");
     assert.match(r.error ?? "", /exited mid-turn/);
   } finally {
@@ -335,7 +348,7 @@ test("#37: a spawn ENOENT reaches the dispatcher tagged CLANKER-ENV-DRIFT", asyn
   });
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "hello", cwd: os.tmpdir(), readOnly: true });
-    const r = await waitTerminal(m, id, 5000);
+    const r = await waitTerminal(m, id);
     assert.equal(r.status, "error");
     assert.match(r.error ?? "", /ENOENT/);
     assert.equal(r.failure_class, ENV_DRIFT_TAG, "an ENOENT spawn is the environment, not the task");
@@ -353,7 +366,7 @@ test("a turn-1, zero-tool-call API-schema-rejection is tagged CLANKER-INFRA-FAIL
   try {
     const t0 = Date.now();
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "SCHEMA400 please", cwd: os.tmpdir(), readOnly: true });
-    const r = await waitTerminal(m, id, 5000);
+    const r = await waitTerminal(m, id);
     const elapsed = Date.now() - t0;
     assert.equal(r.status, "error");
     assert.equal(r.failure_class, INFRA_FAILURE_TAG);
@@ -428,7 +441,7 @@ test("a capacity-transient failure on the SECOND attempt is not retried again (s
       cwd: os.tmpdir(),
       readOnly: true,
     });
-    const r = await waitTerminal(m, id, 5000);
+    const r = await waitTerminal(m, id);
     assert.equal(r.status, "error");
     assert.match(r.error ?? "", /capacity/i);
     assert.equal(fs.readFileSync(counter, "utf8"), "2", "exactly first attempt + one retry, no more");
@@ -452,7 +465,7 @@ test("shutdown wakes capacity backoff immediately without spawning attempt two",
     const { id } = await m.dispatchStart({
       lane: "codex", prompt: "CAPACITY_ALWAYS please", cwd: os.tmpdir(), readOnly: true,
     });
-    await until(() => m.status(id).telemetry?.retries === 1, 2_000);
+    await until(() => m.status(id).telemetry?.retries === 1);
     const started = Date.now();
     await m.shutdown();
     const elapsed = Date.now() - started;
@@ -482,10 +495,10 @@ test("cancel wakes capacity backoff immediately without spawning attempt two", a
     const { id } = await m.dispatchStart({
       lane: "codex", prompt: "CAPACITY_ALWAYS please", cwd: os.tmpdir(), readOnly: true,
     });
-    await until(() => m.status(id).telemetry?.retries === 1, 2_000);
+    await until(() => m.status(id).telemetry?.retries === 1);
     const started = Date.now();
     m.cancel(id);
-    await until(() => m.status(id).status === "cancelled", 1_000);
+    await until(() => m.status(id).status === "cancelled");
     const elapsed = Date.now() - started;
     // Upper bound is generous (not tight-1s) because it includes OS process
     // teardown, not just this process's backoff-wake logic — see #29-class
@@ -743,7 +756,7 @@ test("CP5: read-only declines a write-permission request instead of approving it
       cwd: os.tmpdir(),
       readOnly: true,
     });
-    const r = await waitTerminal(m, id, 5000);
+    const r = await waitTerminal(m, id);
     assert.equal(r.status, "done");
     assert.equal(r.final_message, "PERMISSION_DENIED");
   } finally {
@@ -768,7 +781,7 @@ test("clanker_cancel maps a cancelled turn to status cancelled", async () => {
   try {
     const { id } = await m.dispatchStart({ lane: "grok", prompt: "CANCELME long", cwd: os.tmpdir(), readOnly: true });
     // Wait until the tool_call event has been ingested.
-    await until(() => m.status(id).tool_calls >= 1, 4000);
+    await until(() => m.status(id).tool_calls >= 1);
     await m.cancel(id);
     const r = await waitTerminal(m, id);
     assert.equal(r.status, "cancelled");
@@ -805,7 +818,7 @@ test("cancel during handshake waits for child exit and cannot publish a late con
   });
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "too late", cwd: os.tmpdir(), readOnly: true });
-    await until(() => fs.existsSync(pidFile), 10_000);
+    await until(() => fs.existsSync(pidFile));
     const pid = Number(fs.readFileSync(pidFile, "utf8"));
     const result = await m.cancel(id);
     assert.equal(result.status, "cancelled");
@@ -830,7 +843,7 @@ test("ignored cancel activity cannot shorten grace; forced cancel awaits exit an
   });
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "STALL_ACTIVITY forever", cwd: os.tmpdir(), readOnly: true });
-    await until(() => m.status(id).tool_calls === 1, 4000);
+    await until(() => m.status(id).tool_calls === 1);
     const started = Date.now();
     const result = await m.cancel(id);
     const elapsed = Date.now() - started;
@@ -849,16 +862,23 @@ test("shutdown terminates an active initial turn without deadlocking on its driv
   const { id } = await m.dispatchStart({
     lane: "codex", prompt: "STALL during shutdown", cwd: os.tmpdir(), readOnly: true,
   });
-  await until(() => m.status(id).tool_calls === 1, 4000);
+  await until(() => m.status(id).tool_calls === 1);
   // 10s upper bound, not a deadlock detector: this waits on the OS actually
   // tearing down the terminated child process, not on this process's own
-  // logic hanging — same class as #29 (test/gemini-acp.test.ts:285-297).
+  // logic hanging — same class as #29 (see the cancellation note in
+  // test/gemini-acp.test.ts).
+  //
+  // The guard is CLEARED once the race is decided (#29): the loser's timer used
+  // to stay pending and hold the runner's event loop open for its full budget
+  // after the test had passed — this file measured 22s wall clock against 12s
+  // of actual test time, and that 10s gap was this timer.
+  let shutdownGuard!: NodeJS.Timeout;
   await Promise.race([
     m.shutdown(),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("shutdown did not settle within 10000ms")), 10_000),
-    ),
-  ]);
+    new Promise<never>((_, reject) => {
+      shutdownGuard = setTimeout(() => reject(new Error("shutdown did not settle within 10000ms")), 10_000);
+    }),
+  ]).finally(() => clearTimeout(shutdownGuard));
   assert.equal(m.status(id).status, "cancelled");
   assert.equal(m.list().some((entry) => entry.id === id), false);
   await assert.rejects(
@@ -919,7 +939,7 @@ test("reap() closes a supervised session's idle-past-TTL run and drops it from l
       prompt: "implement the frozen spec",
       worktree: `clanker/reap-${Math.random().toString(36).slice(2, 8)}`,
     });
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
     assert.ok(m.list().find((e) => e.id === id), "the supervised session must still be open right after its turn ends");
     await new Promise((resolve) => setTimeout(resolve, 80));
     const reaped = await m.reap();
@@ -940,10 +960,14 @@ test("with the reaper enabled, a manager that was never dispatched to shuts down
   // it would silently hang the whole test-file process after the last test —
   // so the race below is a fast, deterministic proxy, not a real-time wait.
   const m = new LaneManager({ resolveSpec: fakeResolver, baseRepo: os.tmpdir() });
+  let hangGuard!: NodeJS.Timeout;
   await Promise.race([
     m.shutdown(),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("shutdown with reaper enabled hung")), 2_000),
-    ),
-  ]);
+    new Promise((_, reject) => {
+      hangGuard = setTimeout(() => reject(new Error("shutdown with reaper enabled hung")), 2_000);
+    }),
+    // Cleared on the winning path (#29) — a pending loser's timer holds the
+    // runner's loop open for its whole budget after the test has passed, which
+    // is doubly wrong in a test whose subject is not holding the loop open.
+  ]).finally(() => clearTimeout(hangGuard));
 });

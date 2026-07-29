@@ -11,6 +11,7 @@
  * The last test is the discrimination check: with the three write points
  * removed from run.ts, every assertion here must go red.
  */
+import "./isolate.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -19,7 +20,7 @@ import test from "node:test";
 import { FINAL_MESSAGE_CHAR_BUDGET } from "../src/constants.js";
 import { LaneManager, type WaitResult } from "../src/manager.js";
 import { RESULT_FILE, RESULT_FINAL_MESSAGE_HEADING } from "../src/run.js";
-import { dropMutant, fakeResolver, loadMutantManager, until } from "./helpers.js";
+import { OS_WAIT_BUDGET_MS, dropMutant, fakeResolver, loadMutantManager, until } from "./helpers.js";
 
 function makeManager(Ctor: typeof LaneManager = LaneManager, opts: { cancelGraceMs?: number } = {}) {
   return new Ctor({
@@ -30,7 +31,9 @@ function makeManager(Ctor: typeof LaneManager = LaneManager, opts: { cancelGrace
   });
 }
 
-async function waitTerminal(m: LaneManager, id: string, timeoutMs = 5_000): Promise<WaitResult> {
+// OS-bound: spawns a worker and waits for its turn to end (helpers.ts
+// OS_WAIT_BUDGET_MS, #29). Upper bound, not a sleep.
+async function waitTerminal(m: LaneManager, id: string, timeoutMs = OS_WAIT_BUDGET_MS): Promise<WaitResult> {
   const deadline = Date.now() + timeoutMs;
   let last!: WaitResult;
   while (Date.now() < deadline) {
@@ -102,7 +105,7 @@ test("#19-F9: a cancelled run leaves result.md stating the cancellation", async 
   const m = makeManager(LaneManager, { cancelGraceMs: 2_000 });
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "CANCELME", cwd: os.tmpdir(), readOnly: true });
-    await until(() => m.status(id).tool_calls > 0, 4_000);
+    await until(() => m.status(id).tool_calls > 0);
     const cancelled = await m.cancel(id);
     assert.equal(cancelled.status, "cancelled");
 
@@ -151,7 +154,7 @@ test("#19-F9: with the three write points removed, every terminal path loses res
     assert.equal(failedResult.status, "error");
 
     const cancelling = await m.dispatchStart({ lane: "codex", prompt: "CANCELME", cwd: os.tmpdir(), readOnly: true });
-    await until(() => m.status(cancelling.id).tool_calls > 0, 4_000);
+    await until(() => m.status(cancelling.id).tool_calls > 0);
     await m.cancel(cancelling.id);
     const cancelledResult = await waitTerminal(m, cancelling.id);
     assert.equal(cancelledResult.status, "cancelled");

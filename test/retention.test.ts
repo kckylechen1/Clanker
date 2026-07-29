@@ -7,6 +7,7 @@
  * halves in the same directory — a sweep that deleted the whole run directory
  * would satisfy "the streams are gone" and destroy the delivery contract.
  */
+import "./isolate.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -168,6 +169,45 @@ test("stray non-directory entries and empty run dirs are skipped without throwin
   assert.equal(report.scanned, 2, "only directories count as scanned runs");
   assert.equal(report.sweptRuns, 1);
   assert.equal(report.removedRuns, 1);
+});
+
+test("#29: a stream that cannot be unlinked is COUNTED, not thrown — and the startup line says so", {
+  // Root ignores directory permissions, so the sweep would succeed and the test
+  // would assert the opposite of what it means. Skip rather than lie.
+  skip: process.getuid?.() === 0 ? "runs as root; directory permissions do not apply" : false,
+}, () => {
+  // The `failures` counter was reachable only through a hand-built report, so
+  // the one property that matters here — retention is maintenance and must
+  // NEVER throw into server startup (src/index.ts calls it before the first
+  // dispatch can exist) — had no test that produced a real failure. Unlinking
+  // needs write permission on the PARENT directory, so a read-only run dir
+  // makes rmSync fail while everything around it still works.
+  const root = tmpRoot();
+  const dir = makeRun(root, "codex-locked", {
+    "events.jsonl": { text: "x".repeat(100), ageDays: 10 },
+    "chunks.log": { text: "y".repeat(50), ageDays: 10 },
+  });
+  fs.chmodSync(dir, 0o555);
+  try {
+    const report = sweepRunStreams({ runsRoot: root, ttlMs: TTL, now: NOW });
+
+    assert.equal(report.failures, 2, "both cold streams failed to unlink");
+    assert.equal(report.sweptFiles, 0);
+    assert.equal(report.bytesFreed, 0, "nothing was freed, so nothing may be claimed as freed");
+    assert.equal(report.sweptRuns, 0, "a run where every unlink failed was not swept");
+    assert.equal(report.removedRuns, 0);
+    assert.equal(report.scanned, 1);
+    assert.equal(exists(dir, "events.jsonl"), true, "the files are still there");
+    assert.equal(exists(dir, "chunks.log"), true);
+
+    // And the operator hears about it: reclaiming zero bytes is exactly when a
+    // silent report would be read as "there was nothing to reclaim".
+    const line = formatSweepReport(report);
+    assert.match(line ?? "", /2 failed/, `a sweep that only failed must still speak, got ${JSON.stringify(line)}`);
+  } finally {
+    fs.chmodSync(dir, 0o755);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("the startup line is silent when nothing was reclaimed and specific when something was", () => {
