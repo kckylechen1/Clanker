@@ -408,6 +408,16 @@ class TurnProjection {
     // again from the result line below: a RESUMED turn is a fresh CLI
     // invocation, so whatever id it reports is the one the next resume must
     // carry — the freshest report wins rather than the first one.
+    //
+    // MEASURED 2026-07-29 (live cursor-agent 2026.07.23, two-leg relay):
+    // `--resume <id>` keeps the SAME id, so freshest-wins and first-wins agree
+    // today. The rule stays freshest-wins anyway — it is the one that survives
+    // cursor deciding to mint a new id per invocation, and this side channel
+    // is what a later resume is spawned with. The same run also proved
+    // `--resume` coexists with the full read-only flag set
+    // (`--mode ask --sandbox enabled --trust`) and that a model swap between
+    // legs inherits the context: composer-2.5 stored a codeword,
+    // cursor-grok-4.5-high resumed the session and returned it.
     this.emit({
       sessionUpdate: "session_info_update",
       _meta: {
