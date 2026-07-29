@@ -298,10 +298,25 @@ function authCredentialEnd(rest: string, wrapper: string): number {
  * ("Authorization: [REDACTED] dXNlcjpodW50ZXIy"). Parking makes this rule the
  * OWNER of the headers it matches: no later rule can see them, and none can
  * un-redact them either, since what is parked is already the redacted form.
+ *
+ * The token is derived FROM THE TEXT rather than being a constant, because a
+ * constant is a string the worker can also write. A third cold review landed
+ * it: a verdict containing the literal `[[clanker-auth-0]]` alongside a real
+ * header came back with the worker's own literal replaced by that header. No
+ * plaintext leaked — what is parked is already redacted — but the verdict had
+ * been REWRITTEN, and reproducing the verdict unaltered is the one promise this
+ * whole feature exists to keep. Suffixing until the prefix is absent makes
+ * collision impossible rather than unlikely, which is the right bar when the
+ * adversary is arbitrary worker output.
  */
-const AUTH_PARK = /\[\[clanker-auth-(\d+)\]\]/g;
+function freshParkTag(text: string): string {
+  let tag = "clanker-auth";
+  for (let n = 1; text.includes(`[[${tag}:`); n += 1) tag = `clanker-auth-${n}`;
+  return tag;
+}
 export function redactForPublic(text: string): string {
   const parked: string[] = [];
+  const tag = freshParkTag(text);
   let out = text.replace(
     AUTH_HEADER,
     (_m, wrapper: string, name: string, sep: string, scheme: string, gap: string, rest: string) => {
@@ -309,7 +324,7 @@ export function redactForPublic(text: string): string {
       // the command line — is not ours to eat.
       const tail = rest.slice(authCredentialEnd(rest, wrapper));
       parked.push(`${name}${sep}${scheme}${gap}[REDACTED]`);
-      return `${wrapper}[[clanker-auth-${parked.length - 1}]]${tail}`;
+      return `${wrapper}[[${tag}:${parked.length - 1}]]${tail}`;
     },
   );
   out = redact(out);
@@ -319,10 +334,11 @@ export function redactForPublic(text: string): string {
   // the tight rule would only ever see the fragments the tight rule left.
   out = out.replace(PUBLIC_LOOSE_BLOB, (m) => (looksRandom(m, false) ? "[REDACTED]" : m));
   out = out.replace(PUBLIC_TIGHT_BLOB, (m) => (looksRandom(m, true) ? "[REDACTED]" : m));
-  // Unpark last. A placeholder the worker wrote itself has no entry and is left
-  // exactly as it was typed; every entry that does exist is already redacted
-  // text, so restoring can only ever put back something safe.
-  return out.replace(AUTH_PARK, (m, index: string) => parked[Number(index)] ?? m);
+  // Unpark last, against the token derived from THIS text: anything the worker
+  // wrote that merely looks like a placeholder cannot match it, because the tag
+  // was chosen to be absent from the input.
+  const park = new RegExp(`\\[\\[${tag}:(\\d+)\\]\\]`, "g");
+  return out.replace(park, (m, index: string) => parked[Number(index)] ?? m);
 }
 
 /**

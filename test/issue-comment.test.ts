@@ -332,6 +332,18 @@ test("#27: an auth header is redacted by its STRUCTURE, whatever the scheme is c
   }
   // A worker that writes the park placeholder itself gets it back untouched —
   // the machinery must not be a way to make the redactor say something else.
+  // The half this test USED to miss, and a cold review did not: the collision
+  // only bites when a real header is present too, because that is what puts an
+  // entry at the index the worker's literal names. The verdict came back with
+  // the worker's own text replaced by the first parked header — no plaintext
+  // leaked, but the verdict was rewritten, and shipping the verdict unaltered
+  // is the one promise this whole feature exists to keep.
+  for (const literal of ["[[clanker-auth-0]]", "[[clanker-auth:0]]", "[[clanker-auth:0]] and [[clanker-auth-1:0]]"]) {
+    const line = `the worker wrote ${literal} and also Authorization: Basic ${basic}`;
+    const out = redactForPublic(line);
+    assert.ok(out.startsWith(`the worker wrote ${literal} and also `), `worker text was rewritten:\n${out}`);
+    assert.ok(!out.includes(basic), `and the real header must still be redacted:\n${out}`);
+  }
   assert.equal(redactForPublic("see [[clanker-auth-0]] below"), "see [[clanker-auth-0]] below");
 });
 
@@ -1057,6 +1069,24 @@ test("mutation: a scheme-name list instead of the header's structure lets `Basic
   const basic = Buffer.from("user:hunter2").toString("base64");
   const out = mutant.redactForPublic(`Authorization: Basic ${basic}`);
   assert.ok(out.includes(basic), `the mutant republishes the credential: ${out}`);
+});
+
+test("mutation: a constant park token lets worker text be overwritten by a header it never wrote", async () => {
+  const mutant = await loadMutantModule<typeof import("../src/util.js")>(
+    "util-constant-park-tag",
+    [{
+      file: "util.ts",
+      find: '  let tag = "clanker-auth";\n  for (let n = 1; text.includes(`[[${tag}:`); n += 1) tag = `clanker-auth-${n}`;',
+      replace: '  const tag = "clanker-auth";\n  void text;',
+    }],
+    "util.ts",
+  );
+  const basic = Buffer.from("user:hunter2").toString("base64");
+  const out = mutant.redactForPublic(`literal [[clanker-auth:0]] plus Authorization: Basic ${basic}`);
+  assert.ok(
+    !out.startsWith("literal [[clanker-auth:0]] plus"),
+    `the mutant rewrites the worker's own text into a header it never wrote: ${out}`,
+  );
 });
 
 test("mutation: credentials that stop at the first quote republish the auth-param they were meant to eat", async () => {
