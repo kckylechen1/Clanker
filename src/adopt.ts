@@ -302,26 +302,46 @@ async function waitForDeath(pid: number, budgetMs: number): Promise<boolean> {
 }
 
 /**
- * Signal the worker's process GROUP, with the same fallback reasoning as
- * acp-client.ts's signalWorkerGroup: `-pid` reaches the grandchildren a lane
- * grows (codex-acp's `codex app-server`, opencode's helpers), and an ESRCH on
- * the group when the pid ITSELF is still alive means the worker never led a
- * group (a spawn shape predating `detached`) — in which case signalling the
- * bare pid loses the grandchildren but not the worker. Losing both is worse.
+ * Signal the worker's process GROUP — the group and nothing else.
+ *
+ * `-pid` is what reaches the grandchildren a lane grows (codex-acp's `codex
+ * app-server`, opencode's helpers). There used to be a fallback here: on a
+ * failed group signal, if the bare pid still looked alive, signal the bare pid,
+ * on the theory that the worker predated `detached` and led no group. Cold
+ * review (run codex-aed92) killed it, and the reasoning is the point:
+ *
+ *  - Every worker this code can adopt IS detached — acp-client.ts spawns with
+ *    `detached: true` off win32 (PR #40 segment 1), so a recorded `worker_pid`
+ *    IS a pgid. A live pid whose GROUP does not exist is therefore not this
+ *    run's worker; it is the number after the OS handed it to someone else.
+ *  - The identity check that authorised this call was made against the worker.
+ *    Reusing it to justify a DIFFERENT target — a bare pid, precisely because
+ *    the group proved absent — converts a fail-closed guard into a fail-open
+ *    one, and does it at the exact moment the evidence says "not the worker".
+ *    Signalling a recycled non-leader is worse than signalling nothing.
+ *
+ * So ESRCH means the group is gone, full stop. The caller's correct response is
+ * to treat the worker as dead and close the record, not to pick a new target.
+ * `code` is returned so it can tell "the group vanished" (ordinary, archive)
+ * from "the group refused me" (EPERM: something is there and it is not ours).
  */
-function signalGroup(pid: number, signal: NodeJS.Signals): { sent: string; groupWide: boolean } | { sent: null; reason: string } {
+function signalGroup(
+  pid: number,
+  signal: NodeJS.Signals,
+): { sent: string } | { sent: null; code: string | undefined; reason: string } {
   try {
     process.kill(-pid, signal);
-    return { sent: `${signal}→group ${pid}`, groupWide: true };
+    return { sent: `${signal}→group ${pid}` };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (!alive(pid)) return { sent: null, reason: `group ${pid} was already gone (${code ?? "error"})` };
-    try {
-      process.kill(pid, signal);
-      return { sent: `${signal}→pid ${pid} (not a group leader)`, groupWide: false };
-    } catch (inner) {
-      return { sent: null, reason: `neither group nor pid ${pid} could be signalled (${(inner as NodeJS.ErrnoException).code})` };
-    }
+    return {
+      sent: null,
+      code,
+      reason:
+        code === "ESRCH"
+          ? `process group ${pid} no longer exists (ESRCH)`
+          : `process group ${pid} could not be signalled (${code ?? "unknown error"})`,
+    };
   }
 }
 
@@ -376,19 +396,33 @@ export async function killAdoptedWorker(opts: {
 
   const signals: string[] = [];
   const term = signalGroup(workerPid, "SIGTERM");
-  const bareOnly = term.sent !== null && !term.groupWide;
-  if (term.sent) signals.push(term.sent);
+  if (term.sent === null) {
+    // Nothing was delivered, and nothing else will be tried. ESRCH is the
+    // ordinary case — the worker died in the microseconds between the identity
+    // check above and this call — and the honest reading is "the worker is
+    // gone", even if the NUMBER is now alive again in someone else's hands.
+    const groupGone = term.code === "ESRCH";
+    return {
+      killed: false,
+      identity_verified: true,
+      worker_gone: groupGone,
+      signals,
+      identity,
+      note: groupGone
+        ? `no signal sent: ${term.reason} — the worker died between the identity check and the signal, so the ` +
+          `record is archived and nothing else is signalled (a pid whose group is gone is not this run's worker)`
+        : `no signal sent: ${term.reason}`,
+    };
+  }
+  signals.push(term.sent);
   if (await waitForDeath(workerPid, graceMs)) {
     return {
-      killed: signals.length > 0,
+      killed: true,
       identity_verified: true,
       worker_gone: true,
       signals,
       identity,
-      note: signals.length
-        ? `worker group ${workerPid} exited on SIGTERM` +
-          (bareOnly ? " (bare pid — worker led no group, so descendants may survive)" : "")
-        : `worker ${workerPid} vanished before any signal landed`,
+      note: `worker group ${workerPid} exited on SIGTERM`,
     };
   }
 

@@ -800,3 +800,98 @@ test("mutant: pre-fix, that same id kills the nominated worker and archives outs
     dropMutant(name);
   }
 });
+
+// ---- the group is the only target (#32 cold review, run codex-aed92) --------
+
+/**
+ * A worker that is alive but LEADS NO GROUP — spawned without `detached`, so it
+ * sits in this test process's group and `kill(-pid)` answers ESRCH while
+ * `kill(pid, 0)` answers yes.
+ *
+ * That is exactly the shape a recycled pid presents to the adoption path: the
+ * number is alive, the group it was supposed to lead is not. Real workers are
+ * always detached (acp-client.ts), so nothing legitimate looks like this.
+ */
+async function spawnNonLeader(): Promise<{ pid: number; startedAt: number; cleanup: () => void }> {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], { stdio: "ignore" });
+  const startedAt = Date.now();
+  child.unref();
+  await until(() => alive(child.pid!), 4_000);
+  assert.throws(() => process.kill(-child.pid!, 0), "fixture must NOT be a group leader");
+  return {
+    pid: child.pid!,
+    startedAt,
+    cleanup: () => { if (alive(child.pid!)) { try { process.kill(child.pid!, "SIGKILL"); } catch { /* raced */ } } },
+  };
+}
+
+test("group kill ESRCH ends it: no bare-pid second attempt on a pid whose group is gone", async () => {
+  const root = makeRunsRoot();
+  const owner = spawnIdle();
+  const stranger = await spawnNonLeader();
+  writeRun(root, "codex-recycledpid", {
+    lane: "codex", host: "claude", terminal_at: null, server_pid: owner.pid,
+    worker_pid: stranger.pid, worker_started_at: stranger.startedAt,
+  });
+  await killAndReap(owner);
+  const m = manager(root, 400);
+  try {
+    const result = await m.cancel("codex-recycledpid");
+    // Identity passed (the recorded start time is this pid's start time — that
+    // is what pid reuse looks like from disk), so this is not the identity
+    // guard doing the work. The group's absence is.
+    assert.equal(result.identity_verified, true);
+    assert.equal(result.killed, false, "no signal may be delivered to a pid whose group does not exist");
+    assert.match(result.note!, /ESRCH/);
+    assert.match(result.note!, /not this run's worker/);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(alive(stranger.pid), "the surviving pid is a stranger and must be left alone");
+    // The record still gets closed — an unsignalled orphan that stays on the
+    // board forever is the failure archival exists to prevent.
+    assert.equal(readTelemetry(root, "codex-recycledpid").terminal_reason, "cancelled-foreign");
+    assert.equal(result.status, "cancelled");
+  } finally {
+    await m.shutdown();
+    stranger.cleanup();
+  }
+});
+
+test("mutant: the old bare-pid fallback signals exactly the process it must not", async () => {
+  // Restores the deleted fallback verbatim in behaviour. Same fixture, and the
+  // stranger dies — which is the whole reason the fallback is gone.
+  const name = "adopt-bare-pid-fallback";
+  const mutated = await loadMutantManager(name, [
+    {
+      file: "adopt.ts",
+      find: "    const code = (error as NodeJS.ErrnoException).code;\n    return {\n      sent: null,",
+      replace:
+        "    const code = (error as NodeJS.ErrnoException).code;\n" +
+        "    if (alive(pid)) {\n" +
+        "      try { process.kill(pid, signal); return { sent: `${signal}→pid ${pid} (mutant fallback)` }; }\n" +
+        "      catch { /* fall through to the honest answer */ }\n" +
+        "    }\n" +
+        "    return {\n      sent: null,",
+    },
+  ]);
+  const root = makeRunsRoot();
+  const owner = spawnIdle();
+  const stranger = await spawnNonLeader();
+  writeRun(root, "codex-recycledpid", {
+    lane: "codex", host: "claude", terminal_at: null, server_pid: owner.pid,
+    worker_pid: stranger.pid, worker_started_at: stranger.startedAt,
+  });
+  await killAndReap(owner);
+  const m = new mutated.LaneManager({
+    resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir(), runsRoot: root, cancelGraceMs: 400,
+  });
+  try {
+    const result = await m.cancel("codex-recycledpid");
+    assert.equal(result.killed, true, "the fallback delivers a signal…");
+    await until(() => !alive(stranger.pid), 4_000);
+    assert.ok(!alive(stranger.pid), "…straight into a process that is not the worker");
+  } finally {
+    await m.shutdown();
+    stranger.cleanup();
+    dropMutant(name);
+  }
+});
