@@ -368,6 +368,20 @@ test("#27: an auth header is redacted by its STRUCTURE, whatever the scheme is c
     assert.ok(!out.includes(basic), `and the real header must still be redacted:\n${out}`);
   }
   assert.equal(redactForPublic("see [[clanker-hdr:0]] below"), "see [[clanker-hdr:0]] below");
+
+  // Deriving the tag must not become the attack. A verdict can name every
+  // candidate placeholder it likes; the derivation is one scan plus a lookup
+  // per distinct suffix, and it runs on the FULL verdict, before the 3000-char
+  // budget — so the worker controls both the number of candidates and the
+  // length of the text they sit in.
+  const crowded =
+    Array.from({ length: 4000 }, (_, i) => `[[clanker-hdr${i === 0 ? "" : `-${i}`}:0]]`).join(" ") +
+    `\nAuthorization: Basic ${basic}\n`;
+  const started = Date.now();
+  const survived = redactForPublic(crowded);
+  assert.ok(Date.now() - started < 2_000, `tag derivation must not blow up on adversarial input (${Date.now() - started}ms)`);
+  assert.ok(!survived.includes(basic), "…and it still redacts the real header");
+  assert.ok(survived.startsWith("[[clanker-hdr:0]] [[clanker-hdr-1:0]]"), "…without touching the worker's own text");
   // A parked header must survive the rules that run while it is parked: the
   // key-name rule's value would otherwise eat the placeholder standing later on
   // the same line, deleting a header this function had already redacted.
@@ -1234,8 +1248,8 @@ test("mutation: a constant park token lets worker text be overwritten by a heade
     "util-constant-park-tag",
     [{
       file: "util.ts",
-      find: '  let tag = "clanker-hdr";\n  for (let n = 1; text.includes(`[[${tag}:`); n += 1) tag = `clanker-hdr-${n}`;',
-      replace: '  const tag = "clanker-hdr";\n  void text;',
+      find: "  const taken = new Set<string>();\n  for (const match of text.matchAll(/\\[\\[clanker-hdr(-\\d+)?:/g)) taken.add(match[1] ?? \"\");",
+      replace: '  const taken = new Set<string>();\n  void text;',
     }],
     "util.ts",
   );

@@ -397,6 +397,22 @@ function authCredentialEnd(rest: string, wrapper: string): number {
  * whole feature exists to keep. Suffixing until the prefix is absent makes
  * collision impossible rather than unlikely, which is the right bar when the
  * adversary is arbitrary worker output.
+ *
+ * ONE PASS, not one pass per candidate. The first version of this asked
+ * `text.includes(...)` once per suffix it tried, which a fourth cold review
+ * pointed out is O(k·n) against a verdict that deliberately names
+ * `[[clanker-hdr:`, `[[clanker-hdr-1:`, … — and it runs on the FULL verdict,
+ * before the 3000-character budget is applied, so the adversary controls both
+ * k and n. Collecting the taken suffixes in a single scan makes it O(n + k).
+ *
+ * The alternative the packet offered — truncate first, then park — was
+ * rejected on correctness, not on effort: truncation would then happen BEFORE
+ * redaction, so a cut landing inside a credential could leave a fragment short
+ * enough to fall under every length threshold the blob rules use, i.e. a
+ * partial secret published by the very step meant to bound the comment. It
+ * would also change what the truncation notice counts (the budget is measured
+ * against the REDACTED text today, and redaction shortens). Six lines here are
+ * cheaper than moving a boundary that is currently in the right place.
  */
 function freshParkTag(text: string): string {
   // The tag must not itself look like anything the later rules redact — an
@@ -404,9 +420,15 @@ function freshParkTag(text: string): string {
   // promptly ate `[[clanker-auth:0]]` as `auth: <value>`, destroying the parked
   // header instead of restoring it. `hdr` carries no keyword from any table
   // here; keep it that way.
-  let tag = "clanker-hdr";
-  for (let n = 1; text.includes(`[[${tag}:`); n += 1) tag = `clanker-hdr-${n}`;
-  return tag;
+  const taken = new Set<string>();
+  for (const match of text.matchAll(/\[\[clanker-hdr(-\d+)?:/g)) taken.add(match[1] ?? "");
+  // Bounded by `taken.size + 1` iterations of O(1) lookup: the worker can make
+  // this loop longer only by writing more distinct placeholders, each of which
+  // it already had to pay for in text.
+  for (let n = 0; ; n += 1) {
+    const suffix = n === 0 ? "" : `-${n}`;
+    if (!taken.has(suffix)) return `clanker-hdr${suffix}`;
+  }
 }
 export function redactForPublic(text: string): string {
   const parked: string[] = [];
