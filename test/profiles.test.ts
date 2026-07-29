@@ -6,6 +6,7 @@
  * implementation of #19, is not doing any work. The v3 blocks (F1-F7) each
  * reproduce a concrete cold-review finding against 4a8a718.
  */
+import "./isolate.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";

@@ -10,6 +10,7 @@
  * a deliberately broken build (`loadMutantModule`) so a test that would stay
  * green without the fix fails loudly here instead.
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";

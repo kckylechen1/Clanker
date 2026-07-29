@@ -12,6 +12,7 @@
  * second case, rendered as the first, is how one frozen contract ends up with
  * two live workers both opening a PR.
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

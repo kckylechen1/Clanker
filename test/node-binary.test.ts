@@ -9,6 +9,7 @@
  * exercised only on the happy path is not a guard. The mutant at the bottom
  * proves these assertions really observe the fallback.
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

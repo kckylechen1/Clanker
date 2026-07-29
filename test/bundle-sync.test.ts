@@ -33,6 +33,7 @@
  * `npm run bundle` executes, so the gate cannot disagree with the build about
  * how the artifacts are produced.
  */
+import "./isolate.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";

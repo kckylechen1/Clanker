@@ -19,6 +19,7 @@
  * SIGTERM is racing to kill, on a worktree `removeIfClean` might delete out
  * from under it.
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";

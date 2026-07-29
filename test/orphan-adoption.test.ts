@@ -24,6 +24,7 @@
  * with its group, that a SIGTERM was ignored. A faked `kill` would prove that
  * the code calls a function.
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";

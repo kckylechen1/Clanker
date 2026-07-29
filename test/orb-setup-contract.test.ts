@@ -56,6 +56,7 @@
  *      appears). setup's verify path uses HOME only to pass it to the probe,
  *      so sealing it changes nothing the gate legitimately depends on.
  */
+import "./isolate.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";

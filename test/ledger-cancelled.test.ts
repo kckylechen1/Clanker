@@ -7,6 +7,7 @@
  * literal string "cancelled" instead, and `outcome` stays null (reserved for
  * a human/terminal-review backfill).
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

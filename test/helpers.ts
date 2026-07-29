@@ -1,3 +1,9 @@
+// First, and above the `../src/constants.js` import below: constants.ts reads
+// the root env vars at module scope, so isolation has to be applied before it
+// is evaluated (#29). This does NOT make importing helpers sufficient — most
+// test files import a src module before they import helpers — which is why
+// every test file carries the same first import.
+import "./isolate.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";

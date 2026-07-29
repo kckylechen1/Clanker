@@ -11,6 +11,7 @@
  * The last test is the discrimination check: with the three write points
  * removed from run.ts, every assertion here must go red.
  */
+import "./isolate.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";

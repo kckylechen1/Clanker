@@ -7,6 +7,7 @@
  * halves in the same directory — a sweep that deleted the whole run directory
  * would satisfy "the streams are gone" and destroy the delivery contract.
  */
+import "./isolate.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";

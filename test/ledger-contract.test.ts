@@ -6,6 +6,7 @@
  * buildLedgerRow) because a contract test that reads its own contract from the
  * implementation it is meant to pin can never catch a rename.
  */
+import "./isolate.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";

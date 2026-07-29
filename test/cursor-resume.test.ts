@@ -22,6 +22,7 @@
  * invocation, so "what the second spawn really asked for" is read off the same
  * surface the real CLI would see — not off the spec object that built it.
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";

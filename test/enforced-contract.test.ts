@@ -5,6 +5,7 @@
  * a re-implementation of the matching/verification logic, so a green run here
  * is evidence about the server, not about the test.
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";

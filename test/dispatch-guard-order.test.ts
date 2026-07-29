@@ -15,6 +15,7 @@
  * rejection, closes out the stub with `terminal_at`/`error`/
  * `terminal_reason: "rejected"` instead of leaving it an empty shell.
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";

@@ -18,6 +18,7 @@
  * sidecar and the corresponding assertion must go red, or the assertion is not
  * observing what it claims to.
  */
+import "./isolate.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

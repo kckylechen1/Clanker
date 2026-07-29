@@ -6,6 +6,7 @@
  * other test in this suite imports LaneManager directly and never exercises
  * main() itself.
  */
+import "./isolate.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
