@@ -195,6 +195,25 @@ export function resolveCursorModel(model: string | undefined): string | undefine
  */
 export const LANES_WITH_PINNED_WRITE_MODEL: ReadonlySet<string> = new Set(["codex", "cursor"]);
 
+/**
+ * Lanes whose BACKEND can be told to continue its own conversation, so a
+ * correction turn is a fresh spawn carrying that conversation's id rather than
+ * a second prompt on a live ACP session (#43; see lane-session.ts and
+ * resume.ts).
+ *
+ * A capability TABLE rather than a lane check inside promptExisting: the two
+ * correction shapes are a property of the lane's backend, and the day a second
+ * lane grows `--resume` the change has to be one entry here plus that lane's
+ * own sidecar — not another branch in the manager, where nobody looking for
+ * "which lanes can resume" would think to look.
+ *
+ * Membership is a claim about the lane's CLI and must be measured before a lane
+ * is added. cursor's was: `cursor-agent -p --resume <session_id> --model <other
+ * model>` continued the conversation across a model change (2026-07-28) — which
+ * is what makes the resume path a per-turn model hand-off and not just a retry.
+ */
+export const LANES_WITH_RESUME: ReadonlySet<string> = new Set(["cursor"]);
+
 const GLM_PROVIDER_PREFIX = `${OC_MODEL_ALIASES.glm.split("/", 1)[0]}/`;
 
 /** True when a shortname or full model id resolves to the supervised GLM provider. */
