@@ -123,6 +123,20 @@ export interface RunTelemetry {
   lane: LaneName; transport: "acp-stdio"; backend: string; read_only: boolean;
   sandbox?: CodexSandboxMode;
   /**
+   * The dispatch-profile id from the registry (`oc-write`, `codex-review`),
+   * present only when the run was started through the profile entrance — the
+   * same value, under the same name, that the dispatch stub writes before this
+   * record exists and that the #27 issue comment prints as its byline.
+   *
+   * It is here because `persistTelemetry()` OVERWRITES the stub whole (no
+   * merge): without this key the run's identity would exist on disk for the
+   * length of the startup window and then vanish at the first turn, so a reader
+   * of `telemetry.json` could not tell "this run had no profile" from "this run
+   * had one and we dropped it". `server_pid` is written from the stub onward
+   * for the same reason.
+   */
+  profile_id?: string;
+  /**
    * The BACKEND's own conversation id for this run, when the lane reports one
    * (#43, see lane-session.ts). Present today only on lanes that can resume
    * from it — cursor — and absent everywhere else, so "no ref on disk" keeps
