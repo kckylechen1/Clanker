@@ -174,6 +174,23 @@ export interface RunTelemetry {
    * stderr line next to it are the loud half of the fix.
    */
   issue_comment_error?: string;
+  /**
+   * The comment for this terminal turn is still in flight — `gh` has not
+   * answered yet, so `issue_comment_error`'s absence means NOTHING YET.
+   *
+   * A terminal run flips status synchronously and wakes its waiter immediately
+   * (deliberately: see the terminal transitions in run.ts), while the post is a
+   * network call under a 10s ceiling. Without this flag the first
+   * `clanker_wait` payload after a run goes terminal carries no
+   * `issue_comment_error` whether the comment landed, failed a second later, or
+   * had not been attempted yet — and the dispatcher reads the first payload as
+   * the account. "Unknown" and "fine" must not share a spelling; that is the
+   * same rule `degraded: "disk-poll"` keeps for a foreign wait (manager.ts).
+   *
+   * Set at the terminal flip and cleared when `gh` answers, so a payload
+   * carries at most one of these two fields.
+   */
+  issue_comment_pending?: boolean;
   prompt_usage?: PromptUsageTelemetry;
   /** Latest ACP session usage: tokens currently in context and cumulative session cost. */
   session_usage?: { used: number; size: number; cost?: { amount: number; currency: string } };

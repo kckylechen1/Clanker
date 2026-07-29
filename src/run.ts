@@ -242,6 +242,13 @@ export class LaneRun {
    * account was kept", never as "we tried and said nothing about it".
    */
   private issueCommentError?: string;
+  /**
+   * This turn's comment is out with `gh` and has not answered (#27, telemetry
+   * `issue_comment_pending`). Raised at the terminal flip — SYNCHRONOUSLY, in
+   * `markTerminal`, so the first waiter to wake sees it in the same tick the
+   * status changed — and lowered when the post settles either way.
+   */
+  private issueCommentPending = false;
   /** Live worker identity (#32): pid — which is also its pgid — and the ms epoch it was spawned. */
   private workerPid?: number;
   private workerStartedAt?: number;
@@ -810,10 +817,25 @@ export class LaneRun {
       tool_calls: this.toolCallCount, stop_reason: this.stopReason,
       ...(this.terminalAt ? { terminal_reason: this.turnStatus } : {}),
       ...(this.issueCommentError !== undefined ? { issue_comment_error: this.issueCommentError } : {}),
+      ...(this.issueCommentPending ? { issue_comment_pending: true } : {}),
       prompt_usage: this.promptUsage, session_usage: this.sessionUsage,
     };
   }
-  private markTerminal(reason: string): void { this.terminalAt = Date.now(); this.stopReason ??= reason; this.persistTelemetry(); }
+  /**
+   * The terminal flip, and the one place the #27 comment's "in flight" mark is
+   * raised. It belongs HERE rather than at the top of `postIssueCommentForTurn`
+   * because this is the statement that makes `isTerminalTurn()` true: a waiter
+   * woken by that flip must find the mark already set, and putting it in the
+   * async method would make that guarantee depend on nothing awaiting in
+   * between — a property the next edit to any of the three terminal methods
+   * could silently take away.
+   */
+  private markTerminal(reason: string): void {
+    this.terminalAt = Date.now();
+    this.stopReason ??= reason;
+    if (this.issueRef) this.issueCommentPending = true;
+    this.persistTelemetry();
+  }
 
   /**
    * Native dispatch-ledger row: called exactly once from the tail of
@@ -961,7 +983,14 @@ export class LaneRun {
    * loud on stderr (inside postIssueComment) and durable in telemetry.
    */
   private async postIssueCommentForTurn(): Promise<void> {
-    if (!this.issueRef) return;
+    if (!this.issueRef) {
+      // No ticket, nothing in flight. Belt and braces for a run whose issueRef
+      // was somehow dropped after markTerminal raised the mark: a pending flag
+      // that outlives every path that could lower it would be a permanent
+      // "unknown" on a run that owes nothing.
+      this.issueCommentPending = false;
+      return;
+    }
     const telemetry = this.telemetry();
     const outcome = await postIssueComment(
       {
@@ -991,10 +1020,13 @@ export class LaneRun {
     );
     // Recorded either way. A cleared field on a later turn is not amnesia: it
     // says THIS turn's comment landed, which is the only claim telemetry is
-    // entitled to make about a per-turn action.
+    // entitled to make about a per-turn action. The pending mark comes down in
+    // the same statement pair, so no reader ever sees both fields, or neither
+    // while `gh` is still out.
     this.issueCommentError = outcome.ok
       ? undefined
       : `${describeRef(this.issueRef)}: ${outcome.error}`;
+    this.issueCommentPending = false;
     this.persistTelemetry();
   }
 

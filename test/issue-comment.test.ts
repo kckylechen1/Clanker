@@ -454,6 +454,57 @@ test("#27: a terminal run posts exactly one comment carrying its real telemetry"
   }
 });
 
+test("#27: the first terminal wait says the comment is IN FLIGHT, never that it is fine", async () => {
+  // The race a cold review landed: the terminal flip and the waiter wake are
+  // synchronous, the post is a network call. A `gh` that fails a moment later
+  // therefore produced a first wait payload with no `issue_comment_error` —
+  // indistinguishable from a comment that landed. The dispatcher reads that
+  // first payload as the account, so "not known yet" needed a spelling of its
+  // own rather than a faster post: holding the terminal for the network is the
+  // cost this repo already refused to pay once (PR #45).
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const rec = recorder(async () => {
+    await gate;
+    return { code: 1, stdout: "", stderr: "HTTP 403: Resource not accessible by integration" };
+  });
+  const m = makeManager(rec.runner);
+  try {
+    const { id } = await m.dispatchProfile({ profile: "codex-review", prompt: "review", cwd: os.tmpdir(), issue: "27" });
+    await until(() => m.status(id).status !== "running");
+
+    const first = await m.wait(id, 1);
+    assert.equal(first.status, "done", "the run really is terminal by now");
+    assert.equal(first.telemetry?.issue_comment_pending, true, "the first payload must say the account is not in yet");
+    assert.equal(first.telemetry?.issue_comment_error, undefined, "…and must not have guessed an outcome");
+
+    release();
+    await until(() => m.status(id).telemetry?.issue_comment_pending === undefined);
+    const settled = m.status(id).telemetry!;
+    assert.match(settled.issue_comment_error!, /`gh` exited 1/, "the real outcome arrives, late but true");
+    assert.equal(settled.issue_comment_pending, undefined, "and the two fields are never both present");
+  } finally {
+    release();
+    await m.shutdown();
+  }
+});
+
+test("#27: a landed comment leaves NEITHER field set — silence means kept, only after the fact", async () => {
+  const rec = recorder();
+  const m = makeManager(rec.runner);
+  try {
+    const { id } = await m.dispatchProfile({ profile: "codex-review", prompt: "review", cwd: os.tmpdir(), issue: "27" });
+    await until(() => m.status(id).status !== "running");
+    await until(() => m.status(id).telemetry?.issue_comment_pending === undefined);
+    const t = m.status(id).telemetry!;
+    assert.equal(t.issue_comment_error, undefined);
+    assert.equal(t.issue_comment_pending, undefined);
+    assert.equal(rec.calls.length, 1);
+  } finally {
+    await m.shutdown();
+  }
+});
+
 test("#27: a dispatch with no issue invokes gh ZERO times", async () => {
   // Not "posts nothing useful" — invokes nothing at all. Bookkeeping is opt-in
   // and the server never guesses a ticket from the prompt or a branch name.
@@ -741,6 +792,36 @@ test("mutation: a swallowed gh failure reports success and records nothing", asy
   );
   assert.equal(out.ok, true, "the mutant calls a failed post a success");
   assert.equal(logged.length, 0, "…in total silence — the exact shape of #27 itself");
+});
+
+test("mutation: without the in-flight mark, the first terminal wait reads as a kept account", async () => {
+  // The exact shape the cold review reproduced: no pending mark, so the first
+  // payload of a run whose comment is about to fail is byte-identical to the
+  // payload of a run whose comment landed.
+  const mutant = await loadMutantManager("issue-comment-no-pending", [{
+    file: "run.ts",
+    find: "    if (this.issueRef) this.issueCommentPending = true;",
+    replace: "    if (false as boolean) this.issueCommentPending = true;",
+  }]);
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const rec = recorder(async () => {
+    await gate;
+    return { code: 1, stdout: "", stderr: "HTTP 403" };
+  });
+  const m = new mutant.LaneManager({
+    resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir(), ghRunner: rec.runner,
+  });
+  try {
+    const { id } = await m.dispatchProfile({ profile: "codex-review", prompt: "review", cwd: os.tmpdir(), issue: "27" });
+    await until(() => m.status(id).status !== "running");
+    const first = await m.wait(id, 1);
+    assert.equal(first.telemetry?.issue_comment_pending, undefined, "the mutant admits nothing is in flight…");
+    assert.equal(first.telemetry?.issue_comment_error, undefined, "…and reports no error either — a false clean bill");
+  } finally {
+    release();
+    await m.shutdown();
+  }
 });
 
 test("mutation: a terminal transition that skips the post leaves the ticket with no account", async () => {
