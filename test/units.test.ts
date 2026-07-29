@@ -181,6 +181,80 @@ test("opencode spawn without an explicit model fails closed", () => {
   );
 });
 
+/**
+ * #54's ROOT CAUSE, as distinct from #54's alarm.
+ *
+ * The dispatch that opened #54 named `gpt-5.6-sol` and got
+ * `openai/gpt-5.6-terra-fast`. It was not OpenCode overriding a valid choice:
+ * OpenCode's namespace has no bare model ids at all, so the id Clanker wrote
+ * into opencode-config.json (still on disk at
+ * ~/.cache/clanker/runs/opencode-b3b5c/opencode-config.json) resolved to
+ * nothing and OpenCode fell back — silently. The corpus separates the two
+ * cases with no overlap: prefixed ids were honored 36 times out of 41, bare
+ * ids 0 times out of 4, and `openai/gpt-5.6-luna` vs bare `gpt-5.6-luna` is
+ * the same model going both ways.
+ *
+ * A model id that cannot say which provider serves it is therefore not a
+ * model id, and the honest failure is a refusal at spawn — where the caller
+ * can still fix it — rather than a verdict filed against a model that never
+ * ran.
+ */
+test("opencode spawn refuses a model id with no provider — bare ids resolve to nothing and fall back silently", () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-bare-model-"));
+  // The exact id from run opencode-b3b5c.
+  assert.throws(
+    () => buildSpawnSpec("opencode", { model: "gpt-5.6-sol", readOnly: true }, runDir),
+    /names no provider/,
+    "the id that opened #54 must not reach OpenCode a second time",
+  );
+  assert.throws(
+    () => buildSpawnSpec("opencode", { model: "gpt-5.5" }, runDir),
+    /names no provider/,
+  );
+  // The message has to be actionable: a caller who only sees "rejected" fixes
+  // it by picking a different lane, which is how #53 and #54 combine into
+  // "no reliable way to name a model at all".
+  assert.throws(
+    () => buildSpawnSpec("opencode", { model: "gpt-5.6-sol" }, runDir),
+    /openai\/gpt-5\.6-sol/,
+    "the refusal must show the caller the spelling that would have worked",
+  );
+  // Fully-qualified ids and every shortname that expands to one still pass:
+  // the guard is about the SHAPE reaching OpenCode, not about a whitelist.
+  for (const model of ["openai/gpt-5.6-sol", "kimi", "ds", "glm", "free", "composer", "grok45"]) {
+    assert.ok(buildSpawnSpec("opencode", { model, readOnly: true }, runDir), `model='${model}' must still spawn`);
+  }
+});
+
+test("MUTANT: guarding the caller's raw model instead of the resolved one refuses every shortname", async () => {
+  // The one way this guard can rot into a bug: applied BEFORE alias expansion,
+  // it reads `kimi` as "no provider" and rejects the corpus's single most
+  // common opencode dispatch. Order is the whole content of the fix, so the
+  // test has to be able to see the order.
+  const name = "oc-bare-model-guard-order";
+  try {
+    const mutant = await loadMutantModule<typeof import("../src/backends.js")>(name, [{
+      file: "backends.ts",
+      find: 'if (model && !model.includes("/")) {',
+      replace: 'if (opts.model && !opts.model.includes("/")) {',
+    }], "backends.ts");
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oc-bare-mutant-"));
+    assert.throws(
+      () => mutant.buildSpawnSpec("opencode", { model: "kimi", readOnly: true }, runDir),
+      /names no provider/,
+      "the mutant must break the alias path — otherwise this test never observed guard-vs-alias order",
+    );
+    // And still refuse the real bare id, so the mutation is isolating order
+    // rather than disabling the guard.
+    assert.throws(
+      () => mutant.buildSpawnSpec("opencode", { model: "gpt-5.6-sol", readOnly: true }, runDir),
+      /names no provider/,
+    );
+  } finally {
+    dropMutant(name);
+  }
+});
+
 test("codex and grok lane spawn commands remain direct", () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-oauth-lanes-"));
   const codexSpec = buildSpawnSpec("codex", {}, runDir);

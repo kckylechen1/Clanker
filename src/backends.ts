@@ -536,6 +536,38 @@ export function buildSpawnSpec(
       // Shortnames (glm/ds/kimi/free) resolve to full provider/model ids from the
       // single source in constants.ts; full ids pass through unchanged.
       const model = resolveOcModel(opts.model);
+      // Second half of the same fail-closed rule, and the ROOT CAUSE behind
+      // #54 rather than the alarm for it.
+      //
+      // OpenCode's namespace has no bare model ids: `~/.cache/opencode/
+      // models.json` is keyed provider-first (174 providers, every model under
+      // one of them), so `gpt-5.6-sol` names nothing there while
+      // `openai/gpt-5.6-sol` exists. Handing OpenCode an id it cannot resolve
+      // does not make it fail — it makes it quietly pick something else, which
+      // is precisely the swap the check above exists to prevent, arriving
+      // through the door the check left open.
+      //
+      // The telemetry corpus separates the two cleanly (589 runs, read
+      // 2026-07-29): of the opencode dispatches whose resolved id carried a
+      // provider, 36 of 41 ran the model that was asked for; of the four whose
+      // resolved id was bare, ZERO did. The same model in both spellings
+      // settles it — `openai/gpt-5.6-luna` was honored (opencode-139d3) while
+      // bare `gpt-5.6-luna` silently became `opencode/big-pickle`
+      // (opencode-1f0e5). #54's own run is the fourth: bare `gpt-5.6-sol`
+      // (run opencode-b3b5c, its opencode-config.json still on disk) came back
+      // as `openai/gpt-5.6-terra-fast`.
+      //
+      // So refuse it here. A dispatch that cannot say which provider serves
+      // the model has not named a model, and the honest failure is a refusal
+      // at spawn — where the caller can fix the id — not a verdict filed
+      // against a model that never ran.
+      if (model && !model.includes("/")) {
+        throw new Error(
+          `opencode lane: model '${model}' names no provider, and OpenCode has no bare model ids — it would ` +
+            `silently fall back to another model rather than fail. Use 'provider/${model}' ` +
+            `(e.g. 'openai/${model}'); \`opencode models\` lists what this machine can reach.`,
+        );
+      }
       const profile = opts.profile === "kimi-crew" ? "kimi-crew" : "clanker-worker";
       const config: Record<string, unknown> = {
         $schema: "https://opencode.ai/config.json",
