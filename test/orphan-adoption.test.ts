@@ -1,5 +1,5 @@
 /**
- * Orphan adoption — cross-process CONTROL (#32 segment 2).
+ * Orphan adoption — cross-process CONTROL (#32 segments 2 and 3).
  *
  * Visibility for foreign runs came first and was deliberately powerless:
  * `cancel`/`wait` refused any run this process did not hold, because control
@@ -227,6 +227,7 @@ test("no server_pid on record: liveness is unprovable, so control stays put", as
       assert.match(error.message, /names no server_pid/);
       return true;
     });
+    await assert.rejects(() => m.wait("codex-ancient", 10), /Ownership could not be established/);
   } finally {
     await m.shutdown();
   }
@@ -595,5 +596,111 @@ test("prompt across sessions stays refused, dead owner or not", async () => {
     );
   } finally {
     await m.shutdown();
+  }
+});
+
+// ---- segment 3: degraded wait ----------------------------------------------
+
+test("foreign wait, owner alive: still refused", async () => {
+  const root = makeRunsRoot();
+  const owner = spawnIdle();
+  writeRun(root, "codex-waitlive", { lane: "codex", terminal_at: null, server_pid: owner.pid });
+  const m = manager(root);
+  try {
+    await assert.rejects(() => m.wait("codex-waitlive", 50), (error: Error) => {
+      assert.match(error.message, /owner session is still alive/i);
+      assert.doesNotMatch(error.message, /disk-poll/);
+      return true;
+    });
+  } finally {
+    await m.shutdown();
+    await killAndReap(owner);
+  }
+});
+
+test("foreign wait, owner dead: polls the disk and says that is what it did", async () => {
+  const root = makeRunsRoot();
+  const owner = spawnIdle();
+  const runDir = writeRun(root, "codex-degraded", {
+    lane: "codex", terminal_at: null, server_pid: owner.pid, observed_model: "gpt-5.3-codex-spark",
+  });
+  await killAndReap(owner);
+  const m = manager(root);
+  try {
+    // Terminal state appears on disk mid-wait: the result must come back
+    // because the file changed, which is the only thing "polling" can mean.
+    const started = Date.now();
+    const pending = m.wait("codex-degraded", 5_000);
+    setTimeout(() => {
+      fs.writeFileSync(path.join(runDir, "result.md"), "# verdict\n\nreal verdict bytes\n");
+      fs.writeFileSync(path.join(runDir, "telemetry.json"), JSON.stringify({
+        lane: "codex", server_pid: owner.pid, observed_model: "gpt-5.3-codex-spark",
+        terminal_at: new Date().toISOString(), terminal_reason: "done",
+      }));
+    }, 400);
+    const result = await pending;
+    const elapsed = Date.now() - started;
+
+    assert.equal(result.degraded, "disk-poll", "the caller must be able to see this was not observed");
+    assert.equal(result.status, "done");
+    assert.ok(elapsed >= 350 && elapsed < 5_000, `must have returned on the file change, not on the deadline (${elapsed}ms)`);
+    assert.equal(result.digest, "", "there is no event stream, so there is no digest");
+    assert.match(result.degraded_note!, /NO digest/, "and the payload must SAY there is none, not just omit it");
+    assert.equal(result.observed_model, "gpt-5.3-codex-spark", "a silent model swap stays visible across the grave");
+    assert.equal(result.result_path, path.join(runDir, "result.md"));
+    assert.ok((result.result_bytes ?? 0) > 0);
+    assert.equal(result.run_dir, runDir);
+    assert.equal(result.final_message, undefined, "nothing is synthesized: no final message exists on this path");
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("foreign wait that times out reports the run as still running, without inventing progress", async () => {
+  const root = makeRunsRoot();
+  const owner = spawnIdle();
+  writeRun(root, "codex-stillgoing", { lane: "codex", terminal_at: null, server_pid: owner.pid });
+  await killAndReap(owner);
+  const m = manager(root);
+  try {
+    const result = await m.wait("codex-stillgoing", 300);
+    assert.equal(result.status, "running");
+    assert.equal(result.degraded, "disk-poll");
+    assert.equal(result.digest, "");
+    assert.match(result.plan_summary, /foreign run/);
+    assert.equal(result.result_path, undefined);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("mutant: a foreign wait that does not re-read the record can only report the past", async () => {
+  const name = "adopt-wait-no-poll";
+  const mutated = await loadMutantManager(name, [
+    {
+      file: "manager.ts",
+      find: "      foreign = readForeignRun(id, this.runsRoot) ?? foreign;",
+      replace: "      /* mutant: never re-read the record */",
+    },
+  ]);
+  const root = makeRunsRoot();
+  const owner = spawnIdle();
+  const runDir = writeRun(root, "codex-degraded", { lane: "codex", terminal_at: null, server_pid: owner.pid });
+  await killAndReap(owner);
+  const m = new mutated.LaneManager({
+    resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir(), runsRoot: root,
+  });
+  try {
+    const pending = m.wait("codex-degraded", 800);
+    setTimeout(() => {
+      fs.writeFileSync(path.join(runDir, "telemetry.json"), JSON.stringify({
+        lane: "codex", server_pid: owner.pid, terminal_at: new Date().toISOString(), terminal_reason: "done",
+      }));
+    }, 150);
+    const result = await pending;
+    assert.equal(result.status, "running", "the mutant burns the whole budget and reports a stale record as in flight");
+  } finally {
+    await m.shutdown();
+    dropMutant(name);
   }
 });

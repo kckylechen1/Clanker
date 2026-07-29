@@ -26,7 +26,13 @@ import {
 } from "./constants.js";
 import { buildSpawnSpec } from "./backends.js";
 import { archiveAdoptedRun, killAdoptedWorker, probeOwner } from "./adopt.js";
-import { foreignControlRefusal, foreignRunStatus, readForeignRun, scanForeignRuns } from "./foreign.js";
+import {
+  foreignControlRefusal,
+  foreignRunStatus,
+  readForeignRun,
+  scanForeignRuns,
+  type ForeignRun,
+} from "./foreign.js";
 import { classifyBackendFailure, classifyTurnFailure, isCapacityTransient } from "./failure-classifier.js";
 import { grokFailureDetail } from "./grok-diagnostics.js";
 import { resolveProfileDispatch, type ProfileDispatchInput } from "./profiles.js";
@@ -246,9 +252,18 @@ function writeTelemetryStub(runDir: string, stub: TelemetryStub): void {
   }
 }
 
+/** How often a degraded (foreign, disk-polled) wait re-reads the record. */
+const FOREIGN_POLL_MS = 250;
+
 export interface WaitResult {
   id: string;
-  lane: LaneName;
+  /**
+   * Widened past `LaneName` for the degraded foreign path only (#32): a run
+   * reconstructed from another process's telemetry reports whatever lane that
+   * file names, or `"unknown"` when it names none — a foreign record is not
+   * something this build can typecheck into an enum.
+   */
+  lane: LaneName | string;
   status: RunStatus;
   digest: string;
   plan_summary: string;
@@ -284,6 +299,17 @@ export interface WaitResult {
   /** Present alongside `error` when classifyTurnFailure tagged it (e.g. CLANKER-INFRA-FAILURE). */
   failure_class?: string;
   telemetry?: import("./types.js").RunTelemetry;
+  /**
+   * Present ONLY when this result was reconstructed from files rather than
+   * observed (#32): the run belongs to a server process that is gone, so its
+   * event stream died with it. A caller must never read the absence of digest
+   * / final_message here as "the run was silent" — `degraded_note` spells out
+   * which fields cannot exist on this path.
+   */
+  degraded?: "disk-poll";
+  degraded_note?: string;
+  /** Degraded path only: the model that actually ran, straight off telemetry.json. */
+  observed_model?: string | null;
 }
 
 /**
@@ -1075,7 +1101,11 @@ export class LaneManager {
    */
   async wait(id: string, timeoutMs?: number, quiet = true): Promise<WaitResult> {
     const run = this.runs.get(id);
-    if (!run) this.throwUnknownRun(id);
+    // A run this process does not hold has no event stream here. When its owner
+    // is dead the files it left are the only truth there is, so the wait
+    // degrades to polling them rather than refusing (#32); while the owner
+    // lives, the refusal stands.
+    if (!run) return await this.waitForeign(id, timeoutMs);
     // CP6: single-consumer contract — a concurrent clanker_wait on the same id would
     // race the shared digest cursor, so reject it outright.
     if (this.activeWaits.has(id)) {
@@ -1097,6 +1127,67 @@ export class LaneManager {
     } finally {
       this.activeWaits.delete(id);
     }
+  }
+
+  /**
+   * `clanker_wait` for an orphan whose server is gone — the degraded half of
+   * the adoption protocol (#32 segment 3).
+   *
+   * A wait normally consumes an event stream this process owns. For a foreign
+   * run there is no stream and there never will be one, so this polls the two
+   * durable facts the dead owner left behind — `telemetry.terminal_at` and
+   * `result.md` — for the caller's own timeout budget, and says so in the
+   * payload: `degraded: "disk-poll"`, and an EMPTY digest with an explicit note
+   * that there is no digest to be had. Synthesizing plausible-looking progress
+   * out of file mtimes would be the same lie in a new costume; the caller must
+   * be able to tell "nothing happened" from "I cannot see what happened".
+   *
+   * No `activeWaits` gate here, deliberately: that gate exists because
+   * concurrent waiters race a shared digest CURSOR (CP6), and a read-only poll
+   * of two files has no cursor to race.
+   */
+  private async waitForeign(id: string, timeoutMs?: number): Promise<WaitResult> {
+    let foreign = readForeignRun(id, this.runsRoot);
+    if (!foreign) this.throwUnknownRun(id);
+    const owner = probeOwner(foreign.server_pid);
+    if (owner.state !== "dead") throw new Error(foreignControlRefusal(id, foreign, owner));
+
+    const deadline = Date.now() + clampWait(timeoutMs);
+    while (!foreign.terminal_at && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(FOREIGN_POLL_MS, Math.max(1, deadline - Date.now()))));
+      // A vanished record (retention swept the directory mid-poll) keeps the
+      // last reading rather than crashing the wait: the caller still gets a
+      // truthful "this is the last thing that was on disk".
+      foreign = readForeignRun(id, this.runsRoot) ?? foreign;
+    }
+    return this.buildForeignWaitResult(foreign, owner.detail);
+  }
+
+  private buildForeignWaitResult(foreign: ForeignRun, ownerDetail: string): WaitResult {
+    const result: WaitResult = {
+      id: foreign.id,
+      lane: foreign.lane ?? "unknown",
+      status: foreignRunStatus(foreign),
+      // Empty because there is nothing to report, not because the run was
+      // quiet — degraded_note carries that distinction to the reader.
+      digest: "",
+      plan_summary: "(foreign run — plan state died with the owning process)",
+      last_event_age_ms: foreign.last_activity_ms,
+      suspected_stall: foreign.last_activity_ms >= 0 && foreign.last_activity_ms > this.stallThresholdMs,
+      run_dir: foreign.run_dir,
+      degraded: "disk-poll",
+      degraded_note:
+        `${ownerDetail}, so this wait polled ${foreign.run_dir} instead of an event stream. There is NO digest, ` +
+        "no plan and no final_message for this run: those live in the process that spawned it and are not on " +
+        "disk. status/terminal state, the verdict file and observed_model below come straight from " +
+        "telemetry.json; nothing here is inferred.",
+      observed_model: foreign.observed_model,
+    };
+    if (foreign.result_path) {
+      result.result_path = foreign.result_path;
+      try { result.result_bytes = fs.statSync(foreign.result_path).size; } catch { /* swept under us */ }
+    }
+    return result;
   }
 
   private buildWaitResult(run: LaneRun): WaitResult {
