@@ -1,8 +1,14 @@
 /**
- * LaneManager — owns lane sessions across their whole lifecycle: spawn +
- * handshake, per-turn prompt loops, plan/status projection, long-poll (clanker_wait),
- * cancel, worktree cleanup, and the
- * idle-TTL reaper.
+ * LaneManager — owns lane sessions across their whole lifecycle: dispatch
+ * validation, plan/status projection, long-poll (clanker_wait), cancel
+ * (including orphan adoption), worktree cleanup, and the idle-TTL reaper.
+ *
+ * What happens INSIDE a turn — spawn + handshake, the prompt loop, the
+ * capacity retry, the correction turn, the terminal transition — lives in
+ * turn-driver.ts. The manager holds one TurnDriver and hands it exactly the
+ * capabilities named in `TurnHost` (see `turnHost()` below): the session
+ * tables it does not own stay private here, so `connections`, `closing`,
+ * `runs` and `warningsById` keep a single lifecycle owner.
  *
  * The spawn recipe is resolved through an injectable `resolveSpec` so tests can
  * point every lane at a scripted fake ACP agent while production uses the real
@@ -1371,3 +1377,7 @@ export class LaneManager {
 // live in util.ts (#37 A4) — zero coupling to LaneManager's instance state.
 // assertWorktreeOutsideRepo / realpathBestEffort live in worktree.ts, next to
 // the rest of the worktree lifecycle logic the guard enforces.
+// The turn engine (trackDrive / driveNewSession / promptExisting /
+// driveContinuation / abortDuringSetup / attemptInitialTurn / retryAfterBackoff
+// / runTurn / killConnection / finalizeTurn) lives in turn-driver.ts, reaching
+// back only through TurnHost.
