@@ -865,13 +865,20 @@ test("shutdown terminates an active initial turn without deadlocking on its driv
   await until(() => m.status(id).tool_calls === 1);
   // 10s upper bound, not a deadlock detector: this waits on the OS actually
   // tearing down the terminated child process, not on this process's own
-  // logic hanging — same class as #29 (test/gemini-acp.test.ts:285-297).
+  // logic hanging — same class as #29 (see the cancellation note in
+  // test/gemini-acp.test.ts).
+  //
+  // The guard is CLEARED once the race is decided (#29): the loser's timer used
+  // to stay pending and hold the runner's event loop open for its full budget
+  // after the test had passed — this file measured 22s wall clock against 12s
+  // of actual test time, and that 10s gap was this timer.
+  let shutdownGuard!: NodeJS.Timeout;
   await Promise.race([
     m.shutdown(),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("shutdown did not settle within 10000ms")), 10_000),
-    ),
-  ]);
+    new Promise<never>((_, reject) => {
+      shutdownGuard = setTimeout(() => reject(new Error("shutdown did not settle within 10000ms")), 10_000);
+    }),
+  ]).finally(() => clearTimeout(shutdownGuard));
   assert.equal(m.status(id).status, "cancelled");
   assert.equal(m.list().some((entry) => entry.id === id), false);
   await assert.rejects(
@@ -953,10 +960,14 @@ test("with the reaper enabled, a manager that was never dispatched to shuts down
   // it would silently hang the whole test-file process after the last test —
   // so the race below is a fast, deterministic proxy, not a real-time wait.
   const m = new LaneManager({ resolveSpec: fakeResolver, baseRepo: os.tmpdir() });
+  let hangGuard!: NodeJS.Timeout;
   await Promise.race([
     m.shutdown(),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("shutdown with reaper enabled hung")), 2_000),
-    ),
-  ]);
+    new Promise((_, reject) => {
+      hangGuard = setTimeout(() => reject(new Error("shutdown with reaper enabled hung")), 2_000);
+    }),
+    // Cleared on the winning path (#29) — a pending loser's timer holds the
+    // runner's loop open for its whole budget after the test has passed, which
+    // is doubly wrong in a test whose subject is not holding the loop open.
+  ]).finally(() => clearTimeout(hangGuard));
 });
