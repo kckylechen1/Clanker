@@ -254,9 +254,29 @@ export function assertCommentOnlyArgs(args: readonly string[]): void {
   }
   if (!/^\d+$/.test(args[2] ?? "")) refuse("the issue argument must be a bare number");
   const allowed = new Set(["--repo", "--body-file"]);
+  const seen = new Set<string>();
   for (let i = 3; i < args.length; i += 2) {
-    if (!allowed.has(args[i])) refuse(`unexpected flag '${args[i]}' (allowed: ${[...allowed].join(", ")})`);
-    if (i + 1 >= args.length) refuse(`flag '${args[i]}' has no value`);
+    const flag = args[i]!;
+    if (!allowed.has(flag)) refuse(`unexpected flag '${flag}' (allowed: ${[...allowed].join(", ")})`);
+    if (seen.has(flag)) refuse(`flag '${flag}' given twice; \`gh\` would honour the last one`);
+    seen.add(flag);
+    if (i + 1 >= args.length) refuse(`flag '${flag}' has no value`);
+    const value = args[i + 1]!;
+    // A flag-shaped value is the argv-position hazard again, one step in: `gh`
+    // reads `--body-file --repo` as two flags and the body silently vanishes.
+    if (value === "" || value.startsWith("-")) refuse(`flag '${flag}' has a flag-shaped value '${value}'`);
+  }
+  // The REQUIRED half, which is the half a cold review found missing:
+  // `["issue","comment","27"]` passed this gate, and `gh issue comment 27` with
+  // no body opens an EDITOR — on a server, that is a hang holding a terminal
+  // turn, not a comment. It passed only because `issueCommentArgs` happens to
+  // always append the file today, and "happens to" is exactly what a gate is
+  // for: this function's whole reason to exist is being a promise about
+  // behaviour under FUTURE edits, and a gate that only rejects what it has been
+  // shown is not that promise. So the shape is asserted in full — fixed head,
+  // mandatory `--body-file`, optional `--repo`, nothing else.
+  if (!seen.has("--body-file")) {
+    refuse("the body must travel as `--body-file <path>`; a comment with no body file is not a comment");
   }
 }
 

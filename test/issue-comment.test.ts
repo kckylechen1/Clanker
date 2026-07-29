@@ -38,6 +38,7 @@ import {
   assertCommentOnlyArgs,
   buildIssueCommentBody,
   execFileGhRunner,
+  issueCommentArgs,
   parseIssueRef,
   postIssueComment,
   type GhResult,
@@ -323,6 +324,30 @@ test("#27: any argv that is not a comment is refused in code, not only in review
   // …and the legitimate shapes still pass.
   assertCommentOnlyArgs(["issue", "comment", "27", "--body-file", "/tmp/b.md"]);
   assertCommentOnlyArgs(["issue", "comment", "27", "--repo", "o/r", "--body-file", "/tmp/b.md"]);
+});
+
+test("#27: the gate enforces the shape it CLAIMS, not just the flags it was shown", () => {
+  // Landed by cold review: this exact argv passed. `gh issue comment 27` with
+  // no body file opens an editor — on a server that is a hang, not a comment —
+  // and it passed only because the one caller happens to append the file.
+  assert.throws(() => assertCommentOnlyArgs(["issue", "comment", "27"]), /must travel as `--body-file/);
+  assert.throws(() => assertCommentOnlyArgs(["issue", "comment", "27", "--repo", "o/r"]), /must travel as `--body-file/);
+  // A flag-shaped VALUE is the same argv-position hazard one step in: `gh`
+  // would read the body file's place as another flag and post nothing.
+  assert.throws(
+    () => assertCommentOnlyArgs(["issue", "comment", "27", "--body-file", "--repo"]),
+    /flag-shaped value/,
+  );
+  assert.throws(() => assertCommentOnlyArgs(["issue", "comment", "27", "--repo", "", "--body-file", "b"]), /flag-shaped value/);
+  // A repeated flag is a last-one-wins hole: `gh` would honour the second.
+  assert.throws(
+    () => assertCommentOnlyArgs(["issue", "comment", "27", "--body-file", "/tmp/a.md", "--body-file", "/tmp/b.md"]),
+    /given twice/,
+  );
+  // The gate is what the production builder produces, for both spellings —
+  // asserted through the builder so the two can never drift apart.
+  assertCommentOnlyArgs(issueCommentArgs(parseIssueRef("27"), "/tmp/b.md"));
+  assertCommentOnlyArgs(issueCommentArgs(parseIssueRef("o/r#27"), "/tmp/b.md"));
 });
 
 // ---------------------------------------------------------------------------
@@ -773,6 +798,20 @@ test("mutation: a dropped argv gate would let a state-changing subcommand throug
     "issue-comment.ts",
   );
   assert.doesNotThrow(() => mutant.assertCommentOnlyArgs(["issue", "close", "27"]));
+});
+
+test("mutation: an argv gate that never requires the body file lets a bodyless comment through", async () => {
+  const mutant = await loadMutantModule<typeof import("../src/issue-comment.js")>(
+    "issue-comment-optional-body",
+    [{
+      file: "issue-comment.ts",
+      find: '  if (!seen.has("--body-file")) {',
+      replace: "  if (false as boolean) {",
+    }],
+    "issue-comment.ts",
+  );
+  // This is the shipped gate, restored: it inspects only what it was handed.
+  assert.doesNotThrow(() => mutant.assertCommentOnlyArgs(["issue", "comment", "27"]));
 });
 
 test("mutation: a swallowed gh failure reports success and records nothing", async () => {
