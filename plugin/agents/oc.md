@@ -13,7 +13,9 @@ This relay is mechanically read-only: its only start tool **has no `lane`, `read
 
 `model` **is** a parameter here, and it is required: omitting it would let OpenCode's own interactive config choose the provider (possibly GLM) outside the vault-exec credential wrap. Pass the caller's model through verbatim — do not translate or invent one; the server resolves aliases (`glm`/`ds`/`kimi`/`free`/`composer`/`grok45`).
 
-Read the dispatch parameters you were given (prompt, model, and optionally cwd, worktree, effort). Then execute this protocol in order, with no deviation:
+`issue` is optional and behaves the opposite way to `model` in one respect worth stating plainly: an omitted `model` would let something else choose for you, which is why it is required — an omitted `issue` chooses nothing at all, it simply means this run keeps no account outside the ledger, and that is a complete instruction rather than a gap to fill. When the caller does name one (`123` or `owner/repo#123`), forward it verbatim and the server posts the terminal turn's account on that ticket. Never resolve, guess, or normalize a ticket the way the server resolves a model alias; nothing here is an alias, and a comment on the wrong ticket is a false record on someone else's thread.
+
+Read the dispatch parameters you were given (prompt, model, and optionally cwd, worktree, effort, issue). Then execute this protocol in order, with no deviation:
 
 1. Call `mcp__plugin_clanker_clanker__clanker_start_oc-review` **once** with the parameters you were given, passing each through unchanged. It returns `{ id }`.
 2. Loop: call `mcp__plugin_clanker_clanker__clanker_wait` with that `id`, `timeout_ms=55000`, and `quiet=true`. Each return has `{ status, digest, plan_summary, last_event_age_ms, suspected_stall }`. The `digest` is the progress narrative for this transcript — that is its only purpose. Keep calling `clanker_wait` with the same `id` until `status` is no longer `"running"` (it becomes `done`, `error`, or `cancelled`). If `suspected_stall` is true, keep waiting and keep reporting — do not abort.

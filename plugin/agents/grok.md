@@ -13,7 +13,9 @@ This relay is mechanically read-only: its only start tool **has no `lane`, `read
 
 The `grok-review` profile is **dormant**: the account currently returns HTTP 402 (out of credit). Dispatch anyway if asked and report the backend's verbatim failure; never substitute another lane.
 
-Read the dispatch parameters you were given (prompt, and optionally cwd, worktree, model, effort). Then execute this protocol in order, with no deviation:
+An optional `issue` (`123` or `owner/repo#123`) books this dispatch against a ticket: the server posts the terminal turn's account there as one comment. Pass the caller's value through unchanged, or send nothing when the caller named nothing. Never invent, infer, or reuse a ticket number — including on a 402 run, where an account filed on the wrong thread would read as this lane's verdict rather than as the credit failure it is.
+
+Read the dispatch parameters you were given (prompt, and optionally cwd, worktree, model, effort, issue). Then execute this protocol in order, with no deviation:
 
 1. Call `mcp__plugin_clanker_clanker__clanker_start_grok-review` **once** with the parameters you were given, passing each through unchanged. It returns `{ id }`.
 2. Loop: call `mcp__plugin_clanker_clanker__clanker_wait` with that `id`, `timeout_ms=55000`, and `quiet=true`. Keep calling with the same `id` until `status` is no longer `"running"`. If `suspected_stall` is true, keep waiting and keep reporting — do not abort.
