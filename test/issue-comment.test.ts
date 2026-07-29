@@ -400,6 +400,90 @@ test("#27: the gate enforces the shape it CLAIMS, not just the flags it was show
 // 4. failure is loud, never fatal
 // ---------------------------------------------------------------------------
 
+/** Run `fn` with `fs.writeFileSync` failing as a full disk does. */
+async function withFailingWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const real = fs.writeFileSync;
+  (fs as { writeFileSync: unknown }).writeFileSync = () => {
+    throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+  };
+  try {
+    return await fn();
+  } finally {
+    (fs as { writeFileSync: unknown }).writeFileSync = real;
+  }
+}
+
+const scratchDirs = () =>
+  new Set(fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith("clanker-issue-comment-")));
+
+test("#27: a body write that fails mid-staging strands nothing on disk", async () => {
+  // `mkdtempSync` succeeds, `writeFileSync` throws — ENOSPC, EIO, a quota. The
+  // machine that just failed to write a few kilobytes is the last one that can
+  // afford a leaked directory per dispatch, and this path runs on EVERY
+  // terminal turn of every run that names a ticket.
+  const before = scratchDirs();
+  const rec = recorder();
+  const logged: string[] = [];
+  const out = await withFailingWrite(() =>
+    postIssueComment({ ref: parseIssueRef("27"), facts: facts() }, { run: rec.runner, logError: (m) => logged.push(m) }),
+  );
+  assert.equal(out.ok, false);
+  assert.match((out as { error: string }).error, /could not stage the comment body/);
+  assert.match((out as { error: string }).error, /ENOSPC/, "the real reason travels, not a generic one");
+  assert.equal(logged.length, 1, "and it is loud, like every other failure here");
+  assert.equal(rec.calls.length, 0, "`gh` is never asked to post a body that was never written");
+  assert.deepEqual([...scratchDirs()].filter((d) => !before.has(d)), [], "no scratch directory outlives the failure");
+});
+
+test("mutation: cleanup installed after the write leaks the directory the write failed in", async () => {
+  // The shipped shape: `try/finally` opened AFTER staging, so the staging
+  // catch returned before the cleanup existed.
+  const mutant = await loadMutantModule<typeof import("../src/issue-comment.js")>(
+    "issue-comment-late-cleanup",
+    [{
+      file: "issue-comment.ts",
+      find:
+        "  let scratch: string | undefined;\n" +
+        "  try {\n" +
+        "    let bodyFile: string;\n" +
+        "    try {\n" +
+        '      scratch = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-issue-comment-"));\n' +
+        '      bodyFile = path.join(scratch, "body.md");\n' +
+        "      fs.writeFileSync(bodyFile, body);\n" +
+        "    } catch (error) {\n" +
+        "      return fail(`could not stage the comment body: ${errMessage(error)}`);\n" +
+        "    }\n" +
+        "\n" +
+        "    let args: string[];",
+      replace:
+        "  let scratch: string | undefined;\n" +
+        "  let bodyFile: string;\n" +
+        "  try {\n" +
+        '    scratch = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-issue-comment-"));\n' +
+        '    bodyFile = path.join(scratch, "body.md");\n' +
+        "    fs.writeFileSync(bodyFile, body);\n" +
+        "  } catch (error) {\n" +
+        "    return fail(`could not stage the comment body: ${errMessage(error)}`);\n" +
+        "  }\n" +
+        "\n" +
+        "  try {\n" +
+        "    let args: string[];",
+    }],
+    "issue-comment.ts",
+  );
+  const before = scratchDirs();
+  const out = await withFailingWrite(() =>
+    mutant.postIssueComment(
+      { ref: mutant.parseIssueRef("27"), facts: facts() },
+      { run: recorder().runner, logError: () => {} },
+    ),
+  );
+  assert.equal(out.ok, false);
+  const leaked = [...scratchDirs()].filter((d) => !before.has(d));
+  assert.equal(leaked.length, 1, "the mutant strands exactly the directory it created — the green build must not");
+  for (const dir of leaked) fs.rmSync(path.join(os.tmpdir(), dir), { recursive: true, force: true });
+});
+
 test("#27: a non-zero `gh` is loud, reports its stderr, and does not throw", async () => {
   const logged: string[] = [];
   const rec = recorder({ code: 1, stdout: "", stderr: "gh: Could not resolve to an Issue with the number 999999." });

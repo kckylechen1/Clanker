@@ -59,6 +59,18 @@ import { createTimeout, errMessage, redactForPublic } from "./util.js";
  * The accepted spellings of a ticket reference: a bare number for the repo the
  * dispatch runs in (`"41"`), or a fully qualified one (`"owner/repo#41"`).
  *
+ * THE CROSS-REPO SPELLING IS INTENTIONAL, and a cold review was right to make
+ * it say so out loud: `owner/repo#41` can comment on any repository the ambient
+ * `gh` credentials can reach, which is wider than the repo being worked in. It
+ * is wider on purpose — a dispatch routinely runs in repo A while the ticket
+ * that pays for it lives in repo B (the leader's own ledger works this way
+ * today), and refusing that would push the accounting back onto a human hand,
+ * which is the failure #27 exists to end. The boundary is the host's credential
+ * scope, exactly as it is for every other capability of this server: it holds
+ * no token of its own, spawns `gh` with the operator's, and can therefore do
+ * precisely what the operator can do and nothing more. What the server refuses
+ * to do with that reach is anything but comment (`assertCommentOnlyArgs`).
+ *
  * Anchored and deliberately narrow. `execFile` passes an argv array and never
  * goes through a shell, so this is not shell-injection defence; the hazard is
  * one argv position over. A value like `--repo` or `-R` handed to `gh` as a
@@ -399,17 +411,23 @@ export async function postIssueComment(
   // and the foreign-run scan both read a run directory by its known member
   // names, and a new permanent file there would be a change to that contract
   // for something that is pure transport.
-  let scratch: string;
-  let bodyFile: string;
+  //
+  // The try/finally opens BEFORE mkdtemp, not after the write: a cold review
+  // landed the `mkdtempSync succeeds, writeFileSync throws` path (ENOSPC, EIO,
+  // quota), where the old shape returned from inside the staging catch and left
+  // the directory behind — and the machine that just failed to write a few
+  // kilobytes is the last one that can afford a stranded temp dir per dispatch.
+  let scratch: string | undefined;
   try {
-    scratch = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-issue-comment-"));
-    bodyFile = path.join(scratch, "body.md");
-    fs.writeFileSync(bodyFile, body);
-  } catch (error) {
-    return fail(`could not stage the comment body: ${errMessage(error)}`);
-  }
+    let bodyFile: string;
+    try {
+      scratch = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-issue-comment-"));
+      bodyFile = path.join(scratch, "body.md");
+      fs.writeFileSync(bodyFile, body);
+    } catch (error) {
+      return fail(`could not stage the comment body: ${errMessage(error)}`);
+    }
 
-  try {
     let args: string[];
     try {
       args = issueCommentArgs(input.ref, bodyFile);
@@ -442,10 +460,14 @@ export async function postIssueComment(
     }
     return { ok: true, body };
   } finally {
-    try {
-      fs.rmSync(scratch, { recursive: true, force: true });
-    } catch {
-      /* best-effort: a stranded temp body is not worth failing an account over */
+    // `scratch` is undefined only when mkdtemp itself failed, i.e. when there
+    // is provably nothing to remove.
+    if (scratch !== undefined) {
+      try {
+        fs.rmSync(scratch, { recursive: true, force: true });
+      } catch {
+        /* best-effort: a stranded temp body is not worth failing an account over */
+      }
     }
   }
 }
