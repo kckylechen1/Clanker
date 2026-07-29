@@ -84,7 +84,7 @@ export const WORKTREES_ROOT =
 export const BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 
 export const SERVER_NAME = "clanker-mcp-server";
-export const SERVER_VERSION = "0.4.2";
+export const SERVER_VERSION = "0.4.3";
 
 /**
  * Load-bearing default: without an explicit override, the codex lane must
