@@ -11,6 +11,7 @@ import { DIGEST_CHAR_BUDGET, isGlmModel, SERVER_VERSION, resolveOcModel } from "
 import { buildSpawnSpec } from "../src/backends.js";
 import { resolveNodeBinary } from "../src/node-binary.js";
 import { LaneRun } from "../src/run.js";
+import { dropMutant, loadMutantModule } from "./helpers.js";
 
 // ---- CP3: opencode model shortname single source ------------------------
 
@@ -611,4 +612,99 @@ test("suspectedStallEdge fires once per stall episode, not on every call while s
   } as unknown as SessionUpdate);
   assert.equal(run.suspectedStallEdge(-1), true, "a fresh event re-arms the stall edge");
   run.closeStreams();
+});
+
+// ---- #48: a vendor refusal must not reach a terminal `done` ---------------
+
+/** The turn's whole output, verbatim from run codex-45fd0 (gpt-5.5, 2026-07-29). */
+const REFUSAL_PAGE_45FD0 =
+  "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your " +
+  "request. To get authorized for security work, join the Trusted Access for Cyber program: " +
+  "https://chatgpt.com/cyber";
+
+function refusalRun(id: string, message: string): { run: LaneRun; runDir: string } {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), `clanker-${id}-`));
+  const run = new LaneRun({ id, lane: "codex", cwd: os.tmpdir(), runDir, readOnly: true });
+  run.beginTurn("ADVERSARIAL COLD REVIEW: prove the remediation wrong");
+  run.onUpdate({
+    sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text: message },
+  } as unknown as SessionUpdate);
+  return { run, runDir };
+}
+
+test("#48: a turn whose whole output is a vendor refusal page goes terminal ERROR, not done", async () => {
+  // The turn SUCCEEDS at the protocol layer — stop_reason end_turn, which is
+  // why completeTurn() is the entry point and why this was invisible: it
+  // produced `status: done` with a result_path, exactly like a clean read-only
+  // review. A dispatcher reading that books a review that never happened.
+  const { run, runDir } = refusalRun("unit-vendor-refusal", REFUSAL_PAGE_45FD0);
+  await run.completeTurn();
+
+  assert.equal(run.turnStatus, "error", "the terminal state must be loud, never `done`");
+  assert.equal(run.failureClass, "CLANKER-VENDOR-REFUSAL");
+  assert.ok(run.error && run.error.length > 0, "and it carries an error a dispatcher can read");
+
+  // The page itself survives verbatim: the reader has to be able to see WHAT
+  // the vendor said, not just that something went wrong.
+  const resultMd = fs.readFileSync(path.join(runDir, "result.md"), "utf8");
+  assert.match(resultMd, /^- status: error$/m);
+  assert.match(resultMd, /failure_class: CLANKER-VENDOR-REFUSAL/);
+  assert.ok(
+    resultMd.includes(REFUSAL_PAGE_45FD0),
+    "result.md must still carry the refusal page verbatim under ## final_message",
+  );
+  run.closeStreams();
+});
+
+test("#48: an ordinary short verdict still completes as done", async () => {
+  // The false-positive control, and the reason the criterion is lexical: this
+  // run is shorter and faster than the refusal on every structural axis the
+  // telemetry carries (run codex-a581b answered `0.4.3` in 12s; codex-45fd0
+  // refused in 15s). A criterion built on duration or tool count destroys it.
+  const { run, runDir } = refusalRun("unit-short-verdict", "0.4.3");
+  await run.completeTurn();
+
+  assert.equal(run.turnStatus, "done");
+  assert.equal(run.failureClass, undefined);
+  assert.match(fs.readFileSync(path.join(runDir, "result.md"), "utf8"), /^- status: done$/m);
+  run.closeStreams();
+});
+
+test("mutant: without the completeTurn guard, the refusal page ships as a clean `done` verdict", async () => {
+  // The regression this whole class exists to prevent, restored line for line.
+  // A declaration-level test would stay green under it — result.md still
+  // exists, still has a final_message, still has a result_path — which is
+  // precisely how the real incident got past every automated check.
+  const name = "run-no-vendor-refusal-guard";
+  const mutated = await loadMutantModule<typeof import("../src/run.js")>(name, [
+    {
+      file: "run.ts",
+      find: "    const refusal = classifyVendorRefusal(finalMessage);",
+      replace: "    const refusal = undefined as ReturnType<typeof classifyVendorRefusal>;",
+    },
+  ], "run.ts");
+  try {
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-mutant-refusal-"));
+    const run = new mutated.LaneRun({
+      id: "unit-vendor-refusal-mutant",
+      lane: "codex",
+      cwd: os.tmpdir(),
+      runDir,
+      readOnly: true,
+    });
+    run.beginTurn("ADVERSARIAL COLD REVIEW: prove the remediation wrong");
+    run.onUpdate({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: REFUSAL_PAGE_45FD0 },
+    } as unknown as SessionUpdate);
+    await run.completeTurn();
+
+    assert.equal(run.turnStatus, "done", "pre-fix, a refusal page is indistinguishable from a verdict");
+    assert.equal(run.failureClass, undefined);
+    assert.match(fs.readFileSync(path.join(runDir, "result.md"), "utf8"), /^- status: done$/m);
+    run.closeStreams();
+  } finally {
+    dropMutant(name);
+  }
 });

@@ -25,6 +25,7 @@ import {
   resolveCursorModel,
   resolveOcModel,
 } from "./constants.js";
+import { classifyVendorRefusal, VENDOR_REFUSAL_ADVISORY } from "./failure-classifier.js";
 import {
   describeRef,
   postIssueComment,
@@ -385,9 +386,30 @@ export class LaneRun {
    */
   async completeTurn(): Promise<void> {
     if (this.isTerminalTurn()) return;
+    // A vendor policy refusal arrives here, on the SUCCESS path: the backend
+    // said end_turn and the agent's whole output is the refusal page. Left
+    // alone it becomes `status: done` with a `result_path`, which is what a
+    // clean read-only review also looks like — #48's "a review that never
+    // happened, booked as a review that found nothing". The turn produced no
+    // verdict, so it must not report as one; it is routed to the error
+    // terminal instead, tagged, with the page preserved verbatim as the
+    // final message so the reader sees exactly what the vendor said.
+    //
+    // Placed in completeTurn() and not in turn-driver.ts alongside the other
+    // classifier calls, because this is the invariant "no run reports `done`
+    // carrying a refusal instead of a verdict" — and `turnStatus` is owned
+    // here. A guard in the driver would leave completeTurn() able to mint the
+    // very state it forbids for anyone who calls it directly.
+    const finalMessage = this.currentTurnMessage.trim();
+    const refusal = classifyVendorRefusal(finalMessage);
+    if (refusal) {
+      this.lastFinalMessage = finalMessage;
+      await this.failTurn(VENDOR_REFUSAL_ADVISORY, refusal);
+      return;
+    }
     this.flushMessageDigest();
     this.turnStatus = "done";
-    this.lastFinalMessage = this.currentTurnMessage.trim();
+    this.lastFinalMessage = finalMessage;
     this.idleSince = Date.now();
     this.pushDigest(`✓ turn ${this.turnsCount} done (${this.toolCallCount} tools)`, true);
     this.writeEvent({ t: "turn_done", turn: this.turnsCount, stopReason: "end_turn" });
