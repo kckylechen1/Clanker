@@ -545,27 +545,118 @@ test("a run that never spawned a worker is archived, not signalled", async () =>
   }
 });
 
-test("adoption never rewrites a terminal state the dead owner already recorded", async () => {
+test("a record that is already terminal is not written to AT ALL", async () => {
   // Cancelling a foreign run that already finished must not turn `done` into
   // `cancelled`: the work happened, and its outcome is a fact about the past
   // rather than a field the canceller gets to set.
+  //
+  // Cold review (codex-aed92) then took the rule further, and this test moved
+  // with it: the old version kept every write EXCEPT the terminal fields — an
+  // appended `error` line saying "a stranger visited". That is still a
+  // read-modify-write of a file this process does not own, on the one code path
+  // where the owner demonstrably wrote something a moment ago. The visit is
+  // reported to the CALLER instead (archived/archive_reason/note), which is
+  // where it is actionable; the dead owner's file is left alone.
   const root = makeRunsRoot();
   const owner = spawnIdle();
-  writeRun(root, "codex-finished", {
+  const planted = {
     lane: "codex", server_pid: owner.pid,
     terminal_at: "2026-07-28T00:00:00.000Z", terminal_reason: "done",
-  });
+  };
+  const dir = writeRun(root, "codex-finished", planted);
+  fs.writeFileSync(path.join(dir, "result.md"), "# verdict\n\nthe real thing\n");
   await killAndReap(owner);
   const m = manager(root);
   try {
     const result = await m.cancel("codex-finished");
     assert.equal(result.status, "done", "a finished run stays finished");
-    const telemetry = readTelemetry(root, "codex-finished");
-    assert.equal(telemetry.terminal_at, "2026-07-28T00:00:00.000Z");
-    assert.equal(telemetry.terminal_reason, "done");
-    assert.match(String(telemetry.error), /adopted and cancelled by Clanker server pid/, "the visit is still recorded");
+    assert.equal(result.archived, false, "the adoption must say it wrote nothing");
+    assert.match(result.archive_reason!, /owner wrote terminal first/);
+    assert.match(result.note!, /record NOT archived/);
+
+    assert.deepEqual(readTelemetry(root, "codex-finished"), planted, "byte-for-byte the owner's record");
+    assert.equal(fs.readFileSync(path.join(dir, "result.md"), "utf8"), "# verdict\n\nthe real thing\n");
   } finally {
     await m.shutdown();
+  }
+});
+
+test("the owner winning the race mid-cancel costs nothing: no stub in front of the real verdict", async () => {
+  // The race the re-read is for. The record is in flight when cancelForeign
+  // reads it, and goes terminal while the worker is being killed — exactly the
+  // producer order run.ts uses (markTerminal → persistTelemetry, THEN
+  // writeResultFileOnce), so at the moment adoption would write, the owner's
+  // verdict file is one rename away. Adoption must not put a stub there.
+  const root = makeRunsRoot();
+  const owner = spawnIdle();
+  const worker = await spawnWorker({ ignoreTerm: true }); // survives SIGTERM, so the kill takes the full grace
+  const dir = writeRun(root, "codex-raced", orphanTelemetry(owner.pid!, worker));
+  await killAndReap(owner);
+  const m = manager(root, 600);
+  try {
+    const pending = m.cancel("codex-raced");
+    // The "owner" lands its terminal telemetry during the SIGTERM grace.
+    setTimeout(() => {
+      fs.writeFileSync(path.join(dir, "telemetry.json"), JSON.stringify({
+        lane: "codex", server_pid: owner.pid,
+        terminal_at: "2026-07-29T00:00:00.000Z", terminal_reason: "done",
+      }, null, 2));
+    }, 150);
+    const result = await pending;
+
+    assert.equal(result.killed, true, "the worker still gets killed — the abandonment is only about writes");
+    assert.equal(result.archived, false, "…and the record that appeared under it is left alone");
+    assert.match(result.archive_reason!, /owner wrote terminal first/);
+    const telemetry = readTelemetry(root, "codex-raced");
+    assert.equal(telemetry.terminal_at, "2026-07-29T00:00:00.000Z", "the owner's terminal write is not lost");
+    assert.equal(telemetry.terminal_reason, "done");
+    assert.equal(telemetry.error, undefined, "no adoption line appended over it");
+    assert.equal(fs.existsSync(path.join(dir, "result.md")), false, "no stub where the owner's verdict goes");
+    assert.equal(result.status, "done");
+  } finally {
+    await m.shutdown();
+    worker.cleanup();
+  }
+});
+
+test("mutant: without the pre-write re-read, adoption edits the record the owner just wrote", async () => {
+  // Restores the old rule — keep terminal_at, append the visit — and shows what
+  // it costs: a file written by another process is read, modified and renamed
+  // back after that process's own write landed.
+  const name = "adopt-archive-no-reread";
+  const mutated = await loadMutantManager(name, [
+    {
+      file: "adopt.ts",
+      find: "  if (record.terminal_at) {\n    return {\n      archived: false,",
+      replace: "  if (false) {\n    return {\n      archived: false,",
+    },
+    {
+      file: "adopt.ts",
+      find: "    record.terminal_at = nowIso;\n    record.terminal_reason = ADOPTED_TERMINAL_REASON;",
+      replace:
+        "    if (!record.terminal_at) { record.terminal_at = nowIso; record.terminal_reason = ADOPTED_TERMINAL_REASON; }",
+    },
+  ]);
+  const root = makeRunsRoot();
+  const owner = spawnIdle();
+  const planted = {
+    lane: "codex", server_pid: owner.pid,
+    terminal_at: "2026-07-28T00:00:00.000Z", terminal_reason: "done",
+  };
+  const dir = writeRun(root, "codex-finished", planted);
+  fs.writeFileSync(path.join(dir, "result.md"), "# verdict\n\nthe real thing\n");
+  await killAndReap(owner);
+  const m = new mutated.LaneManager({
+    resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir(), runsRoot: root, cancelGraceMs: 400,
+  });
+  try {
+    await m.cancel("codex-finished");
+    const telemetry = readTelemetry(root, "codex-finished");
+    assert.notDeepEqual(telemetry, planted, "the mutant rewrites another process's file");
+    assert.match(String(telemetry.error), /adopted and cancelled by Clanker server pid/);
+  } finally {
+    await m.shutdown();
+    dropMutant(name);
   }
 });
 

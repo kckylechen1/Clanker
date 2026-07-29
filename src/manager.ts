@@ -337,6 +337,14 @@ export interface CancelResult {
   killed?: boolean;
   /** Did the pid still verify as this run's worker (start-time match)? No verification, no signal. */
   identity_verified?: boolean;
+  /**
+   * Did this adoption close the record on disk? `false` means it deliberately
+   * wrote nothing — the run was already terminal, so the owner's own account of
+   * it stands (adopt.ts archiveAdoptedRun) — and `archive_reason` says which.
+   */
+  archived?: boolean;
+  /** Why nothing was written to the foreign run directory, when `archived` is false. */
+  archive_reason?: string;
   /** The verdict file, if the run left one or archival wrote a stub. */
   result_path?: string;
   /** Human-readable account of the four adoption steps, including anything that failed. */
@@ -1509,10 +1517,14 @@ export class LaneManager {
    *     while its observed start time still matches the recorded one.
    *  3. GROUP KILL with a RE-CHECK between TERM and KILL, because the grace
    *     window is exactly when the pid becomes reusable.
-   *  4. ARCHIVE — unconditional, and the step whose absence would make the
-   *     other three counterproductive: a killed orphan whose telemetry still
-   *     reads `terminal_at: null` haunts the orphan board forever, so the
-   *     record is closed even when nothing was signalled at all.
+   *  4. ARCHIVE — the step whose absence would make the other three
+   *     counterproductive: a killed orphan whose telemetry still reads
+   *     `terminal_at: null` haunts the orphan board forever, so the record is
+   *     closed even when nothing was signalled at all. It has exactly ONE
+   *     exception, and it is not "the kill failed": a record that is ALREADY
+   *     terminal is left untouched (`archived: false`), because that record is
+   *     the owner's own account of the run and this process has nothing truer
+   *     to say about it (adopt.ts archiveAdoptedRun).
    */
   private async cancelForeign(id: string): Promise<CancelResult> {
     const foreign = readForeignRun(id, this.runsRoot);
@@ -1542,7 +1554,11 @@ export class LaneManager {
     const note = [
       `${owner.detail}, so this process (pid ${process.pid}) adopted the run`,
       outcome.note,
-      archive.result_stub_written ? "wrote a result.md stub" : "left the existing result.md in place",
+      archive.archived
+        ? archive.result_stub_written
+          ? "wrote a result.md stub"
+          : "left the existing result.md in place"
+        : `record NOT archived: ${archive.reason ?? "no reason given"}`,
       ...archive.problems,
     ].join("; ");
     return {
@@ -1553,6 +1569,8 @@ export class LaneManager {
       worker_pid: foreign.worker_pid,
       killed: outcome.killed,
       identity_verified: outcome.identity_verified,
+      archived: archive.archived,
+      ...(archive.archived ? {} : { archive_reason: archive.reason }),
       run_dir: foreign.run_dir,
       ...(after.result_path ? { result_path: after.result_path } : {}),
       note,

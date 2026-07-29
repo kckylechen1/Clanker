@@ -463,6 +463,10 @@ export async function killAdoptedWorker(opts: {
 export const ADOPTED_TERMINAL_REASON = "cancelled-foreign";
 
 export interface ArchiveResult {
+  /** Did this process write ANYTHING into the foreign run directory? */
+  archived: boolean;
+  /** Why nothing was written, when `archived` is false. */
+  reason?: string;
   telemetry_written: boolean;
   result_stub_written: boolean;
   /** Non-empty when a write failed; archival is best-effort and says so rather than throwing. */
@@ -480,13 +484,30 @@ export interface ArchiveResult {
  *
  * This is the only place a process writes to another process's run directory,
  * and it is legal for exactly one reason: the owner is provably dead, so there
- * is no concurrent writer left to race. Two rules keep it honest:
+ * is no concurrent writer left to race. Three rules keep it honest:
  *
- *  - An existing `terminal_at` is never overwritten. If the owner already
- *    recorded how this run ended, that record is the truth of what happened;
- *    adoption only fills a gap, it does not rewrite history.
+ *  - A record that is ALREADY TERMINAL is not touched at all — not its
+ *    terminal fields, not its `error` line, not its result.md. Cold review
+ *    (codex-aed92) named the earlier "never overwrite terminal_at, but still
+ *    append the visit" rule for what it was: a read-modify-write of another
+ *    process's file, i.e. a lost update waiting to happen, and one that could
+ *    drop a stub in front of a verdict. The owner's last act is
+ *    `markTerminal()` → `persistTelemetry()` and THEN
+ *    `writeResultFileOnce()` (run.ts completeTurn/failTurn), so a terminal
+ *    telemetry means the owner's real verdict is already on disk or one rename
+ *    away. Adoption fills a gap; it does not compete for a file.
+ *  - `result.md` is written only when there is none (or it is empty), so a real
+ *    verdict is never replaced by an adoption stub.
  *  - The adopting pid goes in the `error` line. Anyone reading this record
  *    later must be able to see that a stranger closed it, and which one.
+ *
+ * WHAT THIS IS NOT: compare-and-swap. It is last-writer-wins with a re-read
+ * immediately before the write, and between that read and the rename another
+ * writer can still land. Closing that window needs a lock file, not a re-read.
+ * It is enough here because the whole path is gated on the owner being ESRCH —
+ * there is no live writer left to lose an update to. The residual window
+ * belongs entirely to the "owner falsely dead" case (a run root shared across
+ * pid namespaces or hosts), which the design froze as a known, UNPROVEN risk.
  */
 export function archiveAdoptedRun(input: {
   runDir: string;
@@ -505,22 +526,46 @@ export function archiveAdoptedRun(input: {
     `(pid ${ownerPid ?? "unknown"}) was gone, so this process took over. worker_pid ${workerPid ?? "none"}; ` +
     `identity_verified=${outcome.identity_verified}; signals=[${outcome.signals.join(", ") || "none"}]; ${outcome.note}`;
 
-  let telemetryWritten = false;
   const telemetryPath = path.join(runDir, "telemetry.json");
+
+  // Re-read FIRST, and give up on the whole archival if the record went
+  // terminal while this process was killing the worker (or was terminal all
+  // along — a cancel of a run that already finished). Whoever wrote that
+  // terminal state knows what happened to this run; this process only knows
+  // that it sent some signals. Abandoning is the entire fix: the previous
+  // version kept every write except `terminal_at`, which still meant a
+  // read-modify-write against a file it does not own and a stub that could
+  // land in front of the owner's verdict.
+  let record: Record<string, unknown> = {};
+  let recordUnreadable = false;
   try {
-    let record: Record<string, unknown> = {};
-    try {
-      record = JSON.parse(fs.readFileSync(telemetryPath, "utf8")) as Record<string, unknown>;
-    } catch {
-      // A record that cannot be read is still a record that must end up
-      // terminal, or the scan keeps it in flight; rebuild the minimum.
-      record = { id };
-      problems.push("existing telemetry.json was unreadable; wrote a minimal terminal record over it");
-    }
-    if (!record.terminal_at) {
-      record.terminal_at = nowIso;
-      record.terminal_reason = ADOPTED_TERMINAL_REASON;
-    }
+    record = JSON.parse(fs.readFileSync(telemetryPath, "utf8")) as Record<string, unknown>;
+  } catch {
+    // A record that cannot be read is still a record that must end up terminal,
+    // or the scan keeps it in flight; rebuild the minimum below.
+    record = { id };
+    recordUnreadable = true;
+  }
+  if (record.terminal_at) {
+    return {
+      archived: false,
+      reason:
+        `owner wrote terminal first (terminal_at=${String(record.terminal_at)}, ` +
+        `terminal_reason=${String(record.terminal_reason ?? "unknown")}) — nothing in ${runDir} was modified, ` +
+        "because a terminal record means the owner's own account of this run is already on disk",
+      telemetry_written: false,
+      result_stub_written: false,
+      problems: [],
+    };
+  }
+  if (recordUnreadable) {
+    problems.push("existing telemetry.json was unreadable; wrote a minimal terminal record over it");
+  }
+
+  let telemetryWritten = false;
+  try {
+    record.terminal_at = nowIso;
+    record.terminal_reason = ADOPTED_TERMINAL_REASON;
     record.error = record.error ? `${String(record.error)}\n${explanation}` : explanation;
     const tmp = `${telemetryPath}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(record, null, 2));
@@ -530,9 +575,16 @@ export function archiveAdoptedRun(input: {
     problems.push(`telemetry archival failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  // The verdict file is written only when there is none: an adopted run that
-  // already produced a real verdict keeps it. The stub exists so a reader who
-  // follows `result_path` finds an explanation instead of a missing file.
+  // The verdict file is written only when there is none, or it is a zero-byte
+  // shell: an adopted run that already produced a real verdict keeps it, and
+  // `size === 0` (not `existsSync`) is the check because run.ts writes the file
+  // via tmp+rename, so a zero-byte file is a torn or aborted write rather than
+  // a verdict. The stub exists so a reader who follows `result_path` finds an
+  // explanation instead of a missing file.
+  //
+  // The stronger guarantee is above: a terminal record short-circuits before
+  // reaching here, so the case "owner recorded terminal, its result.md is one
+  // rename away" cannot get a stub wedged in front of the real verdict.
   let resultStubWritten = false;
   const resultPath = path.join(runDir, RESULT_FILE);
   try {
@@ -565,5 +617,13 @@ export function archiveAdoptedRun(input: {
     problems.push(`result stub write failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  return { telemetry_written: telemetryWritten, result_stub_written: resultStubWritten, problems };
+  return {
+    archived: telemetryWritten,
+    ...(telemetryWritten
+      ? {}
+      : { reason: "the terminal record could not be written; the run stays on the in-flight board" }),
+    telemetry_written: telemetryWritten,
+    result_stub_written: resultStubWritten,
+    problems,
+  };
 }
