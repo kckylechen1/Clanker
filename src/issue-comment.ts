@@ -39,17 +39,21 @@
  *     a server that could close one because a worker exited 0 would be
  *     automating away the judgment the whole ledger exists to record.
  *
- * The one deliberate deviation from byte-for-byte quoting is `redact()`: a
- * comment is the only artifact this server pushes to a REMOTE, possibly public
+ * The one deliberate deviation from byte-for-byte quoting is `redactForPublic()`:
+ * a comment is the only artifact this server pushes to a REMOTE, possibly public
  * surface, and a worker that echoed `API_KEY=…` into its final message would
  * otherwise publish it. Redaction is announced in the comment when it fires, so
- * it is never a silent rewrite — the property the verbatim rule protects.
+ * it is never a silent rewrite — the property the verbatim rule protects. Note
+ * WHICH redactor: the `redact()` that guards this machine's own files is tuned
+ * for a sink whose worst case is a local disk, and a cold review demonstrated it
+ * leaving `Authorization: [REDACTED] ghp_xxx` — a blanked header next to a live
+ * token. Two sinks, two threat models, two functions (util.ts).
  */
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTimeout, errMessage, redact } from "./util.js";
+import { createTimeout, errMessage, redactForPublic } from "./util.js";
 
 /**
  * The accepted spellings of a ticket reference: a bare number for the repo the
@@ -146,7 +150,7 @@ export interface BuiltComment {
   body: string;
   /** True when the verdict was longer than the budget and the body says so. */
   truncated: boolean;
-  /** True when `redact()` changed the verdict and the body says so. */
+  /** True when `redactForPublic()` changed the verdict and the body says so. */
   redacted: boolean;
 }
 
@@ -169,7 +173,11 @@ export function buildIssueCommentBody(facts: IssueCommentFacts): BuiltComment {
   const usingError = source === "" && !!facts.error?.trim();
   const rawVerdict = usingError ? facts.error!.trim() : source;
 
-  const cleaned = redact(rawVerdict);
+  // `redactForPublic`, NOT the `redact()` that guards this machine's own files:
+  // that one fires only on a named key, so a cold review found it publishing
+  // `Authorization: [REDACTED] ghp_xxx` — the header blanked, the token intact.
+  // See util.ts for why one function cannot serve both sinks.
+  const cleaned = redactForPublic(rawVerdict);
   const redacted = cleaned !== rawVerdict;
   const truncated = cleaned.length > ISSUE_COMMENT_VERDICT_BUDGET;
   const head = truncated ? cleaned.slice(0, ISSUE_COMMENT_VERDICT_BUDGET) : cleaned;

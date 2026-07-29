@@ -112,6 +112,10 @@ const PUBLIC_SECRET_RULES: readonly { readonly re: RegExp; readonly replace: str
   { re: /\bnpm_[A-Za-z0-9]{20,}/g, replace: "[REDACTED]" },
   { re: /\bAKIA[0-9A-Z]{12,}/g, replace: "[REDACTED]" },
   { re: /\bAIza[A-Za-z0-9_-]{20,}/g, replace: "[REDACTED]" },
+  // JWTs. `eyJ` is base64 of `{"`, so this is the one URL-safe-base64 shape
+  // worth naming: the long-run rule below treats `-`/`_` as boundaries (see
+  // there for why), which is exactly the alphabet a JWT is written in.
+  { re: /\beyJ[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]+){0,2}/g, replace: "[REDACTED]" },
   // `Authorization: Bearer <token>` / `token <token>`. `redact()` already blanks
   // the value after a COLON, which on this header leaves the scheme word behind
   // and the token itself untouched ("Authorization: [REDACTED] ghp_…"); this
@@ -126,19 +130,87 @@ const PUBLIC_SECRET_RULES: readonly { readonly re: RegExp; readonly replace: str
   { re: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/@:]{8,}@/g, replace: "$1[REDACTED]@" },
 ];
 /**
- * Long high-entropy runs. `/` is excluded from the character class even though
- * base64 uses it: with it, `Users/kckylechen/Projects/Clanker` is a 33-char
- * match and every absolute path in every verdict — the file:line evidence a
- * review is made of — would be blanked. Real base64 blobs still trip this
- * (a `/` appears about once per 64 characters, so a key of any length still
- * carries a 32+ run without one).
+ * Unlabelled long runs — a credential with no key name, no known prefix and no
+ * URL around it. This is the one rule that had to be MEASURED rather than
+ * asserted, because "32 random-looking characters" is also the shape of a Go
+ * test name and of every absolute path. It was tuned against the real corpus
+ * (290 `result.md` verdicts under `~/.cache/clanker/runs`, 793k characters,
+ * 2026-07-29) versus 2000 synthetic keys of each shape, and the numbers below
+ * are that measurement, not an estimate. Re-tune the same way, not by taste.
+ *
+ * What the corpus said, in the order it killed the obvious designs:
+ *
+ *  1. THE NAIVE `[A-Za-z0-9+/=]{32,}` IS UNUSABLE: 227 distinct spans matched
+ *     in the corpus, every one a false positive —`Users/kckylechen/Projects/
+ *     Clanker` (33 chars: every file:line in every verdict),
+ *     `DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR`, `issue-2293-watchpoint-…`. A
+ *     verdict whose evidence is blanked is not a redacted verdict, it is a
+ *     destroyed one.
+ *  2. ENTROPY DOES NOT SEPARATE THEM. Measured: corpus identifiers reach 4.51
+ *     bits/char, 24-byte base64 keys start at 4.04 — the distributions overlap,
+ *     so no threshold both spares a verdict and catches a key. What separates
+ *     them is that identifiers are made of WORDS: every corpus false positive
+ *     carries a same-case letter run of 6+ (`bservation`, `ontract`, `folders`),
+ *     while a random blob's longest run is 2-3. Hence `longestSameCaseRun`.
+ *  3. HEX NEEDS ITS OWN RULE, because it can reach neither the entropy nor the
+ *     character mix of anything above (16 symbols cap it at ~3.9 bits/char), and
+ *     it is free: the corpus holds ZERO non-SHA hex runs of 32+. The carve-out
+ *     is exactly 40 lowercase hex — git SHA-1, 79 occurrences in the corpus and
+ *     the single most load-bearing token this repo's verdicts contain. SHA-256
+ *     is NOT carved out: it appeared once in 290 verdicts, and sparing it would
+ *     mean sparing every 32-byte hex API key, which is 100% of that family.
+ *
+ * The two shapes that survive that are complementary, and the union is what
+ * costs so little: SEPARATOR-FREE (a `-`, `_` or `/` ends the run) catches
+ * short-but-random tokens down to 20 characters, where a path segment or a word
+ * cannot reach; SEPARATOR-BEARING needs 32 and no word-run at all, which is how
+ * base64 that happens to contain `/` or a URL-safe `-` is caught without eating
+ * the paths that necessarily contain them. Measured on the corpus: 10 distinct
+ * false-positive spans, 124 occurrences, and 107 of those 124 are ONE macOS
+ * temp-dir token (`/var/folders/…/zblh0pcn7m9…/T`) — which is itself a random
+ * machine-generated string, so redacting it is arguably the correct call and
+ * the rest of the path survives around it. Missed keys: base64 0.3-1.9%,
+ * URL-safe base64 1.6-2.7%, AWS-style 0.6%.
  */
-const PUBLIC_LONG_BLOB = /[A-Za-z0-9+_-]{32,}={0,2}/g;
-const GIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const PUBLIC_HEX_BLOB = /\b[0-9a-fA-F]{32,}\b/g;
+const PUBLIC_TIGHT_BLOB = /[A-Za-z0-9+]{20,}={0,2}/g;
+const PUBLIC_LOOSE_BLOB = /[A-Za-z0-9+/_-]{32,}/g;
+/** git SHA-1, spelled as git spells it. The one carve-out; see rule 3 above. */
+const GIT_SHA = /^[0-9a-f]{40}$/;
+/** Longest run of consecutive same-case letters — how a word betrays itself. */
+function longestSameCaseRun(text: string): number {
+  let best = 0;
+  let current = 0;
+  let kind = "";
+  for (const ch of text) {
+    const k = ch >= "a" && ch <= "z" ? "l" : ch >= "A" && ch <= "Z" ? "u" : "";
+    if (k !== "" && k === kind) current += 1;
+    else current = k === "" ? 0 : 1;
+    kind = k;
+    if (current > best) best = current;
+  }
+  return best;
+}
+/**
+ * Fewer than 8 distinct characters is not a credential — it is a diffstat bar
+ * (`++++++++++++++++`), a rule of `=`, or a padded field. Cheapest gate here and
+ * it costs nothing in detection: 32 draws from base64 leave ~25 distinct, from
+ * hex ~14.
+ */
+function looksRandom(span: string, requireDigitOrNoWord: boolean): boolean {
+  if (GIT_SHA.test(span)) return false;
+  if (new Set(span).size < 8) return false;
+  if (longestSameCaseRun(span) < 6) return true;
+  return requireDigitOrNoWord ? /\d/.test(span) : false;
+}
 export function redactForPublic(text: string): string {
   let out = redact(text);
   for (const { re, replace } of PUBLIC_SECRET_RULES) out = out.replace(re, replace);
-  return out.replace(PUBLIC_LONG_BLOB, (match) => (GIT_SHA.test(match) ? match : "[REDACTED]"));
+  out = out.replace(PUBLIC_HEX_BLOB, (m) => (GIT_SHA.test(m) ? m : "[REDACTED]"));
+  // Loose first: it consumes whole separator-bearing runs, so running it after
+  // the tight rule would only ever see the fragments the tight rule left.
+  out = out.replace(PUBLIC_LOOSE_BLOB, (m) => (looksRandom(m, false) ? "[REDACTED]" : m));
+  return out.replace(PUBLIC_TIGHT_BLOB, (m) => (looksRandom(m, true) ? "[REDACTED]" : m));
 }
 
 /**

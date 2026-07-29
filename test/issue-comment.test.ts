@@ -197,6 +197,64 @@ test("#27: a run that died before speaking still files an account, labelled as t
   assert.ok(body.split("\n").includes("lane process exited mid-turn (code=1 signal=null)"));
 });
 
+test("#27: the four leaks a cold review landed on `redact()` are all closed at the public sink", async () => {
+  // Reproduced verbatim from the review (codex-32405): every one of these
+  // reached the comment body intact under `redact()`, which fires only on a
+  // NAMED key and therefore blanked the header while publishing the token.
+  const leaks: [string, string][] = [
+    ["Authorization: Bearer ghp_1234567890abcdefghijklmnopqrstuvwx", "ghp_1234567890abcdefghijklmnopqrstuvwx"],
+    ["token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"],
+    ["cloned from https://user:hunter2@github.com/kckylechen1/Clanker.git", "hunter2"],
+    ["the env dump showed OPENAI_API_KEY=sk-live-abcdefghijklmnop", "sk-live-abcdefghijklmnop"],
+  ];
+  for (const [verdict, secret] of leaks) {
+    const { body, redacted } = buildIssueCommentBody(facts({ finalMessage: verdict }));
+    assert.equal(redacted, true, `must be reported as redacted: ${verdict}`);
+    assert.ok(!body.includes(secret), `the credential must not reach the comment:\n${body}`);
+  }
+  // …and the old function still fails all but one of them, which is the whole
+  // reason there are now two: a passing test here must not be provable by the
+  // sink-agnostic redactor.
+  const util = await import("../src/util.js");
+  assert.ok(util.redact(leaks[0][0]).includes(leaks[0][1]), "redact() leaves the bearer token — hence redactForPublic");
+  assert.ok(util.redact(leaks[2][0]).includes("hunter2"), "redact() leaves URL credentials");
+});
+
+test("#27: unlabelled credential shapes are caught, and a verdict's own evidence is not", async () => {
+  const { redactForPublic } = await import("../src/util.js");
+  // Shapes with no key name and no prefix to announce them. The cost of missing
+  // one is a token published to a remote nobody can un-publish. Every value
+  // here is synthetic and several are the vendors' own published examples —
+  // `gitleaks:allow` because the repo's pre-commit scanner cannot tell a
+  // fixture from a leak, and a scanner that had to would be the wrong scanner.
+  for (const secret of [
+    "wJalrXUtnFEMIxK7MDENGxbPxRfiCYEXAMPLEKEY", // AWS-style 40-char secret — gitleaks:allow
+    "a3f1c9d84b7e26f05c1d9ab37e40f2c8", // 32 hex — entropy too low for any generic gate
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r", // JWT — gitleaks:allow
+    "AKIAIOSFODNN7EXAMPLE", // gitleaks:allow
+    "xoxb" + "-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx", // gitleaks:allow
+  ]) {
+    const out = redactForPublic(`the worker printed ${secret} into its final message`);
+    assert.ok(!out.includes(secret), `unredacted credential shape: ${secret}\n → ${out}`);
+  }
+  // The control half, and it is the half that makes the rule usable: a verdict
+  // IS file paths, SHAs, identifiers and prose about tokens. A redactor that
+  // eats those has destroyed the account it was protecting. Corpus-derived —
+  // every line here is a shape that appears in real `result.md` verdicts.
+  for (const evidence of [
+    "src/issue-comment.ts:172 — the sink calls the wrong redactor",
+    "base ebd72edcc69227343e6ea82035d0ccc67d02419d, worktree clean",
+    "/Users/kckylechen/Projects/Clanker/.claude/worktrees/agent-a59998409f0a51c75/src/util.ts",
+    "branch worktree-agent-a59998409f0a51c75, base_sha=83059a2173a51459bd6a789191dadb92d758a298",
+    "the token is staged in a file, never in argv, so no process listing carries it",
+    "TestRouteAndPersistThesisAlertSnapshotSourceOwnedRevertContract fails at line 91",
+    "DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR is read once at startup",
+    " test/issue-comment.test.ts | 106 ++++++++++++++++++++++++++++++++++++++++++",
+  ]) {
+    assert.equal(redactForPublic(evidence), evidence, `evidence must survive verbatim: ${evidence}`);
+  }
+});
+
 test("#27: secret-shaped values are redacted before leaving for a remote, and it is announced", () => {
   // The one deliberate deviation from byte-for-byte quoting. A comment is the
   // only artifact this server pushes to a possibly-public surface, and a worker
@@ -594,6 +652,34 @@ test("mutation: a permissive pattern lets a flag-shaped reference through", asyn
   // Green build refuses it (asserted above); the mutant accepts it and would
   // hand `gh` a token it re-reads as a flag.
   assert.doesNotThrow(() => mutant.parseIssueRef("--repo=evil/repo#41"));
+});
+
+test("mutation: the local-file redactor at the public sink republishes the token it blanked", async () => {
+  // The shipped bug, restored: one function serving both threat models. The
+  // mutant is not "no redaction at all" — it is the redaction this module
+  // actually had, which is why the discrimination matters.
+  const mutant = await loadMutantModule<typeof import("../src/issue-comment.js")>(
+    "issue-comment-local-redactor",
+    [
+      {
+        file: "issue-comment.ts",
+        find: 'import { createTimeout, errMessage, redactForPublic } from "./util.js";',
+        replace: 'import { createTimeout, errMessage, redact, redactForPublic } from "./util.js";',
+      },
+      {
+        file: "issue-comment.ts",
+        find: "  const cleaned = redactForPublic(rawVerdict);",
+        replace: "  const cleaned = redact(rawVerdict);\n  void redactForPublic;",
+      },
+    ],
+    "issue-comment.ts",
+  );
+  const token = "ghp_1234567890abcdefghijklmnopqrstuvwx"; // synthetic — gitleaks:allow
+  const { body, redacted } = mutant.buildIssueCommentBody(
+    facts({ finalMessage: `Authorization: Bearer ${token}` }),
+  );
+  assert.equal(redacted, true, "the mutant still CLAIMS it redacted…");
+  assert.ok(body.includes(token), "…while publishing the token — the green build must not");
 });
 
 test("mutation: a summarizing body stops carrying the verdict verbatim", async () => {
