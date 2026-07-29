@@ -22,3 +22,6 @@ codex-plugin/dist/*
 
 # Amp orb setup idempotence stamp (local only)
 .agents/.setup-npm-ci-stamp
+
+# Isolated agent worktrees (another seat may be working in one right now)
+.claude/worktrees/

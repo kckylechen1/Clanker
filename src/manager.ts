@@ -25,10 +25,19 @@ import {
   WRITE_DISCIPLINE_PREFIX,
 } from "./constants.js";
 import { buildSpawnSpec } from "./backends.js";
-import { foreignControlRefusal, readForeignRun, scanForeignRuns } from "./foreign.js";
+import { archiveAdoptedRun, killAdoptedWorker, probeOwner } from "./adopt.js";
+import {
+  foreignControlRefusal,
+  foreignRunStatus,
+  isValidRunId,
+  readForeignRun,
+  scanForeignRuns,
+  type ForeignRun,
+} from "./foreign.js";
 import { classifyBackendFailure, classifyTurnFailure, isCapacityTransient } from "./failure-classifier.js";
 import { grokFailureDetail } from "./grok-diagnostics.js";
 import { resolveProfileDispatch, type ProfileDispatchInput } from "./profiles.js";
+import { laneCanResume, planResumeTurn } from "./resume.js";
 import { LaneRun } from "./run.js";
 import type {
   LaneName,
@@ -49,6 +58,7 @@ import {
   headSha,
   isGitWorkTree,
   matchDoNotTouch,
+  realpathBestEffort,
   removeIfClean,
   resolveBaseCommit,
   resolveTargetRepo,
@@ -245,9 +255,18 @@ function writeTelemetryStub(runDir: string, stub: TelemetryStub): void {
   }
 }
 
+/** How often a degraded (foreign, disk-polled) wait re-reads the record. */
+const FOREIGN_POLL_MS = 250;
+
 export interface WaitResult {
   id: string;
-  lane: LaneName;
+  /**
+   * Widened past `LaneName` for the degraded foreign path only (#32): a run
+   * reconstructed from another process's telemetry reports whatever lane that
+   * file names, or `"unknown"` when it names none — a foreign record is not
+   * something this build can typecheck into an enum.
+   */
+  lane: LaneName | string;
   status: RunStatus;
   digest: string;
   plan_summary: string;
@@ -283,6 +302,54 @@ export interface WaitResult {
   /** Present alongside `error` when classifyTurnFailure tagged it (e.g. CLANKER-INFRA-FAILURE). */
   failure_class?: string;
   telemetry?: import("./types.js").RunTelemetry;
+  /**
+   * Present ONLY when this result was reconstructed from files rather than
+   * observed (#32): the run belongs to a server process that is gone, so its
+   * event stream died with it. A caller must never read the absence of digest
+   * / final_message here as "the run was silent" — `degraded_note` spells out
+   * which fields cannot exist on this path.
+   */
+  degraded?: "disk-poll";
+  degraded_note?: string;
+  /** Degraded path only: the model that actually ran, straight off telemetry.json. */
+  observed_model?: string | null;
+}
+
+/**
+ * `clanker_cancel`'s payload. The first four fields are the ordinary local
+ * cancel; everything under `adopted` describes a cancel this process performed
+ * on ANOTHER server's orphaned run (#32) and exists so the caller can tell what
+ * actually happened to the worker — a refusal, a kill, or a record closed
+ * without any signal because the pid could no longer be proven to be the
+ * worker. "Cancelled" with `killed: false` is a real and honest outcome.
+ */
+export interface CancelResult {
+  id: string;
+  status: RunStatus;
+  worktree_retained?: string;
+  run_dir?: string;
+  /** Present (and always true) only when this process took over a dead server's run. */
+  adopted?: true;
+  /** The server that started the run, now proven gone. */
+  owner_pid?: number | null;
+  /** The worker this process considered signalling; null when the run never spawned one. */
+  worker_pid?: number | null;
+  /** Did this cancel actually deliver a signal to the worker's process group? */
+  killed?: boolean;
+  /** Did the pid still verify as this run's worker (start-time match)? No verification, no signal. */
+  identity_verified?: boolean;
+  /**
+   * Did this adoption close the record on disk? `false` means it deliberately
+   * wrote nothing — the run was already terminal, so the owner's own account of
+   * it stands (adopt.ts archiveAdoptedRun) — and `archive_reason` says which.
+   */
+  archived?: boolean;
+  /** Why nothing was written to the foreign run directory, when `archived` is false. */
+  archive_reason?: string;
+  /** The verdict file, if the run left one or archival wrote a stub. */
+  result_path?: string;
+  /** Human-readable account of the four adoption steps, including anything that failed. */
+  note?: string;
 }
 
 export interface LaneListEntry {
@@ -467,8 +534,17 @@ export class LaneManager {
     }
 
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
-    const runDir = path.join(this.runsRoot, id);
-    fs.mkdirSync(runDir, { recursive: true });
+    // Resolved at the ONE place a run directory is minted, so every surface
+    // that later reports it agrees. Round-3 review (codex-ee7b9): the symlink
+    // fix made the FOREIGN read emit a realpath while the owning process kept
+    // emitting the lexical join, so one physical directory had two names
+    // depending on who was asked — and `run_dir` is documented as the absolute
+    // path a seat hands over precisely so nobody has to construct or reconcile
+    // one. A relative CLANKER_RUNS_ROOT made it worse: the local form was not
+    // even absolute. Fixing it here rather than at each reporting site is the
+    // difference between a contract and four coincidences.
+    fs.mkdirSync(path.resolve(this.runsRoot, id), { recursive: true });
+    const runDir = realpathBestEffort(path.resolve(this.runsRoot, id));
 
     // #35: write a telemetry stub the instant the run directory exists — BEFORE
     // resolveSpec's own fail-closed gates (missing model, gemini rules, sandbox
@@ -655,31 +731,46 @@ export class LaneManager {
   }
 
   /**
-   * Run another turn on a session that is still open — the supervised
-   * correction ("严父") flow.
+   * Run another turn on a job that already came back — the correction ("严父")
+   * flow, in whichever of its two shapes this run's lane supports.
    *
-   * This is turn-by-turn supervision, NOT mid-flight steering: ACP has no way
-   * to redirect a prompt already in progress, so a correction is a new turn
-   * issued after the previous one came back. The window is bounded by the
-   * idle-TTL reaper, which closes a finished session after `sessionTtlMs` —
-   * miss it and the only honest answer is that the session is gone, not a
-   * silently respawned worker with no memory of what it was corrected about.
+   * Both shapes are turn-by-turn supervision, NOT mid-flight steering: ACP has
+   * no way to redirect a prompt already in progress, so a correction is a new
+   * turn issued after the previous one came back.
    *
-   * The capability is checked against the REGISTRY ROW that minted the run
-   * (`run.supervised`), not against which tool the caller holds. Holding
-   * `clanker_prompt` is necessary but not sufficient: an unsupervised profile
-   * refuses the correction server-side, so the narrow-tool property survives a
-   * seat file that drifts.
+   *  1. LIVE SESSION (the original, supervised-only). The ACP session outlived
+   *     its terminal turn and the worker still holds its context in memory, so
+   *     the correction is one more prompt on that session. The window is
+   *     bounded by the idle-TTL reaper, which closes a finished session after
+   *     `sessionTtlMs` — miss it and the only honest answer is that the session
+   *     is gone, not a silently respawned worker with no memory of what it was
+   *     corrected about. The capability is checked against the REGISTRY ROW
+   *     that minted the run (`run.supervised`), not against which tool the
+   *     caller holds: holding `clanker_prompt` is necessary but not sufficient,
+   *     so the narrow-tool property survives a seat file that drifts.
+   *  2. BACKEND RESUME (#43, lanes in LANES_WITH_RESUME). The context lives on
+   *     the lane's own side, keyed by the session ref it reported, so the
+   *     correction is a fresh spawn carrying that ref — and may run a different
+   *     `model` than the turn before it. Supervision does not gate this shape,
+   *     because the property supervision protects is not the one at stake: a
+   *     GLM write's danger is an unsupervised WRITE, which is already gated at
+   *     dispatch and is not widened here (the respawn inherits the run's own
+   *     readOnly and worktree, see resume.ts). What it does need is a ref and a
+   *     directory that still exists; without either it refuses.
+   *
+   * The lane's shape is decided by the capability table, never by which one
+   * happens to be reachable: a resume-capable lane always takes path 2, because
+   * path 1 on a lane whose worker is a one-shot CLI would prompt a process that
+   * has no memory of the previous turn at all.
    */
-  async promptExisting(id: string, prompt: string, correction = false): Promise<{ id: string; status: RunStatus }> {
+  async promptExisting(
+    id: string,
+    prompt: string,
+    correction = false,
+    model?: string,
+  ): Promise<{ id: string; status: RunStatus }> {
     const run = this.runs.get(id);
     if (!run) this.throwUnknownRun(id);
-    if (!run.supervised) {
-      throw new Error(
-        `run '${id}' was not started from a supervised profile, so it takes no correction turn ` +
-          `(only the supervised shape accepts one — see profiles.ts supervision)`,
-      );
-    }
     // #37 A2: neither of these is covered by the checks below. `shuttingDown`
     // can go true between a caller reading a run's status and issuing the
     // correction; `this.closing` covers the narrower window where the reaper
@@ -702,6 +793,26 @@ export class LaneManager {
     if (run.turnStatus === "running" || this.turnDrives.has(id)) {
       throw new Error(`a turn is already running for '${id}'; wait for it to reach a terminal state first`);
     }
+    // Server-owned workspace-discipline prefix on every write-class turn, not
+    // just the first one (a08f7a1 only covered the initial dispatch): a
+    // correction turn is the same worker under the same write contract, so the
+    // words it is held to must be the words it is handed on EVERY turn, not
+    // just turn 1.
+    const turnPrompt = run.readOnly ? prompt : `${WRITE_DISCIPLINE_PREFIX}\n\n${prompt}`;
+    if (laneCanResume(run.lane)) return this.startResumeTurn(run, turnPrompt, correction, model);
+    if (model !== undefined) {
+      throw new Error(
+        `run '${id}' is on lane '${run.lane}', whose correction turn continues a LIVE session — the model ` +
+          `was fixed when that session was spawned and cannot be swapped mid-session. Only a lane that ` +
+          `resumes from a backend session ref can hand the next turn to another model.`,
+      );
+    }
+    if (!run.supervised) {
+      throw new Error(
+        `run '${id}' was not started from a supervised profile, so it takes no correction turn ` +
+          `(only the supervised shape accepts one — see profiles.ts supervision)`,
+      );
+    }
     if (run.sessionClosed) throw new Error(`session for '${id}' is already closed`);
     const conn = this.connections.get(id);
     if (!conn) {
@@ -711,15 +822,40 @@ export class LaneManager {
           `blocker instead of starting a fresh dispatch on your own.`,
       );
     }
-    // Server-owned workspace-discipline prefix on every write-class turn, not
-    // just the first one (a08f7a1 only covered the initial dispatch): a
-    // correction turn is the same worker under the same write contract, so the
-    // words it is held to must be the words it is handed on EVERY turn, not
-    // just turn 1.
-    const turnPrompt = run.readOnly ? prompt : `${WRITE_DISCIPLINE_PREFIX}\n\n${prompt}`;
     const drive = this.driveContinuation(run, conn, turnPrompt, correction);
     this.trackDrive(id, drive);
     return { id, status: run.turnStatus };
+  }
+
+  /**
+   * The backend-resume correction turn (#43): plan it, build the respawn, and
+   * drive it as this run's next turn.
+   *
+   * The plan is computed and the spec resolved BEFORE anything on the run is
+   * touched, so a refusal (no ref, worktree already reclaimed, a lane gate
+   * inside resolveSpec) leaves the run exactly as terminal as it was — the
+   * caller gets an error and not a job that says "running" forever.
+   *
+   * The drive itself is `attemptInitialTurn`, unchanged: a resume turn IS a
+   * fresh spawn of the lane, so connect/handshake/first-turn/capacity-retry are
+   * the same code path a dispatch takes. Only the accounting differs, which is
+   * the `correction` flag it now forwards to runTurn.
+   */
+  private startResumeTurn(
+    run: LaneRun,
+    turnPrompt: string,
+    correction: boolean,
+    model: string | undefined,
+  ): { id: string; status: RunStatus } {
+    const plan = planResumeTurn(run, model);
+    const spec = this.resolveSpec(run.lane, plan.requestOpts, run.runDir);
+    if (spec.warnings.length > 0) {
+      this.warningsById.set(run.id, dedupe([...(this.warningsById.get(run.id) ?? []), ...spec.warnings]));
+    }
+    if (plan.model) run.adoptResumeModel(plan.model);
+    run.reopenForResume();
+    this.trackDrive(run.id, this.attemptInitialTurn(run, spec, turnPrompt, 1, correction));
+    return { id: run.id, status: run.turnStatus };
   }
 
   private async driveContinuation(run: LaneRun, conn: LaneConnection, prompt: string, correction: boolean): Promise<void> {
@@ -773,8 +909,19 @@ export class LaneManager {
    * rejected its shape wastes a turn and hides the real signal (2026-07-13
    * incident: exactly that class was hand-retried 3 times before anyone
    * noticed). Retry scope is intentionally limited to the job's first turn.
+   *
+   * Also drives a backend-resume correction turn (#43), which is a fresh spawn
+   * of the lane in every respect that matters here — hence `correction`, the
+   * one thing that differs: it reaches `runTurn` so the turn is counted as a
+   * correction rather than as another dispatch's first turn.
    */
-  private async attemptInitialTurn(run: LaneRun, spec: SpawnSpec, prompt: string, attempt: number): Promise<void> {
+  private async attemptInitialTurn(
+    run: LaneRun,
+    spec: SpawnSpec,
+    prompt: string,
+    attempt: number,
+    correction = false,
+  ): Promise<void> {
     if (run.cancellationRequested || this.shuttingDown) {
       await this.abortDuringSetup(run);
       return;
@@ -804,7 +951,7 @@ export class LaneManager {
       const message = errMessage(e);
       if (attempt === 1 && isCapacityTransient(message)) {
         await this.retryAfterBackoff(run, message, attempt + 1);
-        return this.attemptInitialTurn(run, spec, prompt, attempt + 1);
+        return this.attemptInitialTurn(run, spec, prompt, attempt + 1, correction);
       }
       await this.computeTouched(run);
       await this.close(run.id);
@@ -829,7 +976,7 @@ export class LaneManager {
     run.sessionId = conn.sessionId;
     run.observeConfigOptions(conn.session.newSessionResponse.configOptions);
 
-    const outcome = await this.runTurn(run, conn, prompt);
+    const outcome = await this.runTurn(run, conn, prompt, correction);
     if (run.cancellationRequested) {
       await this.close(run.id);
       run.cancelTurn();
@@ -855,7 +1002,7 @@ export class LaneManager {
       // spawns a clean process against the backend.
       await this.killConnection(run.id);
       await this.retryAfterBackoff(run, outcome.message, attempt + 1);
-      return this.attemptInitialTurn(run, spec, prompt, attempt + 1);
+      return this.attemptInitialTurn(run, spec, prompt, attempt + 1, correction);
     }
     await this.computeTouched(run);
     await this.close(run.id);
@@ -1045,7 +1192,11 @@ export class LaneManager {
    */
   async wait(id: string, timeoutMs?: number, quiet = true): Promise<WaitResult> {
     const run = this.runs.get(id);
-    if (!run) this.throwUnknownRun(id);
+    // A run this process does not hold has no event stream here. When its owner
+    // is dead the files it left are the only truth there is, so the wait
+    // degrades to polling them rather than refusing (#32); while the owner
+    // lives, the refusal stands.
+    if (!run) return await this.waitForeign(id, timeoutMs);
     // CP6: single-consumer contract — a concurrent clanker_wait on the same id would
     // race the shared digest cursor, so reject it outright.
     if (this.activeWaits.has(id)) {
@@ -1067,6 +1218,67 @@ export class LaneManager {
     } finally {
       this.activeWaits.delete(id);
     }
+  }
+
+  /**
+   * `clanker_wait` for an orphan whose server is gone — the degraded half of
+   * the adoption protocol (#32 segment 3).
+   *
+   * A wait normally consumes an event stream this process owns. For a foreign
+   * run there is no stream and there never will be one, so this polls the two
+   * durable facts the dead owner left behind — `telemetry.terminal_at` and
+   * `result.md` — for the caller's own timeout budget, and says so in the
+   * payload: `degraded: "disk-poll"`, and an EMPTY digest with an explicit note
+   * that there is no digest to be had. Synthesizing plausible-looking progress
+   * out of file mtimes would be the same lie in a new costume; the caller must
+   * be able to tell "nothing happened" from "I cannot see what happened".
+   *
+   * No `activeWaits` gate here, deliberately: that gate exists because
+   * concurrent waiters race a shared digest CURSOR (CP6), and a read-only poll
+   * of two files has no cursor to race.
+   */
+  private async waitForeign(id: string, timeoutMs?: number): Promise<WaitResult> {
+    let foreign = readForeignRun(id, this.runsRoot);
+    if (!foreign) this.throwUnknownRun(id);
+    const owner = probeOwner(foreign.server_pid);
+    if (owner.state !== "dead") throw new Error(foreignControlRefusal(id, foreign, owner));
+
+    const deadline = Date.now() + clampWait(timeoutMs);
+    while (!foreign.terminal_at && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(FOREIGN_POLL_MS, Math.max(1, deadline - Date.now()))));
+      // A vanished record (retention swept the directory mid-poll) keeps the
+      // last reading rather than crashing the wait: the caller still gets a
+      // truthful "this is the last thing that was on disk".
+      foreign = readForeignRun(id, this.runsRoot) ?? foreign;
+    }
+    return this.buildForeignWaitResult(foreign, owner.detail);
+  }
+
+  private buildForeignWaitResult(foreign: ForeignRun, ownerDetail: string): WaitResult {
+    const result: WaitResult = {
+      id: foreign.id,
+      lane: foreign.lane ?? "unknown",
+      status: foreignRunStatus(foreign),
+      // Empty because there is nothing to report, not because the run was
+      // quiet — degraded_note carries that distinction to the reader.
+      digest: "",
+      plan_summary: "(foreign run — plan state died with the owning process)",
+      last_event_age_ms: foreign.last_activity_ms,
+      suspected_stall: foreign.last_activity_ms >= 0 && foreign.last_activity_ms > this.stallThresholdMs,
+      run_dir: foreign.run_dir,
+      degraded: "disk-poll",
+      degraded_note:
+        `${ownerDetail}, so this wait polled ${foreign.run_dir} instead of an event stream. There is NO digest, ` +
+        "no plan and no final_message for this run: those live in the process that spawned it and are not on " +
+        "disk. status/terminal state, the verdict file and observed_model below come straight from " +
+        "telemetry.json; nothing here is inferred.",
+      observed_model: foreign.observed_model,
+    };
+    if (foreign.result_path) {
+      result.result_path = foreign.result_path;
+      try { result.result_bytes = fs.statSync(foreign.result_path).size; } catch { /* swept under us */ }
+    }
+    return result;
   }
 
   private buildWaitResult(run: LaneRun): WaitResult {
@@ -1141,9 +1353,23 @@ export class LaneManager {
    * second case rendered as the first is how one contract ends up with two
    * live workers both opening PRs. Disk knows the difference; ask it.
    *
+   * A THIRD kind of absent joined those two with the traversal fix
+   * (foreign.ts isValidRunId): an id that could never name a run at all. It
+   * gets its own sentence, because "no record of it on disk" would be a lie of
+   * the same family — it says a lookup happened and came back empty, when in
+   * fact nothing was looked up and nothing outside the runs root was touched.
+   *
    * Never returns.
    */
   private throwUnknownRun(id: string): never {
+    if (!isValidRunId(id)) {
+      throw new Error(
+        `run id '${String(id).slice(0, 80)}' is MALFORMED — a Clanker run id is '<lane>-<suffix>' ` +
+          `(e.g. 'codex-1a2b3c'), and this one is not, so no lookup was performed at all. Nothing was read ` +
+          `from ${this.runsRoot}, and nothing outside it was read, written or signalled. This is not the same ` +
+          `answer as "no such run": a run that exists cannot have this id.`,
+      );
+    }
     const foreign = readForeignRun(id, this.runsRoot);
     if (foreign) throw new Error(foreignControlRefusal(id, foreign));
     throw new Error(
@@ -1214,9 +1440,12 @@ export class LaneManager {
 
   // ---- cancel / close -----------------------------------------------------
 
-  async cancel(id: string): Promise<{ id: string; status: RunStatus; worktree_retained?: string; run_dir?: string }> {
+  async cancel(id: string): Promise<CancelResult> {
     const run = this.runs.get(id);
-    if (!run) this.throwUnknownRun(id);
+    // Not in this process's map: either it never existed, or another session's
+    // server owns it. The second case used to end here in a flat refusal; it
+    // now ends there only while that server is alive (#32, adoption).
+    if (!run) return await this.cancelForeign(id);
     // A run whose turn is already terminal has no turn to cancel — but it can
     // still be HOLDING things. The supervised profile deliberately keeps its
     // session (and therefore its worktree) alive past a successful turn so a
@@ -1277,6 +1506,85 @@ export class LaneManager {
       run.cancelTurn();
     }
     return { id, status: run.turnStatus };
+  }
+
+  /**
+   * Cancel a run held by another server process — the orphan-adoption protocol
+   * (#32, design frozen on the issue; mechanics in adopt.ts).
+   *
+   * The pre-adoption behaviour was honest but powerless: a foreign id was
+   * refused, full stop. That is correct while the owning server exists, and
+   * exactly wrong once it does not — a dead session leaves a live worker
+   * holding a worktree with nobody able to stop it, which is the precise
+   * failure the durable pid record was written for.
+   *
+   * Four steps, in this order, none skippable:
+   *
+   *  1. OWNER LIVENESS. Only a provably dead owner (ESRCH) unlocks anything.
+   *     Alive — or unprovable, e.g. a record with no server_pid — keeps the
+   *     old refusal, now with the reason attached.
+   *  2. WORKER IDENTITY. A pid is a number, not a process. Signal it only
+   *     while its observed start time still matches the recorded one.
+   *  3. GROUP KILL with a RE-CHECK between TERM and KILL, because the grace
+   *     window is exactly when the pid becomes reusable.
+   *  4. ARCHIVE — the step whose absence would make the other three
+   *     counterproductive: a killed orphan whose telemetry still reads
+   *     `terminal_at: null` haunts the orphan board forever, so the record is
+   *     closed even when nothing was signalled at all. It has exactly ONE
+   *     exception, and it is not "the kill failed": a record that is ALREADY
+   *     terminal is left untouched (`archived: false`), because that record is
+   *     the owner's own account of the run and this process has nothing truer
+   *     to say about it (adopt.ts archiveAdoptedRun).
+   */
+  private async cancelForeign(id: string): Promise<CancelResult> {
+    const foreign = readForeignRun(id, this.runsRoot);
+    if (!foreign) this.throwUnknownRun(id);
+    const owner = probeOwner(foreign.server_pid);
+    if (owner.state !== "dead") throw new Error(foreignControlRefusal(id, foreign, owner));
+
+    const outcome = await killAdoptedWorker({
+      workerPid: foreign.worker_pid,
+      workerStartedAt: foreign.worker_started_at,
+      lane: foreign.lane,
+      graceMs: this.cancelGraceMs,
+    });
+    const archive = archiveAdoptedRun({
+      runDir: foreign.run_dir,
+      id,
+      adopterPid: process.pid,
+      ownerPid: owner.pid,
+      workerPid: foreign.worker_pid,
+      outcome,
+    });
+    // Re-read rather than assume: the archive decides what the record now says
+    // (it refuses to overwrite a terminal state the owner already wrote), so a
+    // run that was already `done` comes back `done`, not rewritten to
+    // `cancelled` by the act of cancelling it.
+    const after = readForeignRun(id, this.runsRoot) ?? foreign;
+    const note = [
+      `${owner.detail}, so this process (pid ${process.pid}) adopted the run`,
+      outcome.note,
+      archive.archived
+        ? archive.result_stub_written
+          ? "wrote a result.md stub"
+          : "left the existing result.md in place"
+        : `record NOT archived: ${archive.reason ?? "no reason given"}`,
+      ...archive.problems,
+    ].join("; ");
+    return {
+      id,
+      status: foreignRunStatus(after),
+      adopted: true,
+      owner_pid: owner.pid,
+      worker_pid: foreign.worker_pid,
+      killed: outcome.killed,
+      identity_verified: outcome.identity_verified,
+      archived: archive.archived,
+      ...(archive.archived ? {} : { archive_reason: archive.reason }),
+      run_dir: foreign.run_dir,
+      ...(after.result_path ? { result_path: after.result_path } : {}),
+      note,
+    };
   }
 
   private async computeTouched(run: LaneRun): Promise<void> {

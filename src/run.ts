@@ -25,6 +25,7 @@ import {
   resolveCursorModel,
   resolveOcModel,
 } from "./constants.js";
+import { laneSessionRefFrom } from "./lane-session.js";
 import { appendLedgerRow } from "./ledger.js";
 import type {
   LaneName,
@@ -169,6 +170,22 @@ export class LaneRun {
   /** Set alongside `error` when the failure was classified (see failure-classifier.ts). */
   failureClass?: string;
   sessionId?: string;
+  /**
+   * The BACKEND's own conversation id for this run, when the lane reports one
+   * (#43) — see lane-session.ts for what it is and what it is not.
+   *
+   * Written by `observeLaneSession` from the lane-neutral `_meta` key on a
+   * session_info_update, read by manager.ts's resume path (which spawns the
+   * lane again carrying it) and surfaced as telemetry `lane_session_ref`.
+   * Undefined on every lane that reports none, which is every lane but cursor
+   * today — its absence is what makes a correction turn refuse rather than
+   * silently start a worker with no memory of the work it is being corrected
+   * about.
+   *
+   * NOT `sessionId` above: that one names the ACP session this process holds
+   * with the sidecar and dies with the subprocess.
+   */
+  laneSessionRef?: string;
   worktreeRetained?: string;
   cancellationRequested = false;
   private terminalAt?: number;
@@ -189,6 +206,13 @@ export class LaneRun {
   private sessionUsage?: RunTelemetry["session_usage"];
   private observedModel: string | null = null;
   private observedEffort: string | null = null;
+  /**
+   * Model a resume turn re-spawned this run on (#43), when the correction named
+   * one. Overrides `requestOpts.model` in telemetry from that turn onward — see
+   * `telemetry()` for why reporting the dispatch's model there would be a lie
+   * with a siren attached.
+   */
+  private resumeModel?: string;
   /** Live worker identity (#32): pid — which is also its pgid — and the ms epoch it was spawned. */
   private workerPid?: number;
   private workerStartedAt?: number;
@@ -351,6 +375,54 @@ export class LaneRun {
     this.writeLedgerRowOnce();
   }
 
+  /**
+   * Re-open a closed run for a backend-resume turn (#43).
+   *
+   * A lane that resumes from a backend-held conversation does NOT need this
+   * process's session to have survived — that is the whole difference from the
+   * supervised correction flow, whose window closes with the ACP session. What
+   * it does need is for the run's own bookkeeping to stop reading as finished:
+   *
+   *  - `sessionClosed` false again, so `beginTurn` does not short-circuit on
+   *    the terminal-and-closed guard and the forensic streams reopen (append
+   *    mode — nothing already written is lost).
+   *  - `turnStatus` running SYNCHRONOUSLY, before the respawn's handshake. A
+   *    correction that returned `done` while its worker was being spawned would
+   *    be read by the very next `clanker_wait` as "the correction already
+   *    finished", handing back the pre-correction verdict.
+   *  - `cancellationRequested` cleared, exactly as `beginTurn` does. Resuming a
+   *    run whose last turn was cancelled is legitimate (the conversation on the
+   *    backend's side is intact); leaving the flag set would abort the respawn
+   *    during setup and record it as another cancellation.
+   *  - `worktreeRetained` cleared, because it is recomputed by the next close.
+   *    A tree removed at that close would otherwise keep being reported as
+   *    retained at a path that no longer exists.
+   *
+   * `turnsCount`, `corrections`, the ledger-row flag and the digest are all
+   * left alone: this is the same dispatch continuing, and `beginTurn` owns the
+   * per-turn accounting.
+   */
+  reopenForResume(): void {
+    this.sessionClosed = false;
+    this.cancellationRequested = false;
+    this.worktreeRetained = undefined;
+    // The PREVIOUS turn's observation must not survive into this one. A resume
+    // turn that dies before the backend announces itself would otherwise report
+    // the model the last turn ran on — and on a model-swapping relay that is
+    // precisely the lie `observed_model` exists to expose (#25). Cleared here,
+    // re-observed from this turn's own init event (Scope-B review, gemini-ccfb4).
+    this.observedModel = null;
+    this.observedEffort = null;
+    this.turnStatus = "running";
+    this.touch("resume_accepted");
+  }
+
+  /** Record the model a resume turn re-spawned on; see `resumeModel`. */
+  adoptResumeModel(model: string): void {
+    this.resumeModel = model.trim() || undefined;
+    this.persistTelemetry();
+  }
+
   async markClosed(): Promise<void> {
     if (this.sessionClosed) return;
     this.writeEvent({ t: "session_closed" });
@@ -411,6 +483,9 @@ export class LaneRun {
       }
       case "config_option_update":
         this.observeConfigOptions(update.configOptions);
+        break;
+      case "session_info_update":
+        this.observeLaneSession(update._meta);
         break;
       case "usage_update":
         this.sessionUsage = {
@@ -612,6 +687,22 @@ export class LaneRun {
     this.workerStartedAt = startedAt;
     this.persistTelemetry();
   }
+  /**
+   * Pick the backend's own conversation id out of a session_info_update's
+   * `_meta` and persist it (#43).
+   *
+   * Only ever ASSIGNS a ref, never clears one: `laneSessionRefFrom` returns
+   * undefined for an update that carries no (or a malformed) ref, and a
+   * resumed turn whose init event happened to omit the id would otherwise
+   * erase the very ref it was resumed from — leaving the run un-correctable
+   * for a reason that has nothing to do with the backend's real state.
+   */
+  observeLaneSession(meta: Record<string, unknown> | null | undefined): void {
+    const ref = laneSessionRefFrom(meta);
+    if (!ref || ref === this.laneSessionRef) return;
+    this.laneSessionRef = ref;
+    this.persistTelemetry();
+  }
   observeConfigOptions(options: SessionConfigOption[] | null | undefined): void {
     for (const option of options ?? []) {
       if (option.category === "model") this.observedModel = String(option.currentValue);
@@ -620,20 +711,28 @@ export class LaneRun {
     this.persistTelemetry();
   }
   telemetry(): RunTelemetry {
+    // The model of the CURRENT turn, which is the dispatch's model until a
+    // resume turn re-spawns the lane on another one (#43). Reporting the
+    // dispatch's model for a turn that ran on a different one would light up
+    // the resolved_model/observed_model mismatch that exists to catch a SILENT
+    // swap (#25) — turning a deliberate, requested hand-off into a false alarm
+    // and making the alarm itself less believable.
+    const turnModel = this.resumeModel ?? this.requestOpts.model;
     // resolved_model is "what Clanker decided to run", the value observed_model
     // is compared against — so each lane resolves it the same way its backend
     // does. cursor mirrors backends.ts exactly: alias expansion, then the
     // lane's pinned default when the caller named nothing.
     const resolved = this.lane === "opencode"
-      ? (resolveOcModel(this.requestOpts.model) ?? null)
+      ? (resolveOcModel(turnModel) ?? null)
       : this.lane === "grok"
-        ? (this.requestOpts.model ?? "grok-4.5")
+        ? (turnModel ?? "grok-4.5")
         : this.lane === "cursor"
-          ? (resolveCursorModel(this.requestOpts.model) || DEFAULT_CURSOR_MODEL)
-          : (this.requestOpts.model ?? null);
+          ? (resolveCursorModel(turnModel) || DEFAULT_CURSOR_MODEL)
+          : (turnModel ?? null);
     return {
       host: this.host, requested_lane: this.lane, actual_lane: this.lane,
-      requested_model: this.requestOpts.model, resolved_model: resolved,
+      requested_model: turnModel, resolved_model: resolved,
+      ...(this.laneSessionRef !== undefined ? { lane_session_ref: this.laneSessionRef } : {}),
       observed_model: this.observedModel, requested_effort: this.requestOpts.effort,
       observed_effort: this.observedEffort, lane: this.lane, transport: "acp-stdio",
       backend: this.lane, read_only: this.readOnly, sandbox: this.requestOpts.sandbox,

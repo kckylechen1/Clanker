@@ -85,6 +85,43 @@ export const BACKEND_AUTH_TAG = "CLANKER-BACKEND-AUTH";
 export const ENV_DRIFT_TAG = "CLANKER-ENV-DRIFT";
 
 /**
+ * The backend refused the MODEL, not the request: the id is unknown to it, or
+ * this account/plan cannot reach it right now. Permanent for that id, but
+ * distinct from billing (the account is fine) and from auth (credentials are
+ * fine) — and, measured 2026-07-29, sometimes TRANSIENT at the vendor: one
+ * cursor smoke run died in 10s on `Cannot use this model: composer-2.5` and
+ * the very next identical run passed in 28s. A dispatcher that cannot tell
+ * "my dispatch is wrong" from "the vendor is having a moment" retries the
+ * wrong thing, or gives up on a lane that is actually fine.
+ */
+export const BACKEND_MODEL_TAG = "CLANKER-BACKEND-MODEL";
+
+/**
+ * Model-rejection signatures. Kept narrow and vendor-quoted: these are the
+ * exact shapes seen from real CLIs, not a guess at what a rejection reads like.
+ *
+ * ORDER: after billing, BEFORE auth. Billing first for the reason it always
+ * was — an account out of money frequently reports it as a model it can no
+ * longer reach, and the money is the more actionable truth. Auth after,
+ * because cold review (run codex-aed92) probed the shipped classifier with the
+ * vendor's own line
+ *
+ *     403 Forbidden: Cannot use this model: composer-2.5. Available models: …
+ *
+ * and got CLANKER-BACKEND-AUTH: `\b40[13]\b` matched first and sent the
+ * dispatcher to go check credentials that were never the problem. A message
+ * carrying BOTH a 403 and a named model rejection is a model diagnosis — it
+ * says which model, and the remediation is to dispatch another one. A bare
+ * 403/401/unauthorized with no model signature has no such specificity and
+ * stays AUTH.
+ */
+const BACKEND_MODEL_PATTERNS: readonly RegExp[] = [
+  /cannot use this model/i,
+  /model .{0,80}(is )?(not available|unavailable|not supported|unknown model)/i,
+  /no access to model/i,
+];
+
+/**
  * Backend billing-account failure signatures. 2026-07-24 incident (issue
  * #9): Grok's ACP bridge returned HTTP 402 ("API error (status 402 Payment
  * Required): Grok Build usage balance exhausted") from its backend, but its
@@ -187,9 +224,14 @@ const SPAWN_FAILURE_PATTERNS: readonly RegExp[] = [
  * Three tiers, in this order, and the order carries meaning:
  *  1. A structural spawn failure (SPAWN_FAILURE_PATTERNS) — nothing was ever
  *     asked of any backend, so no backend verdict can be the truth here.
- *  2. What a backend actually said: billing, then auth. Billing before auth
- *     only because 402 and 401/403 are mutually exclusive HTTP statuses in
- *     practice; those two otherwise need no particular relative order.
+ *  2. What a backend actually said: billing, then MODEL, then auth. Billing
+ *     first because an empty account is the most actionable truth there is.
+ *     Model before auth because the two overlap in one real message shape —
+ *     `403 Forbidden: Cannot use this model: composer-2.5` (measured, run
+ *     codex-aed92) — and between "your credential is bad" and "this model is
+ *     not available to you", the one that names the model is the more specific
+ *     diagnosis and points at the fix. A 403 with no model signature is still
+ *     AUTH: auth is the fallback for a rejection nothing more specific claims.
  *  3. A looser environment-drift mention (ENV_DRIFT_PATTERNS), which loses to
  *     a backend that answered.
  *
@@ -207,9 +249,15 @@ const SPAWN_FAILURE_PATTERNS: readonly RegExp[] = [
  */
 export function classifyBackendFailure(
   message: string,
-): typeof BACKEND_BILLING_TAG | typeof BACKEND_AUTH_TAG | typeof ENV_DRIFT_TAG | undefined {
+):
+  | typeof BACKEND_BILLING_TAG
+  | typeof BACKEND_AUTH_TAG
+  | typeof ENV_DRIFT_TAG
+  | typeof BACKEND_MODEL_TAG
+  | undefined {
   if (SPAWN_FAILURE_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   if (BACKEND_BILLING_PATTERNS.some((re) => re.test(message))) return BACKEND_BILLING_TAG;
+  if (BACKEND_MODEL_PATTERNS.some((re) => re.test(message))) return BACKEND_MODEL_TAG;
   if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;
   if (ENV_DRIFT_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   return undefined;

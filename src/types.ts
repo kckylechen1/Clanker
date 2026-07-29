@@ -63,6 +63,16 @@ export interface LaneRequestOptions {
    * CLANKER_GEMINI_ROLE so the shared sidecar picks the profile's role copy.
    */
   geminiRole?: string;
+  /**
+   * Backend-held conversation to continue on this spawn (#43) — the id the lane
+   * itself reported on an earlier turn (see lane-session.ts). Set ONLY by the
+   * manager's resume path, never by a caller: it names a conversation, and a
+   * caller-supplied one would be a request to continue someone else's.
+   *
+   * Lane-neutral by name and by contract; a lane that cannot resume warns and
+   * ignores it, exactly like `effort` on a lane with no effort knob.
+   */
+  resumeRef?: string;
 }
 
 /** Plan projection derived from ACP `plan` events. */
@@ -112,6 +122,17 @@ export interface RunTelemetry {
   requested_effort?: string; observed_effort?: string | null;
   lane: LaneName; transport: "acp-stdio"; backend: string; read_only: boolean;
   sandbox?: CodexSandboxMode;
+  /**
+   * The BACKEND's own conversation id for this run, when the lane reports one
+   * (#43, see lane-session.ts). Present today only on lanes that can resume
+   * from it — cursor — and absent everywhere else, so "no ref on disk" keeps
+   * meaning "this backend never offered one" rather than "we lost it".
+   *
+   * Lane-neutral by name on purpose: it is the field a later turn is resumed
+   * from, not a cursor detail. cursor's vendor-shaped forensics (permission
+   * mode, api key source, request id) stay in events.jsonl where they belong.
+   */
+  lane_session_ref?: string;
   /**
    * Full SHA the worktree was cut from when the dispatcher supplied an
    * explicit `base` (verified server-side, worktree.ts resolveBaseCommit).

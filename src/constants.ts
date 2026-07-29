@@ -84,7 +84,7 @@ export const WORKTREES_ROOT =
 export const BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 
 export const SERVER_NAME = "clanker-mcp-server";
-export const SERVER_VERSION = "0.3.9";
+export const SERVER_VERSION = "0.4.0";
 
 /**
  * Load-bearing default: without an explicit override, the codex lane must
@@ -194,6 +194,25 @@ export function resolveCursorModel(model: string | undefined): string | undefine
  * there before a lane is added.
  */
 export const LANES_WITH_PINNED_WRITE_MODEL: ReadonlySet<string> = new Set(["codex", "cursor"]);
+
+/**
+ * Lanes whose BACKEND can be told to continue its own conversation, so a
+ * correction turn is a fresh spawn carrying that conversation's id rather than
+ * a second prompt on a live ACP session (#43; see lane-session.ts and
+ * resume.ts).
+ *
+ * A capability TABLE rather than a lane check inside promptExisting: the two
+ * correction shapes are a property of the lane's backend, and the day a second
+ * lane grows `--resume` the change has to be one entry here plus that lane's
+ * own sidecar — not another branch in the manager, where nobody looking for
+ * "which lanes can resume" would think to look.
+ *
+ * Membership is a claim about the lane's CLI and must be measured before a lane
+ * is added. cursor's was: `cursor-agent -p --resume <session_id> --model <other
+ * model>` continued the conversation across a model change (2026-07-28) — which
+ * is what makes the resume path a per-turn model hand-off and not just a retry.
+ */
+export const LANES_WITH_RESUME: ReadonlySet<string> = new Set(["cursor"]);
 
 const GLM_PROVIDER_PREFIX = `${OC_MODEL_ALIASES.glm.split("/", 1)[0]}/`;
 
