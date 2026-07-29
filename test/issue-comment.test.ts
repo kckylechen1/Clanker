@@ -321,6 +321,22 @@ test("#27: an auth header is redacted by its STRUCTURE, whatever the scheme is c
     assert.ok(!out.includes(secret), `escaped-quote header survived:\n${out}`);
     assert.ok(out.includes("[REDACTED]"), out);
   }
+  // Backslash PARITY, measured rather than assumed — a fifth cold review
+  // flagged this shape as one it could not verify under a read-only contract.
+  // `\\` is an escaped backslash, so the quote after it is a REAL closer even
+  // though two backslashes precede it. Under the older equality rule the closer
+  // went unrecognised and the credentials ran to end of line: over-redaction,
+  // never a leak, but it ate the rest of the command.
+  const parity = redactForPublic(
+    `curl -H "Authorization: Basic ${basic}\\\\" --next https://api.example.com`,
+  );
+  assert.ok(!parity.includes(basic), parity);
+  assert.ok(parity.includes("--next https://api.example.com"), `the tail must survive: ${parity}`);
+  // …while an ODD count really is an escaped quote, so it is not the closer.
+  const odd = redactForPublic(`curl -H "Authorization: Basic ${basic}\\" still-inside" tail`);
+  assert.ok(!odd.includes(basic), odd);
+  assert.ok(odd.endsWith(" tail"), `the real closer is the unescaped one: ${odd}`);
+
   // …and the escaping is handed back exactly as it was written, so the log
   // line still parses as the JSON it came from.
   assert.equal(
@@ -441,6 +457,46 @@ test("#27: the public sink's key-name table is longer than the local one, and st
     assert.ok(out.includes(kept), `the rest of the sentence must survive: ${JSON.stringify(out)}`);
     assert.ok(out.includes("[REDACTED]"), out);
   }
+  // A query string is where a credential most often turns up in a log line,
+  // and both of these were public-sink misses until `?`/`&`/`;` joined the
+  // lead set. Adding them was not enough on its own: the scan used to CONSUME
+  // a declined match, so `https:` swallowed the rest of the line and the real
+  // credential was never examined (see redactKeyedValues).
+  for (const [line, secret, kept] of [
+    ["https://api.x.com/v1?auth_token_v2=hunter2word", "hunter2word", "https://api.x.com/v1"],
+    ["GET /cb?session_id=abc123xyz&next=/home", "abc123xyz", "&next=/home"],
+    ["https://api.x.com/v1?page=2&session=abc123&sort=name", "abc123", "&sort=name"],
+    ["Set-Cookie: sid=hunter2;auth_token=xyzvalue", "xyzvalue", ";auth_token="],
+    ["note: see the header X-Auth: hunter2 for details", "hunter2", "for details"],
+  ] as const) {
+    const out = redactForPublic(line);
+    assert.ok(!out.includes(secret), `query-string credential survived: ${out}`);
+    assert.ok(out.includes(kept), `the value must stop at the parameter boundary: ${out}`);
+  }
+  // …and an ordinary query string is not a credential.
+  for (const url of [
+    "https://x.com/a?page=2&sort=name",
+    "https://x.com/docs?section=auth&page=3",
+    "https://github.com/kckylechen1/Clanker/issues/27#issuecomment-5117629276",
+  ]) {
+    assert.equal(redactForPublic(url), url, `URL must survive: ${url}`);
+  }
+
+  // KNOWN AND ACCEPTED false positives, pinned so they cannot change silently.
+  // The comments admit these two; a cost that is only admitted in prose gets
+  // "fixed" by the next refactor and the corpus number quietly moves. Pinned
+  // here, that shows up as a failing test instead.
+  assert.equal(
+    redactForPublic("owns_session_key = !__zc_session_key_scoped"),
+    "owns_session_key = [REDACTED]",
+    "a C identifier whose name contains `session` is redacted — 1 span in the corpus, accepted",
+  );
+  assert.equal(
+    redactForPublic("this.laneSessionRef = ref;"),
+    "this.laneSessionRef = [REDACTED];",
+    "…and so is a TS field assignment whose name contains `Session` — the same accepted trade",
+  );
+
   // The one thing one-token costs, recorded rather than papered over: a
   // passphrase that contains a space keeps everything after the first word.
   // Accepted — the space-bearing credential this codebase actually emits is
@@ -1222,10 +1278,8 @@ test("mutation: a key rule that only reads the END of the token walks past four 
     "util-key-tail-only",
     [{
       file: "util.ts",
-      find: "    if (!keyTokenWords(token).some((word) => PUBLIC_KEY_WORDS.has(word))) return match;",
-      replace:
-        "    const tail = token.split(/[-_.]/).pop()?.toLowerCase() ?? \"\";\n" +
-        "    if (!PUBLIC_KEY_WORDS.has(tail)) return match;",
+      find: "      !keyTokenWords(token).some((word) => PUBLIC_KEY_WORDS.has(word)) ||",
+      replace: '      !PUBLIC_KEY_WORDS.has(token.split(/[-_.]/).pop()?.toLowerCase() ?? "") ||',
     }],
     "util.ts",
   );
@@ -1250,7 +1304,7 @@ test("mutation: a key value that runs to end of line deletes the sentence after 
     "util-key-value-to-eol",
     [{
       file: "util.ts",
-      find: '(["\']?[ \\t]*(?::(?!=)|=)[ \\t]*["\']?)((?:(?!\\[\\[)[^\\s\'"`])+)/gm;',
+      find: '(["\']?[ \\t]*(?::(?!=)|=)[ \\t]*["\']?)((?:(?!\\[\\[)[^\\s\'"`&;])+)/gm;',
       replace: '(["\']?[ \\t]*(?::(?!=)|=)[ \\t]*["\']?)((?:(?!\\[\\[)[^\\r\\n\'"`])+)/gm;',
     }],
     "util.ts",
@@ -1260,6 +1314,35 @@ test("mutation: a key value that runs to end of line deletes the sentence after 
   assert.equal(out, "token: [REDACTED]");
 });
 
+test("mutation: a declined match that swallows its line hides the credential further along it", async () => {
+  // Two mutants in one test because the two halves only work together: the
+  // lead set has to admit `?`, and the scan has to resume inside a declined
+  // match. Removing either one restores the miss.
+  const noLead = await loadMutantModule<typeof import("../src/util.js")>(
+    "util-key-no-url-lead",
+    [{ file: "util.ts", find: "/(^|[\\s,{(\\[\"'?&;])", replace: "/(^|[\\s,{(\\[\"'])" }],
+    "util.ts",
+  );
+  assert.ok(
+    noLead.redactForPublic("https://api.x.com/v1?auth_token_v2=hunter2word").includes("hunter2word"),
+    "without `?` in the lead set the query parameter is not even a key",
+  );
+
+  const noRewind = await loadMutantModule<typeof import("../src/util.js")>(
+    "util-key-no-rewind",
+    [{
+      file: "util.ts",
+      find: "      PUBLIC_KEY_ASSIGNMENT.lastIndex = match.index + lead.length + token.length;",
+      replace: "      void lead;",
+    }],
+    "util.ts",
+  );
+  assert.ok(
+    noRewind.redactForPublic("https://api.x.com/v1?auth_token_v2=hunter2word").includes("hunter2word"),
+    "…and with the lead set but no rewind, `https:` consumes the line before the credential is examined",
+  );
+});
+
 test("mutation: substring matching instead of words eats a verdict's own evidence", async () => {
   // The other way to close those four — match keywords anywhere in the token —
   // is the one that looks equivalent and is not.
@@ -1267,10 +1350,8 @@ test("mutation: substring matching instead of words eats a verdict's own evidenc
     "util-key-substring",
     [{
       file: "util.ts",
-      find: "    if (!keyTokenWords(token).some((word) => PUBLIC_KEY_WORDS.has(word))) return match;",
-      replace:
-        "    const flat = token.toLowerCase();\n" +
-        "    if (![...PUBLIC_KEY_WORDS].some((word) => flat.includes(word))) return match;",
+      find: "      !keyTokenWords(token).some((word) => PUBLIC_KEY_WORDS.has(word)) ||",
+      replace: "      ![...PUBLIC_KEY_WORDS].some((word) => token.toLowerCase().includes(word)) ||",
     }],
     "util.ts",
   );

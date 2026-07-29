@@ -28330,7 +28330,7 @@ var PUBLIC_KEY_WORDS = /* @__PURE__ */ new Set([
   "bearer"
 ]);
 var PUBLIC_SRC_EXTENSION = /\.(?:ts|tsx|js|jsx|mjs|cjs|go|rs|py|rb|java|kt|swift|c|h|cc|cpp|cs|sh|bash|zsh|md|json|jsonl|ya?ml|toml|ini|sql|lock)$/i;
-var PUBLIC_KEY_ASSIGNMENT = /(^|[\s,{(\["'])([A-Za-z][A-Za-z0-9_.-]*)(["']?[ \t]*(?::(?!=)|=)[ \t]*["']?)((?:(?!\[\[)[^\s'"`])+)/gm;
+var PUBLIC_KEY_ASSIGNMENT = /(^|[\s,{(\["'?&;])([A-Za-z][A-Za-z0-9_.-]*)(["']?[ \t]*(?::(?!=)|=)[ \t]*["']?)((?:(?!\[\[)[^\s'"`&;])+)/gm;
 function keyTokenWords(token) {
   const parts = token.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[-_.\s]+/).filter(Boolean).map((word) => word.toLowerCase());
   const words = [...parts];
@@ -28338,12 +28338,20 @@ function keyTokenWords(token) {
   return words;
 }
 function redactKeyedValues(text) {
-  return text.replace(PUBLIC_KEY_ASSIGNMENT, (match, lead, token, sep, value) => {
-    if (!keyTokenWords(token).some((word) => PUBLIC_KEY_WORDS.has(word))) return match;
-    if (PUBLIC_SRC_EXTENSION.test(token)) return match;
-    if (/^\d+\s*$/.test(value)) return match;
-    return `${lead}${token}${sep}[REDACTED]`;
-  });
+  PUBLIC_KEY_ASSIGNMENT.lastIndex = 0;
+  let out = "";
+  let cursor = 0;
+  for (let match = PUBLIC_KEY_ASSIGNMENT.exec(text); match; match = PUBLIC_KEY_ASSIGNMENT.exec(text)) {
+    const [whole, lead, token, sep, value] = match;
+    const declined = !keyTokenWords(token).some((word) => PUBLIC_KEY_WORDS.has(word)) || PUBLIC_SRC_EXTENSION.test(token) || /^\d+\s*$/.test(value);
+    if (declined) {
+      PUBLIC_KEY_ASSIGNMENT.lastIndex = match.index + lead.length + token.length;
+      continue;
+    }
+    out += text.slice(cursor, match.index) + lead + token + sep + "[REDACTED]";
+    cursor = match.index + whole.length;
+  }
+  return out + text.slice(cursor);
 }
 var PUBLIC_SECRET_RULES = [
   // Known credential prefixes, matched on shape alone: GitHub (`ghp_`/`gho_`/
@@ -28404,7 +28412,7 @@ function authCredentialEnd(rest, wrapper) {
   for (let i = rest.indexOf(quote); i !== -1; i = rest.indexOf(quote, i + 1)) {
     let depth = 0;
     while (i - 1 - depth >= 0 && rest[i - 1 - depth] === "\\") depth += 1;
-    if (depth === escapes) return i - depth;
+    if (depth % 2 === escapes % 2) return i - depth;
   }
   return rest.length;
 }

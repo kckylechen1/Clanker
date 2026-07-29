@@ -200,9 +200,14 @@ const PUBLIC_SRC_EXTENSION =
  *
  * Go's `:=` is excluded because it is assignment, not a key separator: the
  * corpus quotes Go, and `sig := portfolio.AgentSignal{` is evidence.
+ *
+ * The lead set includes `?`, `&` and `;` because a query string is where
+ * credentials most often show up in a log line — `…/v1?auth_token_v2=…`,
+ * `/cb?session_id=…&next=/home`, `sid=x;auth_token=y`. A fifth cold review
+ * landed both of those as public-sink misses.
  */
 const PUBLIC_KEY_ASSIGNMENT =
-  /(^|[\s,{(\["'])([A-Za-z][A-Za-z0-9_.-]*)(["']?[ \t]*(?::(?!=)|=)[ \t]*["']?)((?:(?!\[\[)[^\s'"`])+)/gm;
+  /(^|[\s,{(\["'?&;])([A-Za-z][A-Za-z0-9_.-]*)(["']?[ \t]*(?::(?!=)|=)[ \t]*["']?)((?:(?!\[\[)[^\s'"`&;])+)/gm;
 
 /** Words of a key token: `X-Api-Key-Legacy` → x, api, key, legacy, xapi, apikey, keylegacy. */
 function keyTokenWords(token: string): string[] {
@@ -217,13 +222,40 @@ function keyTokenWords(token: string): string[] {
 }
 
 /** Blank the value of anything whose key token names a credential. */
+/**
+ * Blank the value of anything whose key token names a credential.
+ *
+ * Hand-rolled instead of `String.replace` for one reason, found while adding
+ * query strings to the lead set: `replace` CONSUMES a match even when the
+ * callback declines it, so the first key-shaped thing on a line hides
+ * everything after it. `https://api.x.com/v1?auth_token_v2=hunter2word` matched
+ * at `https:` — value `//api.x.com/v1?auth_token_v2=hunter2word`, token not a
+ * credential word, declined — and the real credential further along the same
+ * line was never examined at all. Adding `?` to the lead set fixed nothing on
+ * its own; the scan had to resume INSIDE the declined match. So a declined
+ * match rewinds to just past its key token, and the credential gets its turn.
+ */
 function redactKeyedValues(text: string): string {
-  return text.replace(PUBLIC_KEY_ASSIGNMENT, (match, lead: string, token: string, sep: string, value: string) => {
-    if (!keyTokenWords(token).some((word) => PUBLIC_KEY_WORDS.has(word))) return match;
-    if (PUBLIC_SRC_EXTENSION.test(token)) return match;
-    if (/^\d+\s*$/.test(value)) return match;
-    return `${lead}${token}${sep}[REDACTED]`;
-  });
+  PUBLIC_KEY_ASSIGNMENT.lastIndex = 0;
+  let out = "";
+  let cursor = 0;
+  for (let match = PUBLIC_KEY_ASSIGNMENT.exec(text); match; match = PUBLIC_KEY_ASSIGNMENT.exec(text)) {
+    const [whole, lead, token, sep, value] = match as unknown as [string, string, string, string, string];
+    const declined =
+      !keyTokenWords(token).some((word) => PUBLIC_KEY_WORDS.has(word)) ||
+      PUBLIC_SRC_EXTENSION.test(token) ||
+      /^\d+\s*$/.test(value);
+    if (declined) {
+      // Rewind past the key token only — never past the value, which is where
+      // the next key lives. `lead + token` is at least one character, so the
+      // scan always advances and this cannot loop.
+      PUBLIC_KEY_ASSIGNMENT.lastIndex = match.index + lead.length + token.length;
+      continue;
+    }
+    out += text.slice(cursor, match.index) + lead + token + sep + "[REDACTED]";
+    cursor = match.index + whole.length;
+  }
+  return out + text.slice(cursor);
 }
 
 const PUBLIC_SECRET_RULES: readonly { readonly re: RegExp; readonly replace: string }[] = [
@@ -392,9 +424,17 @@ function authCredentialEnd(rest: string, wrapper: string): number {
   for (let i = rest.indexOf(quote); i !== -1; i = rest.indexOf(quote, i + 1)) {
     let depth = 0;
     while (i - 1 - depth >= 0 && rest[i - 1 - depth] === "\\") depth += 1;
-    // Same depth = the closer that pairs with this opener. The credentials stop
-    // BEFORE its backslashes, so the escape survives into the output intact.
-    if (depth === escapes) return i - depth;
+    // PARITY, not equality. A quote is escaped iff an ODD number of backslashes
+    // precedes it (`\\"` is an escaped backslash followed by a real quote), so
+    // what pairs an opener with its closer is that both are escaped or both are
+    // not. A fifth cold review flagged this as unverifiable under its read-only
+    // contract; measured here rather than left as a guess:
+    // `curl -H "Authorization: Basic <cred>\\" --next https://…` — raw opener,
+    // closer preceded by two backslashes — was NOT recognised under equality,
+    // so the credentials ran to end of line. The failure was over-redaction,
+    // never a leak, but it ate the rest of the command line, and parity costs
+    // one operator to fix.
+    if (depth % 2 === escapes % 2) return i - depth;
   }
   return rest.length;
 }
