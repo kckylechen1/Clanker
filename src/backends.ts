@@ -31,8 +31,11 @@
  *           projects those events onto ACP updates — the same trick the gemini
  *           lane plays on `agy`. Everything the lane needs is passed through
  *           the sidecar's environment: CLANKER_CURSOR_MODE (the read/write
- *           boundary), CLANKER_CURSOR_MODEL, CLANKER_CURSOR_AGENT_PATH, and an
- *           optional CLANKER_CURSOR_PRINT_TIMEOUT. Auth is Cursor's own login
+ *           boundary), CLANKER_CURSOR_MODEL, CLANKER_CURSOR_AGENT_PATH, an
+ *           optional CLANKER_CURSOR_PRINT_TIMEOUT, and — on a correction turn
+ *           only — CLANKER_CURSOR_RESUME, the chat id this run reported
+ *           earlier, which makes the respawn continue that conversation
+ *           (including on a different model, #43). Auth is Cursor's own login
  *           state under ~/.cursor, like opencode's credential store — Clanker
  *           holds nothing.
  * - codex   `@agentclientprotocol/codex-acp` as a pinned build dependency,
@@ -110,6 +113,7 @@ import {
   DEFAULT_CODEX_EFFORT,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CURSOR_MODEL,
+  LANES_WITH_RESUME,
   isGlmModel,
   resolveCursorModel,
   resolveOcModel,
@@ -372,6 +376,14 @@ export function buildSpawnSpec(
   if (opts.sandbox && !caps.sandbox) {
     warnings.push(`lane '${lane}' does not support sandbox override; ignoring sandbox='${opts.sandbox}'`);
   }
+  // The resume capability is read from ONE table (constants.ts
+  // LANES_WITH_RESUME), by both the manager's correction path and this
+  // registry. A ref that reaches a lane which cannot resume must not vanish
+  // silently: the caller would be told a correction continued a conversation
+  // that in fact started from nothing.
+  if (opts.resumeRef && !LANES_WITH_RESUME.has(lane)) {
+    warnings.push(`lane '${lane}' cannot resume a backend session; ignoring resumeRef='${opts.resumeRef}'`);
+  }
 
   switch (lane) {
     case "cursor": {
@@ -390,6 +402,12 @@ export function buildSpawnSpec(
       env.CLANKER_CURSOR_MODEL = resolveCursorModel(opts.model) || DEFAULT_CURSOR_MODEL;
       env.CLANKER_CURSOR_AGENT_PATH =
         process.env.CLANKER_CURSOR_AGENT_PATH ?? resolveLocalBinPath("cursor-agent");
+      // #43: a resume turn is a fresh spawn that continues Cursor's own chat.
+      // Only the manager's resume path sets this, and only from an id this same
+      // run reported earlier — never from anything a caller can name. The
+      // sidecar refuses a flag-shaped value at the argv boundary, which is the
+      // one place that boundary exists (same rule as `--model`).
+      if (opts.resumeRef) env.CLANKER_CURSOR_RESUME = opts.resumeRef;
       // Only forward an EXPLICIT operator override. The per-mode defaults live
       // solely in cursor-acp.ts; shadowing them with a second default here
       // would mean the sidecar never sees the var unset and its own defaults

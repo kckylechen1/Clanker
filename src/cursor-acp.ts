@@ -30,6 +30,7 @@ import {
   type ToolKind,
   type Usage,
 } from "@agentclientprotocol/sdk";
+import { laneSessionMeta } from "./lane-session.js";
 
 const REVIEW_ROLE_PREFIX = [
   "You are Clanker: Cursor, a read-only review and reconnaissance lane.",
@@ -78,6 +79,18 @@ function rolePrefix(mode: CursorMode): string {
 
 function activeModel(): string {
   return process.env.CLANKER_CURSOR_MODEL?.trim() || DEFAULT_CURSOR_MODEL;
+}
+
+/**
+ * The backend conversation this turn continues, if any (#43).
+ *
+ * Set by manager.ts's resume path from the id this lane itself reported on an
+ * earlier turn (see `laneSessionMeta` below). Unset on a fresh dispatch — an
+ * empty or whitespace value is the same as unset, never an empty `--resume`
+ * argument, which cursor-agent would read as "resume the session named ''".
+ */
+function activeResumeRef(): string | undefined {
+  return process.env.CLANKER_CURSOR_RESUME?.trim() || undefined;
 }
 
 /**
@@ -145,7 +158,7 @@ function printTimeoutMs(mode: CursorMode): number {
  * and is always prefixed by the role copy, so it can never begin with a `-`
  * and be re-read as a flag.
  */
-function cursorArgs(mode: CursorMode, model: string, prompt: string): string[] {
+function cursorArgs(mode: CursorMode, model: string, prompt: string, resumeRef?: string): string[] {
   // A caller-supplied model is free-form (unknown ids pass through by design —
   // Cursor ships new ones faster than this registry can), but it lands in argv
   // as its own token. A value like `--force` would therefore be a flag, and on
@@ -153,13 +166,17 @@ function cursorArgs(mode: CursorMode, model: string, prompt: string): string[] {
   // accepts `--mode ask --force` silently — measured). Cold review
   // (codex-8b2b3) proved the invariant false; refuse the shape rather than
   // trust a downstream parser to reclassify it.
-  if (model.startsWith("-")) {
-    throw new Error(
-      `Clanker: Cursor model '${model}' starts with '-' and would reach cursor-agent as a flag, ` +
-        `not as the value of --model; refusing (the read-only argv is this lane's write boundary)`,
-    );
-  }
+  refuseFlagShapedToken("model", model, "--model");
   const args = ["--print", "--output-format", "stream-json", "--stream-partial-output", "--model", model];
+  if (resumeRef !== undefined) {
+    // The SAME hazard, one field over (#43): a resume ref is also a standalone
+    // argv token, and its value arrives from the backend's own event stream
+    // rather than from anything this file controls. It gets the same refusal —
+    // an argv-level boundary is only a boundary if every token that reaches it
+    // is checked, not just the one whose bug was found first.
+    refuseFlagShapedToken("resume ref", resumeRef, "--resume");
+    args.push("--resume", resumeRef);
+  }
   if (mode === "write") {
     // `--force` allows commands unless explicitly denied; `--trust` skips the
     // interactive workspace-trust prompt that would otherwise hang a headless
@@ -175,6 +192,20 @@ function cursorArgs(mode: CursorMode, model: string, prompt: string): string[] {
   }
   args.push(`${rolePrefix(mode)}\n\nTask:\n${prompt}`);
   return args;
+}
+
+/**
+ * Refuse an argv token that would be re-read as a flag.
+ *
+ * One helper, two call sites (`--model` and `--resume`), so the rule cannot
+ * hold for one free-form token and quietly not for the next one added.
+ */
+function refuseFlagShapedToken(label: string, value: string, flag: string): void {
+  if (!value.startsWith("-")) return;
+  throw new Error(
+    `Clanker: Cursor ${label} '${value}' starts with '-' and would reach cursor-agent as a flag, ` +
+      `not as the value of ${flag}; refusing (the read-only argv is this lane's write boundary)`,
+  );
 }
 
 /**
@@ -361,10 +392,32 @@ class TurnProjection {
         configOptions: [selectOption("model", "Model", "model", event.model)],
       });
     }
-    // The chat id lands in the run's events.jsonl (run.ts writes every update
-    // raw before it projects it) and nowhere else. Resume is a separate unit;
-    // until it exists this is deliberately disk forensics, the same standing
-    // #32's worker_pid fields had before the adoption protocol read them.
+    // The chat id goes out TWICE, in two different registers, and the
+    // duplication is the point (#43):
+    //
+    //  - `clanker.cursor` is this vendor's own forensic block. It lands in the
+    //    run's events.jsonl (run.ts writes every update raw before projecting
+    //    it) and stays shaped like cursor's event, permission mode and key
+    //    source included.
+    //  - `clanker.lane_session` is the lane-NEUTRAL side channel run.ts reads
+    //    into `laneSessionRef`, which is what a later `--resume` turn is spawned
+    //    with. It carries the id and nothing else, so the machinery that
+    //    consumes it never learns a cursor-shaped field name.
+    //
+    // Emitted from `system/init`, which is where cursor states the id, and
+    // again from the result line below: a RESUMED turn is a fresh CLI
+    // invocation, so whatever id it reports is the one the next resume must
+    // carry — the freshest report wins rather than the first one.
+    //
+    // MEASURED 2026-07-29 (live cursor-agent 2026.07.23, two-leg relay):
+    // `--resume <id>` keeps the SAME id, so freshest-wins and first-wins agree
+    // today. The rule stays freshest-wins anyway — it is the one that survives
+    // cursor deciding to mint a new id per invocation, and this side channel
+    // is what a later resume is spawned with. The same run also proved
+    // `--resume` coexists with the full read-only flag set
+    // (`--mode ask --sandbox enabled --trust`) and that a model swap between
+    // legs inherits the context: composer-2.5 stored a codeword,
+    // cursor-grok-4.5-high resumed the session and returned it.
     this.emit({
       sessionUpdate: "session_info_update",
       _meta: {
@@ -374,6 +427,7 @@ class TurnProjection {
           permission_mode: event.permissionMode,
           api_key_source: event.apiKeySource,
         },
+        ...laneSessionMeta(event.session_id),
       },
     });
   }
@@ -464,6 +518,7 @@ class TurnProjection {
           duration_ms: event.duration_ms,
           subtype: event.subtype,
         },
+        ...laneSessionMeta(event.session_id),
       },
     });
   }
@@ -513,7 +568,7 @@ function runCursor(
   // Parsed BEFORE the spawn: a bad ceiling must fail the turn, not start a
   // child that then runs unbounded.
   const timeoutMs = printTimeoutMs(mode);
-  const args = cursorArgs(mode, model, prompt);
+  const args = cursorArgs(mode, model, prompt, activeResumeRef());
   const command = process.env.CLANKER_CURSOR_AGENT_PATH || "cursor-agent";
 
   const childEnv = { ...process.env };
