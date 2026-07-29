@@ -272,6 +272,37 @@ test("#48: every seat reports the class of a terminal failure it was handed", as
   }
 });
 
+test("#54: every seat reports the server's warnings about its own run", async () => {
+  // Fourth instance of the shape the three tests above share, and the reason
+  // the shape keeps recurring: a fact the server knows reaches the relay and
+  // dies there, because a zero-discretion seat returns only what its card
+  // whitelists. Four of the nine cards already listed `warnings`; five — the
+  // per-lane relays, including the `oc` seat that ran #54's dispatch — did not.
+  //
+  // What died in those five is not a nicety. #54's run asked for `gpt-5.6-sol`
+  // and got `openai/gpt-5.6-terra-fast`; the server now says so in `warnings`,
+  // and a relay that cannot return the field turns that sentence back into the
+  // silence the whole issue is about. The cost is misattribution — a verdict
+  // filed against a model that never produced it — and it is permanent in a
+  // way a failed run is not, because nobody goes back to re-check whose opinion
+  // a merged decision was.
+  for (const seat of ALL_SEATS) {
+    const body = await readFile(new URL(`../plugin/agents/${seat}.md`, import.meta.url), "utf8");
+    // Anchored to the DELIVERY LIST for the reason the three tests above spell
+    // out: prose about a field is not permission to return it.
+    const afterList = body.split(/`plan_final`, `telemetry\.observed_model`/)[1] ?? "";
+    const deliveryList = afterList.split("`run_dir` and `result_path` are absolute paths")[0] ?? "";
+    assert.ok(deliveryList.length > 0, `${seat}.md: could not find the delivery list to check`);
+    assert.match(
+      deliveryList,
+      /`warnings`/,
+      `${seat}.md must list warnings among the fields it returns — it is where the server says the ` +
+        `backend ran a different model than the one dispatched, and a swallowed swap gets a verdict ` +
+        `filed against a model that never ran`,
+    );
+  }
+});
+
 test("the README profile table and the registry agree, in both directions", async () => {
   // README's table is the first thing anyone reads about what a dispatch can
   // be, and it silently fell one row behind the registry: `gemini-research`
