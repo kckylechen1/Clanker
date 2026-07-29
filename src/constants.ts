@@ -185,8 +185,11 @@ export function resolveCursorModel(model: string | undefined): string | undefine
  * Model-family tokens for comparing `resolved_model` against `observed_model`.
  *
  * Three normalizations, each answering a shape that really occurs in the
- * telemetry corpus under ~/.cache/clanker/runs (589 records, read 2026-07-29 —
- * the counts below are from that scan, not from intuition):
+ * telemetry corpus under ~/.cache/clanker/runs (589 run directories, 527 with
+ * telemetry, read 2026-07-29 — the counts below are from that scan, not from
+ * intuition). 121 records carry both a resolved and an observed model; 74 of
+ * those differ as strings and only 15 are real swaps, so a comparison without
+ * these three steps would be wrong four times out of five.
  *
  *  1. DROP THE PROVIDER PREFIX. `kimi-for-coding/k3` and `k3` are the same
  *     model reached through different routing; `openai/x` vs `opencode/x`
@@ -196,8 +199,8 @@ export function resolveCursorModel(model: string | undefined): string | undefine
  *  2. LOWERCASE, and fold spaces/underscores onto `-`. The cursor lane reports
  *     the VENDOR'S DISPLAY NAME rather than the id it was handed (`Composer
  *     2.5` for `composer-2.5`) — see cursor-acp.ts, which reports it in the
- *     vendor's own spelling on purpose. 58 of the 589 records are exactly this
- *     pair and none of them is a swap.
+ *     vendor's own spelling on purpose. 58 records are exactly this pair and
+ *     none of them is a swap.
  *  3. COMPARE AS A TOKEN PREFIX, not as strings. Cursor's display name can
  *     drop a trailing qualifier (`cursor-grok-4.5-high` reported as `Cursor
  *     Grok 4.5`, run cursor-1b5da), and cursor-acp.ts's own contract note says
@@ -206,9 +209,9 @@ export function resolveCursorModel(model: string | undefined): string | undefine
  * The residual risk of (3) is real and accepted: `x-mini` would be read as the
  * same family as `x`. It buys silence on a recurring, structural false alarm
  * and costs a hypothetical one; no record in the corpus is silenced by it that
- * should have fired. Every genuine swap in the corpus survives all three steps
- * — `gpt-5.6-sol` vs `gpt-5.6-terra-fast` diverges at token 3, and everything
- * that fell back to `opencode/big-pickle` diverges at token 1.
+ * should have fired. All 15 genuine swaps (9 opencode, 6 cursor) survive the
+ * three steps — `gpt-5.6-sol` vs `gpt-5.6-terra-fast` diverges at token 3, and
+ * everything that fell back to `opencode/big-pickle` diverges at token 1.
  */
 function modelFamilyTokens(id: string): string[] {
   const withoutProvider = id.slice(id.lastIndexOf("/") + 1);
@@ -235,11 +238,14 @@ export function sameModelFamily(a: string, b: string): boolean {
  * occurrence on the same lane.
  *
  * Compares `resolved_model` — what Clanker DECIDED to run, after alias
- * expansion — and never `requested_model`. Comparing the request would fire on
- * all 26 corpus records where the caller passed a shortname (`kimi` observed as
- * `kimi-for-coding/k3`), i.e. it would call every correct alias expansion a
- * swap. Returns null when either side is unknown: an unreported `observed_model`
- * is missing evidence, not evidence of a swap.
+ * expansion and default filling — and never `requested_model`. The request is
+ * what the CALLER asked for, with alias expansion still between it and reality,
+ * so it cannot be the baseline for "did the lane run what we picked". Measured
+ * on the corpus: 26 records expanded a shortname or a default on an otherwise
+ * correct dispatch, and comparing the request would have called 23 of them a
+ * swap — 23 false alarms against 15 real ones. Returns null when either side is
+ * unknown: an unreported `observed_model` (78 records) is missing evidence, not
+ * evidence of a swap.
  */
 export function modelSwapWarning(
   resolvedModel: string | null | undefined,

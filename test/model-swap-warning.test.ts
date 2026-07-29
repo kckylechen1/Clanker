@@ -16,19 +16,25 @@
  * Every case below is a shape that really occurs in ~/.cache/clanker/runs
  * (589 run directories, 527 with telemetry, scanned 2026-07-29), carrying the
  * run id it was taken from. The counts are why the rule is shaped this way —
- * of the 124 records that have both a resolved and an observed model, 77 differ
- * as strings and only 9 are real swaps:
+ * of the 121 records that have both a resolved and an observed model (three
+ * more are this suite's own fixtures, see fake-acp-agent.mjs), 74 differ as
+ * strings and only 15 are real swaps:
  *
- *   26 records  caller passed a SHORTNAME, backend reported the expanded id
- *               (`kimi` -> `kimi-for-coding/k3`). Comparing `requested_model`
- *               would call all 26 a swap. -> compare `resolved_model`.
+ *   26 records  caller passed a SHORTNAME or took a lane default, backend
+ *               reported the expanded id (`kimi` -> `kimi-for-coding/k3`).
+ *               Comparing `requested_model` would call 23 of them a swap.
+ *               -> compare `resolved_model`.
  *   58 records  cursor reported its own DISPLAY NAME for the id it was given
  *               (`composer-2.5` -> `Composer 2.5`). -> case/separator folding.
  *    1 record   cursor's display name dropped a trailing qualifier
  *               (`cursor-grok-4.5-high` -> `Cursor Grok 4.5`, cursor-1b5da).
  *               -> token-prefix comparison, per cursor-acp.ts's own note that
  *               a reader "should compare model FAMILY, not string equality".
- *    9 records  GENUINE swaps, all on the opencode lane. -> must fire.
+ *    0 records  provider prefix ALONE. Reachable but unobserved, and guarded
+ *               anyway — #54 names it as the misjudgement that would turn the
+ *               alarm into noise, and the opencode fix in backends.ts makes it
+ *               the shape a corrected b3b5c dispatch would have had.
+ *   15 records  GENUINE swaps: 9 opencode, 6 cursor. -> must fire.
  *
  * A false alarm here is not a small cost: a warning that fires on routine alias
  * expansion is noise, and an alarm nobody believes is not an alarm. That is the
@@ -95,9 +101,9 @@ test("#54 corpus: every real substitution fires, and the text says which model t
 });
 
 test("#54: an unreported observed_model is missing evidence, not evidence of a swap", () => {
-  // 63 corpus records name a model and carry no observed one at all. Warning on
-  // those would mean the alarm fires mostly on lanes that simply do not report,
-  // which is how an alarm decays into background noise.
+  // 78 corpus records name a resolved model and carry no observed one at all.
+  // Warning on those would mean the alarm fires mostly on lanes that simply do
+  // not report, which is how an alarm decays into background noise.
   assert.equal(modelSwapWarning("openai/gpt-5.5", null), null);
   assert.equal(modelSwapWarning("openai/gpt-5.5", undefined), null);
   assert.equal(modelSwapWarning("openai/gpt-5.5", "   "), null);
