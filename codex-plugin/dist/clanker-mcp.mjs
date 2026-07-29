@@ -34226,8 +34226,8 @@ ${prompt}`;
     return this.turnDrives.has(id);
   }
   /** Wait for every tracked drive to settle, however it settles (shutdown). */
-  async settleAllDrives() {
-    await Promise.allSettled([...this.turnDrives.values()]);
+  settleAllDrives() {
+    return Promise.allSettled([...this.turnDrives.values()]);
   }
   /** The in-flight handshake for `id`, if this run is still connecting (cancel). */
   pendingConnect(id) {
@@ -34555,7 +34555,7 @@ ${params.prompt}`;
    * keeps its address on the manager; the turn itself — both of its shapes,
    * and every refusal that guards them — lives in turn-driver.ts.
    */
-  async promptExisting(id, prompt, correction = false, model) {
+  promptExisting(id, prompt, correction = false, model) {
     return this.turnDriver.promptExisting(id, prompt, correction, model);
   }
   // ---- long-poll ----------------------------------------------------------

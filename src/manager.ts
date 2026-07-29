@@ -771,12 +771,20 @@ export class LaneManager {
    * keeps its address on the manager; the turn itself — both of its shapes,
    * and every refusal that guards them — lives in turn-driver.ts.
    */
-  async promptExisting(
+  promptExisting(
     id: string,
     prompt: string,
     correction = false,
     model?: string,
   ): Promise<{ id: string; status: RunStatus }> {
+    // NOT `async` (cold review codex-1c87b, verified with an event-loop probe):
+    // an async wrapper around an async call resolves its own promise three
+    // microtasks after the inner one, so `await promptExisting(); cancel()`
+    // could resume a turn later than the pre-refactor shape did — a caller
+    // aiming at the still-running window could land past terminal. Returning
+    // the driver's promise directly costs one tick instead of three, which is
+    // the floor for any delegation; the refactor may not make the engine
+    // slower to observe than the code it replaced.
     return this.turnDriver.promptExisting(id, prompt, correction, model);
   }
 
@@ -1362,6 +1370,9 @@ export class LaneManager {
     }
     this.turnDriver.abortPendingConnects();
     await Promise.all([...this.connections.keys()].map((id) => this.turnDriver.killConnection(id)));
+    // The driver hands back the same `Promise.allSettled` this line used to
+    // build inline; awaiting it directly keeps the final close loop on the same
+    // tick it started on before the split (same review).
     await this.turnDriver.settleAllDrives();
     // A pending handshake may have crossed into an established connection
     // during the first snapshot; the shutdown flag makes that drive close it

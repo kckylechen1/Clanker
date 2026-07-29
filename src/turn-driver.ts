@@ -556,8 +556,14 @@ export class TurnDriver {
   }
 
   /** Wait for every tracked drive to settle, however it settles (shutdown). */
-  async settleAllDrives(): Promise<void> {
-    await Promise.allSettled([...this.turnDrives.values()]);
+  settleAllDrives(): Promise<unknown> {
+    // NOT `async`: shutdown awaits this, and an async wrapper would push the
+    // final close loop a microtask past where it ran pre-split — smallest when
+    // there are no drives at all, which is exactly the common shutdown
+    // (cold review codex-1c87b). Hands back the very promise the old inline
+    // `await Promise.allSettled([...])` produced, rejections swallowed the same
+    // way.
+    return Promise.allSettled([...this.turnDrives.values()]);
   }
 
   /** The in-flight handshake for `id`, if this run is still connecting (cancel). */
