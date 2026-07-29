@@ -119,6 +119,40 @@ test("every seat holds only its own narrow start tool and no retired API", async
   }
 });
 
+test("#53: a seat holding a caller-optional model is told the parameter exists", async () => {
+  // A zero-discretion relay passes exactly the parameters its card enumerates
+  // (#48/#47): a schema that accepts `model` while the card never mentions it
+  // is a capability nothing can reach — which is the whole shape of #53 one
+  // level up, where the SCHEMA was the thing missing the parameter. Opening
+  // the schema and leaving the card silent would reproduce the bug in the
+  // layer above and read as fixed from the server side.
+  //
+  // Registry-derived, so a profile that becomes caller-optional tomorrow is
+  // covered without an edit here. Deliberately NOT asserted for
+  // `lane-default` profiles: grok.md's model prose is a separate, opposite
+  // mismatch (see #53's report) and welding a gate onto it here would decide
+  // an out-of-scope question by test.
+  for (const profile of DISPATCH_PROFILES) {
+    if (profile.model.kind !== "caller-optional") continue;
+    const seat = seatFor[profile.id];
+    const body = await readFile(new URL(`../plugin/agents/${seat}.md`, import.meta.url), "utf8");
+    assert.match(body, /`model`/, `${seat}.md holds ${profile.id} but never names the \`model\` parameter`);
+    assert.match(
+      body,
+      new RegExp(`\`${profile.model.defaultId}\``),
+      `${seat}.md must name the pinned default (${profile.model.defaultId}) the caller gets by omitting model`,
+    );
+    // The relay must be told the omission is legitimate, not an oversight to
+    // repair — a seat that "helpfully" supplies a model silently overrides the
+    // pin the default exists to protect.
+    assert.match(
+      body,
+      /only when the caller named one|only if the caller named one/i,
+      `${seat}.md must forbid inventing a model for ${profile.id}`,
+    );
+  }
+});
+
 test("no seat names a clanker tool the server does not register", async () => {
   // The gate that would have caught the phantom. `supervisor.md` declared
   // `clanker_prompt` and step 4 told it to correct a drifting worker with it —

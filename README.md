@@ -14,8 +14,8 @@ There is deliberately **no generic `clanker_start(profile, ...)`**. A universal 
 
 | profile | lane | writes | worktree | model | sandbox | notes |
 |---|---|---|---|---|---|---|
-| `codex-review` | codex | no | optional | lane default | welded `read-only` | welded so the native sandbox can't route around `read_only` |
-| `codex-write` | codex | yes | required | lane default | caller-selectable, default `workspace-write` | |
+| `codex-review` | codex | no | optional | optional, default `gpt-5.5` | welded `read-only` | welded so the native sandbox can't route around `read_only` |
+| `codex-write` | codex | yes | required | optional, default `gpt-5.5` | caller-selectable, default `workspace-write` | |
 | `oc-review` | opencode | no | optional | required | n/a | fixed `clanker-worker` profile |
 | `oc-write` | opencode | yes | required | required, non-GLM | n/a | fixed `clanker-worker` profile |
 | `oc-glm-write` | opencode | yes | required | welded `glm` | n/a | `ZHIPUAI_API_KEY` via vault; Sonnet supervision |

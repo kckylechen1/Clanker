@@ -15,8 +15,8 @@ A **dispatch profile** is the whole capability combination under one name: lane,
 
 | profile | lane | writes | worktree | model | sandbox |
 |---|---|---|---|---|---|
-| `codex-review` | codex | no | optional | lane default | welded `read-only` |
-| `codex-write` | codex | yes | required | lane default | selectable, default `workspace-write` |
+| `codex-review` | codex | no | optional | optional, default `gpt-5.5` | welded `read-only` |
+| `codex-write` | codex | yes | required | optional, default `gpt-5.5` | selectable, default `workspace-write` |
 | `oc-review` | opencode | no | optional | required | n/a |
 | `oc-write` | opencode | yes | required | required, non-GLM | n/a |
 | `oc-glm-write` | opencode | yes | required | welded `glm`, Sonnet-supervised | n/a |
@@ -26,7 +26,7 @@ A **dispatch profile** is the whole capability combination under one name: lane,
 | `cursor-write` | cursor | yes | required | optional, default `composer-2.5` | n/a |
 | `grok-review` / `grok-write` | grok | no / yes | optional / required | lane default / required | n/a (dormant: HTTP 402) |
 
-Where a profile's model is optional (`cursor-review` / `cursor-write`), pass one only when the caller named it; omitted, the lane's pinned default runs. Cursor's aliases are lane-local: `composer` → `composer-2.5`, `grok` → `cursor-grok-4.5-high`, `codex53` → `gpt-5.3-codex-high` — they are NOT the opencode shortnames, where `composer` means a different provider's model entirely. Composer 2.5 is a bounded single-layer-scaffolding tier (composer-2.5 lane card, #1368): provenance and identity-critical cores still need a cross-vendor screen.
+Where a profile's model is optional (`codex-review` / `codex-write` / `cursor-review` / `cursor-write`), pass one only when the caller named it; omitted, the lane's pinned default runs. That default is Clanker's own pin, not the harness's config file — omitting the model on a codex profile runs `gpt-5.5` regardless of what `~/.codex/config.toml` says, which is exactly why naming one is the only way to reach another Codex model. Cursor's aliases are lane-local: `composer` → `composer-2.5`, `grok` → `cursor-grok-4.5-high`, `codex53` → `gpt-5.3-codex-high` — they are NOT the opencode shortnames, where `composer` means a different provider's model entirely. Composer 2.5 is a bounded single-layer-scaffolding tier (composer-2.5 lane card, #1368): provenance and identity-critical cores still need a cross-vendor screen.
 
 **Correction turns come in two shapes, and `clanker_prompt` picks the one the job's lane supports.** A supervised job (`oc-glm-write`) continues its still-open ACP session, so its window closes when the idle-TTL reaper does. A `cursor` job is re-spawned against the conversation Cursor itself holds (`--resume`), so it stays correctable after the session closed — and it accepts an optional `model`, which runs the next turn on a different model inside the same conversation (measured: a passphrase stored by `composer-2.5` was recalled by `cursor-grok-4.5-high` resuming the same session). Either shape keeps the job's id, worktree, write boundary and single ledger row, and rewrites `result.md` with the corrected turn's verdict. A correction with nothing to resume is refused by name rather than quietly started as a fresh, memoryless worker.
 
