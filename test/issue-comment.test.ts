@@ -371,6 +371,14 @@ test("#27: the public sink's key-name table is longer than the local one, and st
     ["signature: c2ln", "c2ln"],
     ['{"credentials": "hunter2"}', "hunter2"],
     ["passphrase = open sesame", "open sesame"],
+    // The four a fourth cold review walked past, all the same miss: the
+    // keyword was present but not LAST, and the rule required it to sit
+    // immediately before the separator. The rule now takes the whole key token
+    // and asks what WORDS it is made of, so position stopped mattering.
+    ["X-Session-ID: abc123xyz", "abc123xyz"],
+    ["session_id=abc123xyz", "abc123xyz"],
+    ["auth_token_v2: hunter2word", "hunter2word"],
+    ["X-Api-Key-Legacy: hunter2word", "hunter2word"],
   ] as const) {
     const out = redactForPublic(line);
     assert.ok(!out.includes(secret), `key-name rule missed: ${line}\n → ${out}`);
@@ -394,6 +402,21 @@ test("#27: the public sink's key-name table is longer than the local one, and st
     // separator, and this exact line was a corpus false positive until it was
     // excluded.
     "sig := portfolio.AgentSignal{Kind: kind}",
+    // WORDS, not substrings: widening to substring containment would eat all
+    // three of these, and the third is a git log line.
+    "AgentSignal: kind is set by the router",
+    "design: the parked header is restored last",
+    "author: Kyle Chen",
+    // The shape this whole feature exists to deliver. `auth-service.ts`
+    // contains the word `auth`, and a verdict that loses its file:line has
+    // lost the thing it was written to carry — measured, the source-extension
+    // guard is the only reason this line survives.
+    "auth-service.ts:34 — the header rule lives here",
+    "session-store.go:88 fails under load",
+    "credentials.rs:7 is where the type is declared",
+    // Bare `key` is not a credential word, or every YAML file would be redacted.
+    "key: value",
+    "line: 91",
   ]) {
     assert.equal(redactForPublic(prose), prose, `prose must survive: ${prose}`);
   }
@@ -1118,28 +1141,69 @@ test("mutation: a scheme-name list instead of the header's structure lets `Basic
     }],
     "util.ts",
   );
+  // Re-aimed after the key rule was rewritten to read whole tokens: that rule
+  // now also matches `Authorization:` and catches the plain `Basic` case, so
+  // the two rules overlap and the bare-Basic leak no longer reproduces from
+  // this mutation alone. Defence in depth is the good news; the mutant has to
+  // be pointed at what the header rule STILL uniquely does, which is exactly
+  // the shape the key rule cannot reach — a quoted auth-param, where the key
+  // rule's value stops at the first quote.
+  const out = mutant.redactForPublic('Authorization: Digest response="deadbeefcafe1234"');
+  assert.ok(out.includes("deadbeefcafe1234"), `the mutant republishes the digest: ${out}`);
+  // …and it loses the scheme word too: the key rule blanks everything after
+  // the colon, so `Basic` — the evidence a reader acts on — goes with it.
   const basic = Buffer.from("user:hunter2").toString("base64");
-  const out = mutant.redactForPublic(`Authorization: Basic ${basic}`);
-  assert.ok(out.includes(basic), `the mutant republishes the credential: ${out}`);
+  const plain = mutant.redactForPublic(`Authorization: Basic ${basic}`);
+  assert.ok(!plain.includes(basic), "the key rule still stops the plain case from leaking");
+  assert.ok(!plain.includes("Basic"), `…but only the header rule keeps the scheme: ${plain}`);
 });
 
-test("mutation: without the public key-name table, a custom auth header publishes its value", async () => {
+test("mutation: a key rule that only reads the END of the token walks past four real shapes", async () => {
+  // The shipped rule, restored: the credential word had to be the last thing
+  // before the separator. Everything else about the rule is left alone, so
+  // what this discriminates is exactly "whole token" versus "tail of token".
   const mutant = await loadMutantModule<typeof import("../src/util.js")>(
-    "util-no-public-key-names",
+    "util-key-tail-only",
     [{
       file: "util.ts",
-      // Table emptied to the one word the LOCAL redactor already knows, which
-      // is exactly the coverage this rule was added to exceed.
-      find: 'const PUBLIC_KEY_NAMES =\n  "auth|credentials?|creds?|session|cookie|signature|sig|passwords?|passwd|pwd|passphrase|private[_-]?key";',
-      replace: 'const PUBLIC_KEY_NAMES = "authorization";',
+      find: "    if (!keyTokenWords(token).some((word) => PUBLIC_KEY_WORDS.has(word))) return match;",
+      replace:
+        "    const tail = token.split(/[-_.]/).pop()?.toLowerCase() ?? \"\";\n" +
+        "    if (!PUBLIC_KEY_WORDS.has(tail)) return match;",
     }],
     "util.ts",
   );
-  assert.ok(mutant.redactForPublic("X-Auth: hunter2").includes("hunter2"), "the mutant publishes it");
-  assert.ok(mutant.redactForPublic("password: hunter2").includes("hunter2"));
-  // …and the header rule it shares a file with is untouched, so the assertion
-  // above is about the table and nothing else.
-  assert.ok(!mutant.redactForPublic("Authorization: Basic aGk6dGhlcmU=").includes("aGk6dGhlcmU="));
+  for (const [line, secret] of [
+    ["X-Session-ID: abc123xyz", "abc123xyz"],
+    ["session_id=abc123xyz", "abc123xyz"],
+    ["auth_token_v2: hunter2word", "hunter2word"],
+    ["X-Api-Key-Legacy: hunter2word", "hunter2word"],
+  ] as const) {
+    assert.ok(mutant.redactForPublic(line).includes(secret), `the mutant publishes ${line}`);
+  }
+  // …while still catching the shape it was built for, which is why it survived
+  // three rounds of review before this one.
+  assert.ok(!mutant.redactForPublic("X-Auth: hunter2").includes("hunter2"));
+});
+
+test("mutation: substring matching instead of words eats a verdict's own evidence", async () => {
+  // The other way to close those four — match keywords anywhere in the token —
+  // is the one that looks equivalent and is not.
+  const mutant = await loadMutantModule<typeof import("../src/util.js")>(
+    "util-key-substring",
+    [{
+      file: "util.ts",
+      find: "    if (!keyTokenWords(token).some((word) => PUBLIC_KEY_WORDS.has(word))) return match;",
+      replace:
+        "    const flat = token.toLowerCase();\n" +
+        "    if (![...PUBLIC_KEY_WORDS].some((word) => flat.includes(word))) return match;",
+    }],
+    "util.ts",
+  );
+  assert.ok(
+    !mutant.redactForPublic("author: Kyle Chen").includes("Kyle Chen"),
+    "the mutant reads `author` as `auth` and blanks a git log line — the green build must not",
+  );
 });
 
 test("mutation: a constant park token lets worker text be overwritten by a header it never wrote", async () => {

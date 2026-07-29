@@ -117,59 +117,95 @@ export function redact(text: string): string {
  * nothing worth the evidence it would destroy.
  */
 /**
- * The public sink's own KEY-NAME rule: `redact()`'s bounded keyword table, made
- * longer for the one sink where a miss cannot be taken back.
+ * The public sink's KEY rule: find the key TOKEN, then ask what it is made of.
  *
- * `redact()` matches `api[_-]?key|token|secret|authorization|bearer`, which is
- * why `X-Api-Key: …` and `X-Auth-Token: …` are already covered and
- * `X-Auth: hunter2` is not. The first version of this file called that gap
- * unfixable, on the grounds that the alternative was matching header names as
- * an OPEN set (`\S+:\s*\S+`, i.e. every line of prose with a colon). That was a
- * false dilemma and the leader called it: names do not have to be an open set,
- * the table just has to be longer. Only the VALUE is open.
+ * This rule has now been rewritten twice, and the second rewrite is the point.
+ * It began as `redact()`'s keyword list with a longer table, requiring the
+ * keyword to sit immediately before the `:` or `=`. A fourth cold review then
+ * walked straight past it with `X-Session-ID:`, `session_id=`, `auth_token_v2:`
+ * and `X-Api-Key-Legacy:` — four misses, all the same miss: the keyword was
+ * there, just not LAST. Each of the four rounds before that had been the same
+ * kind of patch (add `Basic`, add quoted auth-params, add escaped quotes), and
+ * a rule that needs one more branch per spelling is a rule pinned to syntax
+ * that the next verdict will spell differently.
  *
- * Two constraints keep this from becoming the prose-eating rule it could be:
+ * So the shape changed instead of the branch count. Take the whole key token
+ * (`[A-Za-z][A-Za-z0-9_.-]*` before the separator), split it into WORDS on
+ * `-`/`_`/`.`/camelCase, and ask whether any word — or any adjacent pair joined,
+ * for `api`+`key` — is a credential word. Position stops mattering, so all four
+ * misses close at once and so does the fifth spelling nobody has written yet.
  *
- *  1. The keyword must sit in the KEY POSITION — start of line, or right after
- *     a separator that a key can follow (`,` `{` `(` `-H`, whitespace) — and be
- *     followed by `:` or `=`. `the session is stale: nobody resumed it` is
- *     prose about a session, not `session: <value>`, and only the second shape
- *     matches.
- *  2. The key name is kept and only the value blanked, as everywhere else here,
- *     so the redaction stays legible evidence.
+ * WORDS, not substrings, and that distinction is doing real work: `author:` is
+ * not `auth`, `AgentSignal:` is not `signature`, `design:` is not `sig`. Bare
+ * `key` is deliberately NOT a credential word either (every YAML file on earth
+ * has `key: value`); only the joined forms `apikey` / `privatekey` / `accesskey`
+ * / `secretkey` are.
  *
- * MEASURED before landing, on the same 293-verdict corpus the blob rules were
- * tuned against, with the agreed bar being "drop this rule if it roughly
- * doubles the corpus false positives". It does not: ONE span in 293 verdicts,
- * `signature="…"` in a verdict quoting an HTTP signature header — which is
- * arguably the rule working rather than misfiring. The number was 3 before the
- * `:=` exclusion above: the other two were `sig := portfolio.AgentSignal{`,
- * Go assignment quoted as evidence, and excluding Go's `:=` cost nothing in
- * coverage. So the total for this whole function stays 10 blob spans + 1 here.
+ * Two guards on top, both aimed at the same thing — a verdict IS file:line
+ * evidence, and blanking that is worse than missing a token:
+ *
+ *  1. A token ending in a source extension is a FILENAME, not a key.
+ *     `auth-service.ts:12` contains the word `auth` and is the single most
+ *     load-bearing shape a verdict has; measured, this guard is the only thing
+ *     that saves it.
+ *  2. A purely numeric value is a line number, a port or a count, not a
+ *     credential.
+ *
+ * MEASURED on the 293-verdict corpus, the agreed bar being "if false positives
+ * jump, tighten and retry rather than abandon": the rewrite moves this rule
+ * from 1 span to 4. Two of the four are the two cold-review verdicts quoting
+ * `Authorization: Basic …` as an EXAMPLE of the bug — which the header rule
+ * parks before this rule ever runs in production, so in the live pipeline the
+ * real cost is 2: the same `signature="…"` as before, plus a C line reading
+ * `owns_session_key = !__zc_session_key_scoped`. Against that: four confirmed
+ * public-sink misses closed. Guard variants were compared on the same corpus;
+ * a third candidate guard (reject values that begin digit-then-prose) changed
+ * nothing and was dropped rather than carried for its looks.
  */
-const PUBLIC_KEY_NAMES =
-  "auth|credentials?|creds?|session|cookie|signature|sig|passwords?|passwd|pwd|passphrase|private[_-]?key";
+const PUBLIC_KEY_WORDS: ReadonlySet<string> = new Set([
+  "auth", "authorization", "authentication", "token", "tokens", "secret", "secrets",
+  "session", "sessions", "cookie", "cookies", "signature", "password", "passwords",
+  "passwd", "pwd", "passphrase", "credential", "credentials", "cred", "creds",
+  "apikey", "privatekey", "accesskey", "secretkey", "bearer",
+]);
+/** A token ending in one of these is a path, and a verdict is made of paths. */
+const PUBLIC_SRC_EXTENSION =
+  /\.(?:ts|tsx|js|jsx|mjs|cjs|go|rs|py|rb|java|kt|swift|c|h|cc|cpp|cs|sh|bash|zsh|md|json|jsonl|ya?ml|toml|ini|sql|lock)$/i;
+/**
+ * `<key><:|=><value>` where the key is a whole token and the value runs to the
+ * end of the line, the closing quote, or a parked header — never through one
+ * (see freshParkTag: a value that ate a placeholder would delete a header this
+ * function had already redacted and set aside).
+ *
+ * Go's `:=` is excluded because it is assignment, not a key separator: the
+ * corpus quotes Go, and `sig := portfolio.AgentSignal{` is evidence.
+ */
+const PUBLIC_KEY_ASSIGNMENT =
+  /(^|[\s,{(\["'])([A-Za-z][A-Za-z0-9_.-]*)(["']?[ \t]*(?::(?!=)|=)[ \t]*["']?)((?:(?!\[\[)[^\r\n'"`])+)/gm;
+
+/** Words of a key token: `X-Api-Key-Legacy` → x, api, key, legacy, xapi, apikey, keylegacy. */
+function keyTokenWords(token: string): string[] {
+  const parts = token
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[-_.\s]+/)
+    .filter(Boolean)
+    .map((word) => word.toLowerCase());
+  const words = [...parts];
+  for (let i = 0; i + 1 < parts.length; i += 1) words.push(parts[i] + parts[i + 1]);
+  return words;
+}
+
+/** Blank the value of anything whose key token names a credential. */
+function redactKeyedValues(text: string): string {
+  return text.replace(PUBLIC_KEY_ASSIGNMENT, (match, lead: string, token: string, sep: string, value: string) => {
+    if (!keyTokenWords(token).some((word) => PUBLIC_KEY_WORDS.has(word))) return match;
+    if (PUBLIC_SRC_EXTENSION.test(token)) return match;
+    if (/^\d+\s*$/.test(value)) return match;
+    return `${lead}${token}${sep}[REDACTED]`;
+  });
+}
+
 const PUBLIC_SECRET_RULES: readonly { readonly re: RegExp; readonly replace: string }[] = [
-  {
-    re: new RegExp(
-      // key position: line start, or after a character a key can follow —
-      // including the quote of a JSON key (`{"credentials": …`).
-      String.raw`(^|[\s,{(\["'])` +
-        // an optional vendor-ish prefix (`X-`, `HTTP_`) so `X-Auth` counts as `auth`
-        String.raw`((?:[A-Za-z][\w.-]*[_.-])?(?:${PUBLIC_KEY_NAMES}))` +
-        // The separator that makes it a key at all. `:=` is excluded because it
-        // is Go's assignment, not a key separator: the corpus quotes Go, and
-        // `sig := portfolio.AgentSignal{` is a line of evidence, not a secret.
-        String.raw`(["']?\s*(?::(?!=)|=)\s*["']?)` +
-        // …and the value: to end of line, or to the quote that closes it, but
-        // never THROUGH a `[[` — that is where a parked auth header is standing
-        // (see freshParkTag), and a value that ate one would delete the header
-        // this function had already redacted and set aside.
-        String.raw`((?:(?!\[\[)[^\r\n'"\`])+)`,
-      "gi",
-    ),
-    replace: "$1$2$3[REDACTED]",
-  },
   // Known credential prefixes, matched on shape alone: GitHub (`ghp_`/`gho_`/
   // `ghu_`/`ghs_`/`ghr_`), OpenAI-style (`sk-`, which also covers `sk-ant-`,
   // `sk-live-`, `sk-proj-`), Slack, GitLab, npm, AWS access-key ids, Google.
@@ -373,6 +409,7 @@ export function redactForPublic(text: string): string {
     },
   );
   out = redact(out);
+  out = redactKeyedValues(out);
   for (const { re, replace } of PUBLIC_SECRET_RULES) out = out.replace(re, replace);
   out = out.replace(PUBLIC_HEX_BLOB, (m) => (GIT_SHA.test(m) ? m : "[REDACTED]"));
   // Loose first: it consumes whole separator-bearing runs, so running it after
