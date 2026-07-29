@@ -28301,25 +28301,51 @@ var SECRET_PATTERN = /(api[_-]?key|token|secret|authorization|bearer)(\s*[=:]\s*
 function redact(text) {
   return text.replace(SECRET_PATTERN, (_match, key, sep) => `${key}${sep}[REDACTED]`);
 }
-var PUBLIC_KEY_NAMES = "auth|credentials?|creds?|session|cookie|signature|sig|passwords?|passwd|pwd|passphrase|private[_-]?key";
+var PUBLIC_KEY_WORDS = /* @__PURE__ */ new Set([
+  "auth",
+  "authorization",
+  "authentication",
+  "token",
+  "tokens",
+  "secret",
+  "secrets",
+  "session",
+  "sessions",
+  "cookie",
+  "cookies",
+  "signature",
+  "password",
+  "passwords",
+  "passwd",
+  "pwd",
+  "passphrase",
+  "credential",
+  "credentials",
+  "cred",
+  "creds",
+  "apikey",
+  "privatekey",
+  "accesskey",
+  "secretkey",
+  "bearer"
+]);
+var PUBLIC_SRC_EXTENSION = /\.(?:ts|tsx|js|jsx|mjs|cjs|go|rs|py|rb|java|kt|swift|c|h|cc|cpp|cs|sh|bash|zsh|md|json|jsonl|ya?ml|toml|ini|sql|lock)$/i;
+var PUBLIC_KEY_ASSIGNMENT = /(^|[\s,{(\["'])([A-Za-z][A-Za-z0-9_.-]*)(["']?[ \t]*(?::(?!=)|=)[ \t]*["']?)((?:(?!\[\[)[^\r\n'"`])+)/gm;
+function keyTokenWords(token) {
+  const parts = token.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[-_.\s]+/).filter(Boolean).map((word) => word.toLowerCase());
+  const words = [...parts];
+  for (let i = 0; i + 1 < parts.length; i += 1) words.push(parts[i] + parts[i + 1]);
+  return words;
+}
+function redactKeyedValues(text) {
+  return text.replace(PUBLIC_KEY_ASSIGNMENT, (match, lead, token, sep, value) => {
+    if (!keyTokenWords(token).some((word) => PUBLIC_KEY_WORDS.has(word))) return match;
+    if (PUBLIC_SRC_EXTENSION.test(token)) return match;
+    if (/^\d+\s*$/.test(value)) return match;
+    return `${lead}${token}${sep}[REDACTED]`;
+  });
+}
 var PUBLIC_SECRET_RULES = [
-  {
-    re: new RegExp(
-      // key position: line start, or after a character a key can follow —
-      // including the quote of a JSON key (`{"credentials": …`).
-      String.raw`(^|[\s,{(\["'])` + // an optional vendor-ish prefix (`X-`, `HTTP_`) so `X-Auth` counts as `auth`
-      String.raw`((?:[A-Za-z][\w.-]*[_.-])?(?:${PUBLIC_KEY_NAMES}))` + // The separator that makes it a key at all. `:=` is excluded because it
-      // is Go's assignment, not a key separator: the corpus quotes Go, and
-      // `sig := portfolio.AgentSignal{` is a line of evidence, not a secret.
-      String.raw`(["']?\s*(?::(?!=)|=)\s*["']?)` + // …and the value: to end of line, or to the quote that closes it, but
-      // never THROUGH a `[[` — that is where a parked auth header is standing
-      // (see freshParkTag), and a value that ate one would delete the header
-      // this function had already redacted and set aside.
-      String.raw`((?:(?!\[\[)[^\r\n'"\`])+)`,
-      "gi"
-    ),
-    replace: "$1$2$3[REDACTED]"
-  },
   // Known credential prefixes, matched on shape alone: GitHub (`ghp_`/`gho_`/
   // `ghu_`/`ghs_`/`ghr_`), OpenAI-style (`sk-`, which also covers `sk-ant-`,
   // `sk-live-`, `sk-proj-`), Slack, GitLab, npm, AWS access-key ids, Google.
@@ -28370,18 +28396,25 @@ function looksRandom(span, requireDigitOrNoWord) {
   if (longestSameCaseRun(span) < 6) return true;
   return requireDigitOrNoWord ? /\d/.test(span) : false;
 }
-var AUTH_HEADER = /(["'`]?)\b((?:proxy-)?authorization)(["']?[ \t]*[:=][ \t]*["']?)([A-Za-z][A-Za-z0-9._-]*)([ \t]+)([^\r\n]+)/gi;
+var AUTH_HEADER = /((?:\\*["'`])?)\b((?:proxy-)?authorization)((?:\\*["'])?[ \t]*[:=][ \t]*(?:\\*["'])?)([A-Za-z][A-Za-z0-9._-]*)([ \t]+)([^\r\n]+)/gi;
 function authCredentialEnd(rest, wrapper) {
   if (wrapper === "") return rest.length;
-  for (let i = rest.indexOf(wrapper); i !== -1; i = rest.indexOf(wrapper, i + 1)) {
-    if (i === 0 || rest[i - 1] !== "\\") return i;
+  const escapes = wrapper.length - 1;
+  const quote = wrapper[wrapper.length - 1];
+  for (let i = rest.indexOf(quote); i !== -1; i = rest.indexOf(quote, i + 1)) {
+    let depth = 0;
+    while (i - 1 - depth >= 0 && rest[i - 1 - depth] === "\\") depth += 1;
+    if (depth === escapes) return i - depth;
   }
   return rest.length;
 }
 function freshParkTag(text) {
-  let tag = "clanker-hdr";
-  for (let n = 1; text.includes(`[[${tag}:`); n += 1) tag = `clanker-hdr-${n}`;
-  return tag;
+  const taken = /* @__PURE__ */ new Set();
+  for (const match of text.matchAll(/\[\[clanker-hdr(-\d+)?:/g)) taken.add(match[1] ?? "");
+  for (let n = 0; ; n += 1) {
+    const suffix = n === 0 ? "" : `-${n}`;
+    if (!taken.has(suffix)) return `clanker-hdr${suffix}`;
+  }
 }
 function redactForPublic(text) {
   const parked = [];
@@ -28395,6 +28428,7 @@ function redactForPublic(text) {
     }
   );
   out = redact(out);
+  out = redactKeyedValues(out);
   for (const { re, replace } of PUBLIC_SECRET_RULES) out = out.replace(re, replace);
   out = out.replace(PUBLIC_HEX_BLOB, (m) => GIT_SHA.test(m) ? m : "[REDACTED]");
   out = out.replace(PUBLIC_LOOSE_BLOB, (m) => looksRandom(m, false) ? "[REDACTED]" : m);
