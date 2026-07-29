@@ -22,7 +22,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@agentclientprotocol/codex-acp": "1.1.4",
+    "@agentclientprotocol/codex-acp": "1.1.7",
     "@agentclientprotocol/sdk": "1.1.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "zod": "3.25.76"
