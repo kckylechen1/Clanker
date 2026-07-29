@@ -34,10 +34,10 @@
  *     must never be indistinguishable from "no issue was named".
  *
  *  3. NOTHING BUT A COMMENT. `assertCommentOnlyArgs` rejects, in code, any argv
- *     that is not exactly `gh issue comment <n> [--repo R] --body B`. Closing a
- *     ticket is the act of a person who has read the diff (呈单即止); a server
- *     that could close one because a worker exited 0 would be automating away
- *     the judgment the whole ledger exists to record.
+ *     that is not exactly `gh issue comment <n> [--repo R] --body-file F`.
+ *     Closing a ticket is the act of a person who has read the diff (呈单即止);
+ *     a server that could close one because a worker exited 0 would be
+ *     automating away the judgment the whole ledger exists to record.
  *
  * The one deliberate deviation from byte-for-byte quoting is `redact()`: a
  * comment is the only artifact this server pushes to a REMOTE, possibly public
@@ -47,6 +47,8 @@
  */
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createTimeout, errMessage, redact } from "./util.js";
 
 /**
@@ -189,11 +191,22 @@ export function buildIssueCommentBody(facts: IssueCommentFacts): BuiltComment {
   return { body: lines.join("\n"), truncated, redacted };
 }
 
-/** Build the exact argv — `gh issue comment <n> [--repo R] --body B` and nothing else. */
-export function issueCommentArgs(ref: IssueRef, body: string): string[] {
+/**
+ * Build the exact argv — `gh issue comment <n> [--repo R] --body-file F` and
+ * nothing else.
+ *
+ * A FILE, never `--body <text>`, and this is a finding rather than a taste:
+ * the first live run against the real binary was refused outright (exit 64) by
+ * the operator's own `gh` wrapper, which rejects inline body text because shell
+ * expansion can corrupt Markdown before `gh` ever sees it. The file boundary is
+ * independently the right shape anyway — a verdict is arbitrary worker output,
+ * and putting it in argv means an ARG_MAX ceiling and the whole text visible in
+ * every process listing on the machine.
+ */
+export function issueCommentArgs(ref: IssueRef, bodyFile: string): string[] {
   const args = ["issue", "comment", ref.number];
   if (ref.repo) args.push("--repo", ref.repo);
-  args.push("--body", body);
+  args.push("--body-file", bodyFile);
   assertCommentOnlyArgs(args);
   return args;
 }
@@ -204,10 +217,11 @@ export function issueCommentArgs(ref: IssueRef, body: string): string[] {
  * This is a code gate rather than a test-only assertion on purpose. "The server
  * only comments, it never closes" is a promise about behaviour under future
  * edits, and the only version of that promise that survives an edit is one the
- * code itself checks. A denylist of dangerous subcommands would not do: the
- * body is free-form worker output and would trip any keyword scan, so the shape
- * is validated structurally instead — fixed head, then flag/value pairs drawn
- * from a two-entry allowlist.
+ * code itself checks. A denylist of dangerous subcommands would not do — so the
+ * shape is validated structurally instead: fixed head, then flag/value pairs
+ * drawn from a two-entry allowlist. Note that no argv position here can carry
+ * worker text at all (the body travels as a file), so the gate never has to
+ * make an exception for free-form content.
  */
 export function assertCommentOnlyArgs(args: readonly string[]): void {
   const refuse = (why: string): never => {
@@ -217,7 +231,7 @@ export function assertCommentOnlyArgs(args: readonly string[]): void {
     refuse("only `gh issue comment` is permitted; changing an issue's state is a human's act, not a server's");
   }
   if (!/^\d+$/.test(args[2] ?? "")) refuse("the issue argument must be a bare number");
-  const allowed = new Set(["--repo", "--body"]);
+  const allowed = new Set(["--repo", "--body-file"]);
   for (let i = 3; i < args.length; i += 2) {
     if (!allowed.has(args[i])) refuse(`unexpected flag '${args[i]}' (allowed: ${[...allowed].join(", ")})`);
     if (i + 1 >= args.length) refuse(`flag '${args[i]}' has no value`);
@@ -308,9 +322,8 @@ export async function postIssueComment(
   const { body } = buildIssueCommentBody(input.facts);
 
   const fail = (rawReason: string): PostIssueCommentOutcome => {
-    // Bounded: `execFile`'s own failure message quotes the whole command line,
-    // and this command line carries the comment body. An unbounded reason would
-    // reprint the entire verdict into stderr and into telemetry.
+    // Bounded: a spawn failure's own message quotes the whole command line, and
+    // `gh`'s stderr can be long. Neither belongs in telemetry unabridged.
     const reason = rawReason.length > 500 ? `${rawReason.slice(0, 500)}…` : rawReason;
     const message =
       `[clanker] issue comment for run '${input.facts.runId}' on ${describeRef(input.ref)} FAILED: ${reason}. ` +
@@ -319,37 +332,60 @@ export async function postIssueComment(
     return { ok: false, error: reason };
   };
 
-  let args: string[];
+  // The body travels as a FILE (see issueCommentArgs). Written under the OS
+  // temp root rather than into the run directory on purpose: `retention.ts`
+  // and the foreign-run scan both read a run directory by its known member
+  // names, and a new permanent file there would be a change to that contract
+  // for something that is pure transport.
+  let scratch: string;
+  let bodyFile: string;
   try {
-    args = issueCommentArgs(input.ref, body);
+    scratch = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-issue-comment-"));
+    bodyFile = path.join(scratch, "body.md");
+    fs.writeFileSync(bodyFile, body);
   } catch (error) {
-    return fail(errMessage(error));
+    return fail(`could not stage the comment body: ${errMessage(error)}`);
   }
 
-  // The hard ceiling is enforced HERE, not only inside the default executor:
-  // the executor is injectable, and a cap that lives in one implementation of
-  // an injectable dependency is a cap the other implementations do not have.
-  // Terminal handling waits on this promise, so "the runner hung" has to be a
-  // bounded outcome rather than a bounded-in-practice one.
-  const timer = createTimeout(timeoutMs);
-  let result: GhResult | typeof TIMED_OUT;
   try {
-    result = await Promise.race<GhResult | typeof TIMED_OUT>([
-      runner(args, { cwd: existingDir(input.cwd), timeoutMs }),
-      timer.promise.then(() => TIMED_OUT),
-    ]);
-  } catch (error) {
-    return fail(errMessage(error));
+    let args: string[];
+    try {
+      args = issueCommentArgs(input.ref, bodyFile);
+    } catch (error) {
+      return fail(errMessage(error));
+    }
+
+    // The hard ceiling is enforced HERE, not only inside the default executor:
+    // the executor is injectable, and a cap that lives in one implementation of
+    // an injectable dependency is a cap the other implementations do not have.
+    // Terminal handling waits on this promise, so "the runner hung" has to be a
+    // bounded outcome rather than a bounded-in-practice one.
+    const timer = createTimeout(timeoutMs);
+    let result: GhResult | typeof TIMED_OUT;
+    try {
+      result = await Promise.race<GhResult | typeof TIMED_OUT>([
+        runner(args, { cwd: existingDir(input.cwd), timeoutMs }),
+        timer.promise.then(() => TIMED_OUT),
+      ]);
+    } catch (error) {
+      return fail(errMessage(error));
+    } finally {
+      timer.cancel();
+    }
+
+    if (result === TIMED_OUT) return fail(`\`gh\` did not return within ${timeoutMs}ms`);
+    if (result.code !== 0) {
+      const detail = (result.stderr || result.stdout).trim().slice(-400) || "(no output)";
+      return fail(`\`gh\` exited ${result.code}: ${detail}`);
+    }
+    return { ok: true, body };
   } finally {
-    timer.cancel();
+    try {
+      fs.rmSync(scratch, { recursive: true, force: true });
+    } catch {
+      /* best-effort: a stranded temp body is not worth failing an account over */
+    }
   }
-
-  if (result === TIMED_OUT) return fail(`\`gh\` did not return within ${timeoutMs}ms`);
-  if (result.code !== 0) {
-    const detail = (result.stderr || result.stdout).trim().slice(-400) || "(no output)";
-    return fail(`\`gh\` exited ${result.code}: ${detail}`);
-  }
-  return { ok: true, body };
 }
 
 /** `#41` or `owner/repo#41` — how a refusal names the ticket it could not reach. */

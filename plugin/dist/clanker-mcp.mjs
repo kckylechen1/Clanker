@@ -3226,8 +3226,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path12) {
-      let input = path12;
+    function removeDotSegments(path13) {
+      let input = path13;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3479,8 +3479,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path12, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path12 && path12 !== "/" ? path12 : void 0;
+        const [path13, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path13 && path13 !== "/" ? path13 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -7364,8 +7364,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path12, errorMaps, issueData } = params;
-  const fullPath = [...path12, ...issueData.path || []];
+  const { data, path: path13, errorMaps, issueData } = params;
+  const fullPath = [...path13, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7481,11 +7481,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path12, key) {
+  constructor(parent, value, path13, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path12;
+    this._path = path13;
     this._key = key;
   }
   get path() {
@@ -11367,10 +11367,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path12) {
-  if (!path12)
+function getElementAtPath(obj, path13) {
+  if (!path13)
     return obj;
-  return path12.reduce((acc, key) => acc?.[key], obj);
+  return path13.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11690,11 +11690,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path12, issues) {
+function prefixIssues(path13, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path12);
+    iss.path.unshift(path13);
     return iss;
   });
 }
@@ -11831,7 +11831,7 @@ function treeifyError(error40, _mapper) {
     return issue2.message;
   };
   const result = { errors: [] };
-  const processError = (error41, path12 = []) => {
+  const processError = (error41, path13 = []) => {
     var _a, _b;
     for (const issue2 of error41.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
@@ -11841,7 +11841,7 @@ function treeifyError(error40, _mapper) {
       } else if (issue2.code === "invalid_element") {
         processError({ issues: issue2.issues }, issue2.path);
       } else {
-        const fullpath = [...path12, ...issue2.path];
+        const fullpath = [...path13, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -11871,9 +11871,9 @@ function treeifyError(error40, _mapper) {
   processError(error40);
   return result;
 }
-function toDotPath(path12) {
+function toDotPath(path13) {
   const segs = [];
-  for (const seg of path12) {
+  for (const seg of path13) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -27821,7 +27821,7 @@ function envInt(name, fallback) {
 // src/manager.ts
 import crypto from "node:crypto";
 import fs12 from "node:fs";
-import path10 from "node:path";
+import path11 from "node:path";
 
 // src/backends.ts
 import fs3 from "node:fs";
@@ -28186,15 +28186,17 @@ function buildSpawnSpec(lane, opts, runDir) {
 // src/adopt.ts
 import { spawnSync } from "node:child_process";
 import fs7 from "node:fs";
-import path6 from "node:path";
+import path7 from "node:path";
 
 // src/run.ts
 import fs6 from "node:fs";
-import path5 from "node:path";
+import path6 from "node:path";
 
 // src/issue-comment.ts
 import { execFile } from "node:child_process";
 import fs4 from "node:fs";
+import os4 from "node:os";
+import path4 from "node:path";
 
 // src/failure-classifier.ts
 var INFRA_FAILURE_TAG = "CLANKER-INFRA-FAILURE";
@@ -28355,10 +28357,10 @@ function buildIssueCommentBody(facts) {
   lines.push(`run_dir \`${facts.runDir}\` (verdict: \`result.md\`)`);
   return { body: lines.join("\n"), truncated, redacted };
 }
-function issueCommentArgs(ref, body) {
+function issueCommentArgs(ref, bodyFile) {
   const args = ["issue", "comment", ref.number];
   if (ref.repo) args.push("--repo", ref.repo);
-  args.push("--body", body);
+  args.push("--body-file", bodyFile);
   assertCommentOnlyArgs(args);
   return args;
 }
@@ -28370,7 +28372,7 @@ function assertCommentOnlyArgs(args) {
     refuse("only `gh issue comment` is permitted; changing an issue's state is a human's act, not a server's");
   }
   if (!/^\d+$/.test(args[2] ?? "")) refuse("the issue argument must be a bare number");
-  const allowed = /* @__PURE__ */ new Set(["--repo", "--body"]);
+  const allowed = /* @__PURE__ */ new Set(["--repo", "--body-file"]);
   for (let i = 3; i < args.length; i += 2) {
     if (!allowed.has(args[i])) refuse(`unexpected flag '${args[i]}' (allowed: ${[...allowed].join(", ")})`);
     if (i + 1 >= args.length) refuse(`flag '${args[i]}' has no value`);
@@ -28407,30 +28409,46 @@ async function postIssueComment(input, deps = {}) {
     logError(message);
     return { ok: false, error: reason };
   };
-  let args;
+  let scratch;
+  let bodyFile;
   try {
-    args = issueCommentArgs(input.ref, body);
+    scratch = fs4.mkdtempSync(path4.join(os4.tmpdir(), "clanker-issue-comment-"));
+    bodyFile = path4.join(scratch, "body.md");
+    fs4.writeFileSync(bodyFile, body);
   } catch (error40) {
-    return fail2(errMessage(error40));
+    return fail2(`could not stage the comment body: ${errMessage(error40)}`);
   }
-  const timer = createTimeout(timeoutMs);
-  let result;
   try {
-    result = await Promise.race([
-      runner(args, { cwd: existingDir(input.cwd), timeoutMs }),
-      timer.promise.then(() => TIMED_OUT)
-    ]);
-  } catch (error40) {
-    return fail2(errMessage(error40));
+    let args;
+    try {
+      args = issueCommentArgs(input.ref, bodyFile);
+    } catch (error40) {
+      return fail2(errMessage(error40));
+    }
+    const timer = createTimeout(timeoutMs);
+    let result;
+    try {
+      result = await Promise.race([
+        runner(args, { cwd: existingDir(input.cwd), timeoutMs }),
+        timer.promise.then(() => TIMED_OUT)
+      ]);
+    } catch (error40) {
+      return fail2(errMessage(error40));
+    } finally {
+      timer.cancel();
+    }
+    if (result === TIMED_OUT) return fail2(`\`gh\` did not return within ${timeoutMs}ms`);
+    if (result.code !== 0) {
+      const detail = (result.stderr || result.stdout).trim().slice(-400) || "(no output)";
+      return fail2(`\`gh\` exited ${result.code}: ${detail}`);
+    }
+    return { ok: true, body };
   } finally {
-    timer.cancel();
+    try {
+      fs4.rmSync(scratch, { recursive: true, force: true });
+    } catch {
+    }
   }
-  if (result === TIMED_OUT) return fail2(`\`gh\` did not return within ${timeoutMs}ms`);
-  if (result.code !== 0) {
-    const detail = (result.stderr || result.stdout).trim().slice(-400) || "(no output)";
-    return fail2(`\`gh\` exited ${result.code}: ${detail}`);
-  }
-  return { ok: true, body };
 }
 function describeRef(ref) {
   return ref.repo ? `${ref.repo}#${ref.number}` : `#${ref.number}`;
@@ -28473,12 +28491,12 @@ function laneSessionRefFrom(meta) {
 
 // src/ledger.ts
 import fs5 from "node:fs";
-import os4 from "node:os";
-import path4 from "node:path";
+import os5 from "node:os";
+import path5 from "node:path";
 var rawLedgerDirEnv = process.env.CLANKER_LEDGER_DIR?.trim();
-var LEDGER_DIR = rawLedgerDirEnv ? rawLedgerDirEnv : path4.join(os4.homedir(), ".agents", "dispatch-ledger");
-var LEDGER_PATH = path4.join(LEDGER_DIR, "ledger.jsonl");
-var HOOK_ERRORS_PATH = path4.join(LEDGER_DIR, "hook_errors.log");
+var LEDGER_DIR = rawLedgerDirEnv ? rawLedgerDirEnv : path5.join(os5.homedir(), ".agents", "dispatch-ledger");
+var LEDGER_PATH = path5.join(LEDGER_DIR, "ledger.jsonl");
+var HOOK_ERRORS_PATH = path5.join(LEDGER_DIR, "hook_errors.log");
 var PROMPT_HEAD_CHAR_BUDGET = 200;
 var ERROR_CLASS_CHAR_BUDGET = 200;
 var DEFAULT_AGENT_PROFILE = "worker";
@@ -29214,7 +29232,7 @@ var LaneRun = class {
    */
   /** Absolute path of this run's terminal-judgment artifact (see RESULT_FILE). */
   resultPath() {
-    return path5.join(this.runDir, RESULT_FILE);
+    return path6.join(this.runDir, RESULT_FILE);
   }
   /**
    * Size in bytes of an already-written `result.md`, or 0 when it is missing or
@@ -29373,7 +29391,7 @@ var LaneRun = class {
     });
   }
   persistTelemetry() {
-    const target = path5.join(this.runDir, "telemetry.json");
+    const target = path6.join(this.runDir, "telemetry.json");
     const tmp = `${target}.${process.pid}.tmp`;
     try {
       fs6.writeFileSync(tmp, JSON.stringify(this.telemetry(), null, 2));
@@ -29442,12 +29460,12 @@ var LaneRun = class {
   appendToStream(file2, streamField, line) {
     if (this.sessionClosed) {
       fs6.mkdirSync(this.runDir, { recursive: true });
-      fs6.appendFileSync(path5.join(this.runDir, file2), line);
+      fs6.appendFileSync(path6.join(this.runDir, file2), line);
       return;
     }
     if (!this[streamField]) {
       fs6.mkdirSync(this.runDir, { recursive: true });
-      this[streamField] = fs6.createWriteStream(path5.join(this.runDir, file2), { flags: "a" });
+      this[streamField] = fs6.createWriteStream(path6.join(this.runDir, file2), { flags: "a" });
     }
     this[streamField].write(line);
   }
@@ -29499,7 +29517,7 @@ var LaneRun = class {
   }
   relToCwd(p) {
     try {
-      const rel = path5.relative(this.cwd, p);
+      const rel = path6.relative(this.cwd, p);
       return rel && !rel.startsWith("..") ? rel : p;
     } catch {
       return p;
@@ -29601,7 +29619,7 @@ function verifyWorkerIdentity(pid, recordedStartedAt, lane, toleranceMs = IDENTI
   if (!probe.ok) return { verified: false, reason: probe.reason };
   const skew = probe.facts.startedAt - recordedStartedAt;
   const expected = LANE_COMMANDS[lane ?? ""] ?? [];
-  const base = path6.basename(probe.facts.comm);
+  const base = path7.basename(probe.facts.comm);
   const commMatches = expected.length === 0 ? void 0 : expected.some((c) => base === c || base.startsWith(c));
   const shared = {
     observed_started_at: probe.facts.startedAt,
@@ -29737,7 +29755,7 @@ function archiveAdoptedRun(input) {
   const nowIso = new Date(input.now ?? Date.now()).toISOString();
   const problems = [];
   const explanation = `run '${id}' was adopted and cancelled by Clanker server pid ${adopterPid} at ${nowIso}: its own server (pid ${ownerPid ?? "unknown"}) was gone, so this process took over. worker_pid ${workerPid ?? "none"}; identity_verified=${outcome.identity_verified}; signals=[${outcome.signals.join(", ") || "none"}]; ${outcome.note}`;
-  const telemetryPath = path6.join(runDir, "telemetry.json");
+  const telemetryPath = path7.join(runDir, "telemetry.json");
   let record2 = {};
   let recordUnreadable = false;
   try {
@@ -29772,7 +29790,7 @@ ${explanation}` : explanation;
     problems.push(`telemetry archival failed: ${error40 instanceof Error ? error40.message : String(error40)}`);
   }
   let resultStubWritten = false;
-  const resultPath = path6.join(runDir, RESULT_FILE);
+  const resultPath = path7.join(runDir, RESULT_FILE);
   try {
     let size = 0;
     try {
@@ -29815,12 +29833,12 @@ ${explanation}` : explanation;
 
 // src/foreign.ts
 import fs9 from "node:fs";
-import path8 from "node:path";
+import path9 from "node:path";
 
 // src/worktree.ts
 import { execFile as execFile2 } from "node:child_process";
 import fs8 from "node:fs";
-import path7 from "node:path";
+import path8 from "node:path";
 import { promisify } from "node:util";
 var exec = promisify(execFile2);
 async function git(cwd, args) {
@@ -29830,11 +29848,11 @@ async function git(cwd, args) {
 var OWNER_MARKER = ".clanker-owner";
 var sanitize = (s) => s.replace(/[^A-Za-z0-9._-]/g, "-");
 function deriveWorktreePath(branch, runId) {
-  return path7.join(WORKTREES_ROOT, `${sanitize(branch)}-${sanitize(runId).slice(-6)}`);
+  return path8.join(WORKTREES_ROOT, `${sanitize(branch)}-${sanitize(runId).slice(-6)}`);
 }
 function readWorktreeOwner(worktreePath) {
   try {
-    const first = fs8.readFileSync(path7.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
+    const first = fs8.readFileSync(path8.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
     return first || null;
   } catch {
     return null;
@@ -29911,7 +29929,7 @@ async function createWorktree(branch, runId, targetRepo = BASE_REPO, base) {
   const baseRef = base ?? await resolveBaseRef(targetRepo);
   fs8.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
-  fs8.writeFileSync(path7.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
+  fs8.writeFileSync(path8.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
 `);
   return wtPath;
 }
@@ -29953,16 +29971,16 @@ async function holdsUnmergedWork(worktreePath, targetRepo, baseSha) {
   }
 }
 function realpathBestEffort(p) {
-  let cur = path7.resolve(p);
+  let cur = path8.resolve(p);
   const tail = [];
   for (; ; ) {
     try {
       const real = fs8.realpathSync(cur);
-      return tail.length ? path7.join(real, ...tail) : real;
+      return tail.length ? path8.join(real, ...tail) : real;
     } catch {
-      const parent = path7.dirname(cur);
-      if (parent === cur) return path7.resolve(p);
-      tail.unshift(path7.basename(cur));
+      const parent = path8.dirname(cur);
+      if (parent === cur) return path8.resolve(p);
+      tail.unshift(path8.basename(cur));
       cur = parent;
     }
   }
@@ -29970,7 +29988,7 @@ function realpathBestEffort(p) {
 function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
   const wt = realpathBestEffort(worktreePath);
   const repo = realpathBestEffort(targetRepo);
-  if (wt === repo || wt.startsWith(repo + path7.sep) || repo.startsWith(wt + path7.sep)) {
+  if (wt === repo || wt.startsWith(repo + path8.sep) || repo.startsWith(wt + path8.sep)) {
     throw new Error(
       `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT outside the repo)`
     );
@@ -30010,7 +30028,7 @@ async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runI
   } catch {
     if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return false;
   }
-  const markerPath = path7.join(worktreePath, OWNER_MARKER);
+  const markerPath = path8.join(worktreePath, OWNER_MARKER);
   const marker = (() => {
     try {
       return fs8.readFileSync(markerPath, "utf8");
@@ -30046,9 +30064,9 @@ function isValidRunId(id) {
   return typeof id === "string" && id.length <= 128 && RUN_ID_PATTERN.test(id);
 }
 function containedRunDir(runsRoot, id) {
-  const root = realpathBestEffort(path8.resolve(runsRoot));
-  const runDir = realpathBestEffort(path8.resolve(path8.resolve(runsRoot), id));
-  if (runDir === root || !runDir.startsWith(root + path8.sep)) return null;
+  const root = realpathBestEffort(path9.resolve(runsRoot));
+  const runDir = realpathBestEffort(path9.resolve(path9.resolve(runsRoot), id));
+  if (runDir === root || !runDir.startsWith(root + path9.sep)) return null;
   return runDir;
 }
 function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
@@ -30057,7 +30075,7 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
   if (runDir === null) return null;
   let telemetry;
   try {
-    telemetry = JSON.parse(fs9.readFileSync(path8.join(runDir, "telemetry.json"), "utf8"));
+    telemetry = JSON.parse(fs9.readFileSync(path9.join(runDir, "telemetry.json"), "utf8"));
   } catch {
     return null;
   }
@@ -30065,7 +30083,7 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
   try {
     for (const entry of fs9.readdirSync(runDir)) {
       try {
-        newestMtimeMs = Math.max(newestMtimeMs, fs9.statSync(path8.join(runDir, entry)).mtimeMs);
+        newestMtimeMs = Math.max(newestMtimeMs, fs9.statSync(path9.join(runDir, entry)).mtimeMs);
       } catch {
       }
     }
@@ -30073,7 +30091,7 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
   }
   let resultPath;
   try {
-    if (fs9.statSync(path8.join(runDir, RESULT_FILE)).size > 0) resultPath = path8.join(runDir, RESULT_FILE);
+    if (fs9.statSync(path9.join(runDir, RESULT_FILE)).size > 0) resultPath = path9.join(runDir, RESULT_FILE);
   } catch {
   }
   return {
@@ -30436,7 +30454,7 @@ function hostLaneBlockedReason(host, lane) {
 // src/acp-client.ts
 import { spawn } from "node:child_process";
 import fs10 from "node:fs";
-import path9 from "node:path";
+import path10 from "node:path";
 import { Readable, Writable } from "node:stream";
 
 // node_modules/@agentclientprotocol/sdk/dist/schema/index.js
@@ -33912,7 +33930,7 @@ var LaneConnection = class _LaneConnection {
       );
     }
     const nodeBin = resolveNodeBinary();
-    const nodeBinDir = path9.isAbsolute(nodeBin) ? path9.dirname(nodeBin) + path9.delimiter : "";
+    const nodeBinDir = path10.isAbsolute(nodeBin) ? path10.dirname(nodeBin) + path10.delimiter : "";
     const child = spawn(spec.command, spec.args, {
       cwd,
       env: {
@@ -34041,21 +34059,21 @@ var LaneConnection = class _LaneConnection {
   }
 };
 function assertContained(root, target, requested) {
-  if (target !== root && !target.startsWith(root + path9.sep)) {
+  if (target !== root && !target.startsWith(root + path10.sep)) {
     throw new Error(`filesystem boundary rejection: path is outside session cwd (${requested})`);
   }
   return target;
 }
 function resolveContainedReadPath(root, requested) {
   const canonicalRoot = fs10.realpathSync(root);
-  const lexical = path9.resolve(canonicalRoot, requested);
-  if (!path9.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
+  const lexical = path10.resolve(canonicalRoot, requested);
+  if (!path10.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
   return assertContained(canonicalRoot, fs10.realpathSync(lexical), requested);
 }
 function resolveContainedWritePath(root, requested) {
   const canonicalRoot = fs10.realpathSync(root);
-  const lexical = path9.resolve(canonicalRoot, requested);
-  if (!path9.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
+  const lexical = path10.resolve(canonicalRoot, requested);
+  if (!path10.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
   try {
     if (fs10.lstatSync(lexical).isSymbolicLink()) {
       throw new Error(`filesystem boundary rejection: final write target is a symlink (${requested})`);
@@ -34063,8 +34081,8 @@ function resolveContainedWritePath(root, requested) {
   } catch (e) {
     if (e.code !== "ENOENT") throw e;
   }
-  const parent = assertContained(canonicalRoot, fs10.realpathSync(path9.dirname(lexical)), requested);
-  return assertContained(canonicalRoot, path9.join(parent, path9.basename(lexical)), requested);
+  const parent = assertContained(canonicalRoot, fs10.realpathSync(path10.dirname(lexical)), requested);
+  return assertContained(canonicalRoot, path10.join(parent, path10.basename(lexical)), requested);
 }
 function writeContainedTextFile(target, requested, content) {
   const flags = fs10.constants.O_WRONLY | fs10.constants.O_CREAT | (fs10.constants.O_NOFOLLOW ?? 0);
@@ -34545,7 +34563,7 @@ function validateDispatchParams(params, minted, host) {
   return { params, profile, readOnly, requiresIsolation, issueRef };
 }
 function writeTelemetryStub(runDir, stub) {
-  const target = path10.join(runDir, "telemetry.json");
+  const target = path11.join(runDir, "telemetry.json");
   const tmp = `${target}.${process.pid}.tmp`;
   try {
     fs12.writeFileSync(tmp, JSON.stringify(stub, null, 2));
@@ -34719,8 +34737,8 @@ ${params.prompt}`;
       );
     }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
-    fs12.mkdirSync(path10.resolve(this.runsRoot, id), { recursive: true });
-    const runDir = realpathBestEffort(path10.resolve(this.runsRoot, id));
+    fs12.mkdirSync(path11.resolve(this.runsRoot, id), { recursive: true });
+    const runDir = realpathBestEffort(path11.resolve(this.runsRoot, id));
     const stub = {
       host: this.host,
       lane: params.lane,
@@ -34743,7 +34761,7 @@ ${params.prompt}`;
       geminiRole: params.lane === "gemini" ? minted.profileId : void 0
     };
     let cwd = params.cwd ?? this.baseRepo;
-    let targetRepo = path10.resolve(this.baseRepo);
+    let targetRepo = path11.resolve(this.baseRepo);
     let baseSha;
     let worktreePath;
     let worktreeBaseSha;
@@ -35500,7 +35518,7 @@ function registerTools(server, manager) {
 
 // src/retention.ts
 import fs13 from "node:fs";
-import path11 from "node:path";
+import path12 from "node:path";
 function sweepRunStreams(options = {}) {
   const runsRoot = options.runsRoot ?? RUNS_ROOT;
   const ttlMs = options.ttlMs ?? RUN_STREAM_TTL_MS;
@@ -35516,11 +35534,11 @@ function sweepRunStreams(options = {}) {
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     report.scanned++;
-    const runDir = path11.join(runsRoot, entry.name);
+    const runDir = path12.join(runsRoot, entry.name);
     const streams = [];
     let newestMtimeMs = 0;
     for (const name of RUN_STREAM_FILES) {
-      const file2 = path11.join(runDir, name);
+      const file2 = path12.join(runDir, name);
       let stat;
       try {
         stat = fs13.statSync(file2);

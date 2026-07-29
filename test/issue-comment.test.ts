@@ -54,7 +54,13 @@ import { fakeSpec, loadMutantManager, loadMutantModule, until } from "./helpers.
 
 interface Recorder {
   runner: GhRunner;
-  calls: { args: string[]; cwd?: string; timeoutMs: number }[];
+  /**
+   * `body` is read off disk at call time, not reconstructed: the body reaches
+   * `gh` as `--body-file`, so what the file held while `gh` was running IS what
+   * was posted. A recorder that re-rendered the body itself would be asserting
+   * on its own arithmetic.
+   */
+  calls: { args: string[]; cwd?: string; timeoutMs: number; body: string; bodyFile: string }[];
 }
 
 /** A `gh` that never exists: records what it was asked to run and answers as told. */
@@ -63,7 +69,14 @@ function recorder(reply: GhResult | (() => Promise<GhResult>) = { code: 0, stdou
   return {
     calls,
     runner: async (args, opts) => {
-      calls.push({ args, cwd: opts.cwd, timeoutMs: opts.timeoutMs });
+      const bodyFile = args[args.indexOf("--body-file") + 1];
+      calls.push({
+        args,
+        cwd: opts.cwd,
+        timeoutMs: opts.timeoutMs,
+        bodyFile,
+        body: fs.readFileSync(bodyFile, "utf8"),
+      });
       return typeof reply === "function" ? await reply() : reply;
     },
   };
@@ -211,36 +224,44 @@ test("#27: the executor is only ever handed `gh issue comment`", async () => {
   const args = rec.calls[0].args;
   assert.deepEqual(args.slice(0, 3), ["issue", "comment", "27"]);
   assert.deepEqual(args.slice(3, 5), ["--repo", "kckylechen1/Clanker"]);
-  assert.equal(args[5], "--body");
-  assert.equal(args.length, 7, "no argv beyond the body");
-  // No state-changing verb can be present at ANY position outside the body.
+  assert.equal(args[5], "--body-file");
+  assert.equal(args.length, 7, "no argv beyond the body file");
+  // The verdict is NOT in argv at all: it crosses a file boundary, so no
+  // process listing carries it and no ARG_MAX ceiling applies. (The operator's
+  // own `gh` wrapper refuses inline body text outright — exit 64 — which is how
+  // this was found: on the real binary, not against a fake.)
+  assert.ok(!args.some((a) => a.includes("VERDICT")), "worker text never reaches argv");
+  // No state-changing verb at ANY position.
   for (const [i, arg] of args.entries()) {
-    if (i === 6) continue; // the body is free-form worker output
     assert.ok(
       !["close", "reopen", "edit", "delete", "transfer", "pin", "lock", "--state"].includes(arg),
       `argv[${i}] = ${arg}`,
     );
   }
+  // And the staged body file does not outlive the call.
+  assert.equal(fs.existsSync(rec.calls[0].bodyFile), false, "the staged body is not left behind");
 });
 
 test("#27: a bare number carries no --repo and answers from the dispatch's own repo", async () => {
   const rec = recorder();
   await postIssueComment({ ref: parseIssueRef("27"), facts: facts(), cwd: os.tmpdir() }, { run: rec.runner });
   assert.deepEqual(rec.calls[0].args.slice(0, 3), ["issue", "comment", "27"]);
-  assert.equal(rec.calls[0].args[3], "--body");
+  assert.equal(rec.calls[0].args[3], "--body-file");
   assert.equal(rec.calls[0].cwd, os.tmpdir());
 });
 
 test("#27: any argv that is not a comment is refused in code, not only in review", () => {
   assert.throws(() => assertCommentOnlyArgs(["issue", "close", "27"]), /only `gh issue comment`/);
-  assert.throws(() => assertCommentOnlyArgs(["issue", "edit", "27", "--body", "x"]), /only `gh issue comment`/);
+  assert.throws(() => assertCommentOnlyArgs(["issue", "edit", "27", "--body-file", "f"]), /only `gh issue comment`/);
   assert.throws(() => assertCommentOnlyArgs(["pr", "merge", "36"]), /only `gh issue comment`/);
   assert.throws(() => assertCommentOnlyArgs(["issue", "comment", "27", "--state", "closed"]), /unexpected flag/);
   assert.throws(() => assertCommentOnlyArgs(["issue", "comment", "--repo"]), /must be a bare number/);
-  assert.throws(() => assertCommentOnlyArgs(["issue", "comment", "27", "--body"]), /has no value/);
+  assert.throws(() => assertCommentOnlyArgs(["issue", "comment", "27", "--body-file"]), /has no value/);
+  // Inline body text is not merely unused here, it is unreachable.
+  assert.throws(() => assertCommentOnlyArgs(["issue", "comment", "27", "--body", "hi"]), /unexpected flag/);
   // …and the legitimate shapes still pass.
-  assertCommentOnlyArgs(["issue", "comment", "27", "--body", "hi"]);
-  assertCommentOnlyArgs(["issue", "comment", "27", "--repo", "o/r", "--body", "hi"]);
+  assertCommentOnlyArgs(["issue", "comment", "27", "--body-file", "/tmp/b.md"]);
+  assertCommentOnlyArgs(["issue", "comment", "27", "--repo", "o/r", "--body-file", "/tmp/b.md"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -322,7 +343,7 @@ test("#27: the DEFAULT executor really runs `gh`, and a missing binary rejects",
   process.env.PATH = emptyDir;
   try {
     await assert.rejects(
-      () => execFileGhRunner(["issue", "comment", "27", "--body", "x"], { timeoutMs: 5_000 }),
+      () => execFileGhRunner(["issue", "comment", "27", "--body-file", "/dev/null"], { timeoutMs: 5_000 }),
       (error: NodeJS.ErrnoException) => {
         assert.equal(error.code, "ENOENT");
         assert.match(String(error.message), /gh/);
@@ -357,7 +378,7 @@ test("#27: a terminal run posts exactly one comment carrying its real telemetry"
     await until(() => m.status(id).status !== "running");
 
     assert.equal(rec.calls.length, 1, "one terminal turn, one comment");
-    const body = rec.calls[0].args.at(-1)!;
+    const body = rec.calls[0].body;
     // The fake agent echoes its prompt back as the final message, so the
     // verdict text is the discriminator between "quoted the run" and "invented
     // something plausible".
@@ -475,8 +496,8 @@ test("#27: the second terminal transition APPENDS a turn-2 comment carrying the 
   await run.completeTurn();
 
   assert.equal(rec.calls.length, 2, "the correction round is its own entry in the thread");
-  const one = rec.calls[0].args.at(-1)!;
-  const two = rec.calls[1].args.at(-1)!;
+  const one = rec.calls[0].body;
+  const two = rec.calls[1].body;
   assert.ok(one.includes("— done · turn 1"), one);
   assert.ok(two.includes("— done · turn 2"), two);
   assert.ok(two.includes("1 correction"), "and says it WAS a correction");
@@ -489,7 +510,7 @@ test("#27: the second terminal transition APPENDS a turn-2 comment carrying the 
   // Both name the same run, so the thread reads as one dispatch's history.
   for (const call of rec.calls) {
     assert.deepEqual(call.args.slice(0, 2), ["issue", "comment"]);
-    assert.ok(call.args.at(-1)!.includes("`oc-corrected`"));
+    assert.ok(call.body.includes("`oc-corrected`"));
   }
   run.closeStreams();
 });
@@ -512,8 +533,8 @@ test("#27: a corrected dispatch really files two comments end to end, turn 1 the
     await until(() => m.status(id).status !== "running");
 
     assert.equal(rec.calls.length, 2, "the correction round is its own entry in the thread");
-    const first = rec.calls[0].args.at(-1)!;
-    const second = rec.calls[1].args.at(-1)!;
+    const first = rec.calls[0].body;
+    const second = rec.calls[1].body;
     assert.ok(first.includes("· turn 1"), first);
     assert.ok(second.includes("· turn 2"), second);
     assert.ok(second.includes("1 correction"), "and says it WAS a correction");
@@ -549,7 +570,7 @@ test("#27: a cancelled run still files its account", async () => {
   run.beginTurn("do the thing");
   await run.cancelTurn();
   assert.equal(rec.calls.length, 1, "a cancellation is an outcome and belongs on the ticket");
-  assert.ok(rec.calls[0].args.at(-1)!.includes("— cancelled · turn 1"));
+  assert.ok(rec.calls[0].body.includes("— cancelled · turn 1"));
   run.closeStreams();
 });
 
