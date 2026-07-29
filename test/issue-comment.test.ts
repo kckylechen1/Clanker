@@ -189,6 +189,52 @@ test("#27: an over-long verdict is cut at the budget and SAYS it was cut", () =>
   assert.match(body, /result\.md/, "and points at the lossless artifact");
 });
 
+test("#27: malformed worker Markdown cannot swallow what the server says about it", () => {
+  // Landed by cold review: the truncation notice was appended INSIDE whatever
+  // Markdown context the worker's text left open. A verdict that opens an HTML
+  // comment or a fence therefore hides the notice, and a clipped verdict reads
+  // as a complete one — silent truncation wearing a different hat.
+  const budget = ISSUE_COMMENT_VERDICT_BUDGET;
+  for (const [name, verdict] of [
+    ["unclosed fence", "```\n" + "X".repeat(budget + 50)],
+    ["unclosed html comment", "<!-- " + "Y".repeat(budget + 50)],
+    ["nested fences", "````text\n```\n" + "Z".repeat(budget + 50)],
+  ] as const) {
+    const { body, truncated } = buildIssueCommentBody(facts({ finalMessage: verdict }));
+    assert.equal(truncated, true, name);
+    const lines = body.split("\n");
+    const open = lines.find((l) => /^`{3,}$/.test(l))!;
+    assert.ok(open, `${name}: the verdict must be fenced:\n${body}`);
+    assert.equal(
+      lines.filter((l) => l === open).length,
+      2,
+      `${name}: the server's fence appears exactly twice — worker fences are shorter and cannot close it:\n${body}`,
+    );
+
+    // The fence outruns every backtick run the worker wrote, so the worker's
+    // text cannot close the block early.
+    const longestInside = Math.max(...(verdict.match(/`+/g) ?? [""]).map((r) => r.length));
+    assert.ok(open.length > longestInside, `${name}: fence ${open.length} > longest run ${longestInside}`);
+
+    // What a RENDERER would keep inside the block — it closes at the first
+    // matching fence, so this is the assertion that the verdict cannot escape.
+    const openAt = lines.indexOf(open);
+    const closeAt = lines.indexOf(open, openAt + 1);
+    assert.equal(
+      lines.slice(openAt + 1, closeAt).join("\n"),
+      verdict.slice(0, budget),
+      `${name}: the whole (truncated) verdict stays inside the block`,
+    );
+
+    // And every word the SERVER says sits after the closing fence.
+    const close = closeAt;
+    const notice = lines.findIndex((l) => l.includes("truncated at"));
+    const pointer = lines.findIndex((l) => l.startsWith("run_dir "));
+    assert.ok(notice > close, `${name}: the truncation notice must be outside the fence:\n${body}`);
+    assert.ok(pointer > close, `${name}: so must the result.md pointer:\n${body}`);
+  }
+});
+
 test("#27: a run that died before speaking still files an account, labelled as the error", () => {
   const { body } = buildIssueCommentBody(
     facts({ status: "error", finalMessage: "", error: "lane process exited mid-turn (code=1 signal=null)" }),
@@ -785,6 +831,34 @@ test("mutation: without the truncation notice a clipped verdict reads as a whole
   );
   const { body } = mutant.buildIssueCommentBody(facts({ finalMessage: "X".repeat(ISSUE_COMMENT_VERDICT_BUDGET + 137) }));
   assert.doesNotMatch(body, /truncated at/, "the mutant clips in silence");
+});
+
+test("mutation: a fixed-length fence lets the worker close the block and eat the notice", async () => {
+  // The subtler half of the render-safety fix: fencing is not enough if the
+  // fence is a constant. A worker whose verdict contains ``` closes a
+  // three-backtick fence early, and everything the server appends lands back in
+  // worker-controlled Markdown — exactly where it was before.
+  const mutant = await loadMutantModule<typeof import("../src/issue-comment.js")>(
+    "issue-comment-fixed-fence",
+    [{
+      file: "issue-comment.ts",
+      find: '  return "`".repeat(Math.max(3, longest + 1));',
+      replace: '  void longest;\n  return "```";',
+    }],
+    "issue-comment.ts",
+  );
+  const verdict = "```\n" + "X".repeat(ISSUE_COMMENT_VERDICT_BUDGET + 50);
+  const { body } = mutant.buildIssueCommentBody(facts({ finalMessage: verdict }));
+  // A renderer closes the block at the FIRST matching fence, not at the one the
+  // server meant. So the honest measure is what actually stays inside.
+  const lines = body.split("\n");
+  const open = lines.indexOf("```");
+  const rendererCloses = lines.indexOf("```", open + 1);
+  const inside = lines.slice(open + 1, rendererCloses).join("\n");
+  assert.ok(
+    !inside.includes("X".repeat(50)),
+    "the mutant's block ends at the worker's own fence, so the verdict — and everything after it — escapes back into worker Markdown",
+  );
 });
 
 test("mutation: a dropped argv gate would let a state-changing subcommand through", async () => {

@@ -159,9 +159,25 @@ export interface BuiltComment {
  *
  * Layout is header / metrics / verdict / pointer, in that order, because a
  * reader scanning a long issue thread needs the identity and the outcome in the
- * first line and the evidence path in the last. The verdict sits BETWEEN them,
- * unprefixed and unquoted: a `> ` blockquote or a fenced block would be a
- * transformation of the very bytes this comment exists to reproduce.
+ * first line and the evidence path in the last.
+ *
+ * The verdict is FENCED, and that is a correction of this file's earlier
+ * reasoning rather than a preference. The original argument was that a fence is
+ * "a transformation of the very bytes this comment exists to reproduce" — which
+ * had it backwards: a fence changes no byte of the verdict, whereas leaving
+ * worker text in Markdown context lets it change OURS. The cold review landed
+ * the concrete trigger: a final message that opens `<!--` (or an unclosed ```)
+ * swallows everything the server appends after it, so the truncation notice,
+ * the redaction notice and the `result.md` pointer render invisibly — and a
+ * verdict that was cut at 3000 characters then reads to a human as the whole
+ * verdict. That is the same class of failure as silent truncation itself, which
+ * this module already refuses.
+ *
+ * The fence adapts: it is one backtick longer than the longest backtick run
+ * inside the verdict (minimum three), which is CommonMark's own rule for
+ * nesting fenced blocks, so no worker text can close it early. Everything the
+ * server says about the verdict goes strictly OUTSIDE that fence, where no
+ * amount of malformed Markdown can reach it.
  */
 export function buildIssueCommentBody(facts: IssueCommentFacts): BuiltComment {
   // An errored or cancelled turn frequently has no final message at all (the
@@ -192,12 +208,16 @@ export function buildIssueCommentBody(facts: IssueCommentFacts): BuiltComment {
     facts.corrections ? `${facts.corrections} correction${facts.corrections === 1 ? "" : "s"}` : undefined,
   ].filter(Boolean);
 
+  const verdict = head || "(the worker produced no final message)";
+  const fence = fenceFor(verdict);
   const lines = [
     `🤖 clanker \`${facts.runId}\` — ${facts.status} · turn ${facts.turn}`,
     metrics.join(" · "),
     "",
     ...(usingError ? ["error:"] : []),
-    head || "(the worker produced no final message)",
+    fence,
+    verdict,
+    fence,
     "",
   ];
   if (truncated) {
@@ -428,6 +448,19 @@ export async function postIssueComment(
       /* best-effort: a stranded temp body is not worth failing an account over */
     }
   }
+}
+
+/**
+ * A fence long enough that the text inside cannot close it: one backtick more
+ * than the longest run the text contains, never fewer than three. CommonMark
+ * closes a fenced block only on a run at least as long as the opener, which is
+ * exactly the property needed here — the worker writes the content, so the
+ * server must not let the content choose where the block ends.
+ */
+function fenceFor(text: string): string {
+  let longest = 0;
+  for (const run of text.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
+  return "`".repeat(Math.max(3, longest + 1));
 }
 
 /** `#41` or `owner/repo#41` — how a refusal names the ticket it could not reach. */
