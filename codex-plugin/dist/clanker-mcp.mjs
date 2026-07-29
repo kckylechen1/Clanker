@@ -6873,12 +6873,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs12, exportName) {
+    function addFormats(ajv, list, fs13, exportName) {
       var _a;
       var _b;
       (_a = (_b = ajv.opts.code).formats) !== null && _a !== void 0 ? _a : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs12[f]);
+        ajv.addFormat(f, fs13[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -27804,6 +27804,7 @@ function resolveCursorModel(model) {
   return CURSOR_MODEL_ALIASES[model.trim()] ?? model.trim();
 }
 var LANES_WITH_PINNED_WRITE_MODEL = /* @__PURE__ */ new Set(["codex", "cursor"]);
+var LANES_WITH_RESUME = /* @__PURE__ */ new Set(["cursor"]);
 var GLM_PROVIDER_PREFIX = `${OC_MODEL_ALIASES.glm.split("/", 1)[0]}/`;
 function isGlmModel(model) {
   const normalized = model?.trim().toLowerCase();
@@ -27819,7 +27820,7 @@ function envInt(name, fallback) {
 
 // src/manager.ts
 import crypto from "node:crypto";
-import fs10 from "node:fs";
+import fs11 from "node:fs";
 import path10 from "node:path";
 
 // src/acp-client.ts
@@ -31723,12 +31724,16 @@ function buildSpawnSpec(lane, opts, runDir) {
   if (opts.sandbox && !caps.sandbox) {
     warnings.push(`lane '${lane}' does not support sandbox override; ignoring sandbox='${opts.sandbox}'`);
   }
+  if (opts.resumeRef && !LANES_WITH_RESUME.has(lane)) {
+    warnings.push(`lane '${lane}' cannot resume a backend session; ignoring resumeRef='${opts.resumeRef}'`);
+  }
   switch (lane) {
     case "cursor": {
       const mode = opts.readOnly === true ? process.env.CLANKER_CURSOR_MODE?.trim() === "plan" ? "plan" : "ask" : "write";
       env.CLANKER_CURSOR_MODE = mode;
       env.CLANKER_CURSOR_MODEL = resolveCursorModel(opts.model) || DEFAULT_CURSOR_MODEL;
       env.CLANKER_CURSOR_AGENT_PATH = process.env.CLANKER_CURSOR_AGENT_PATH ?? resolveLocalBinPath("cursor-agent");
+      if (opts.resumeRef) env.CLANKER_CURSOR_RESUME = opts.resumeRef;
       if (process.env.CLANKER_CURSOR_PRINT_TIMEOUT) {
         env.CLANKER_CURSOR_PRINT_TIMEOUT = process.env.CLANKER_CURSOR_PRINT_TIMEOUT;
       }
@@ -31836,6 +31841,16 @@ import path7 from "node:path";
 // src/run.ts
 import fs6 from "node:fs";
 import path6 from "node:path";
+
+// src/lane-session.ts
+var LANE_SESSION_META_KEY = "clanker.lane_session";
+function laneSessionRefFrom(meta) {
+  const block = meta?.[LANE_SESSION_META_KEY];
+  if (block === null || typeof block !== "object") return void 0;
+  const ref = block.ref;
+  if (typeof ref !== "string") return void 0;
+  return ref.trim() || void 0;
+}
 
 // src/ledger.ts
 import fs5 from "node:fs";
@@ -31989,6 +32004,22 @@ var LaneRun = class {
   /** Set alongside `error` when the failure was classified (see failure-classifier.ts). */
   failureClass;
   sessionId;
+  /**
+   * The BACKEND's own conversation id for this run, when the lane reports one
+   * (#43) — see lane-session.ts for what it is and what it is not.
+   *
+   * Written by `observeLaneSession` from the lane-neutral `_meta` key on a
+   * session_info_update, read by manager.ts's resume path (which spawns the
+   * lane again carrying it) and surfaced as telemetry `lane_session_ref`.
+   * Undefined on every lane that reports none, which is every lane but cursor
+   * today — its absence is what makes a correction turn refuse rather than
+   * silently start a worker with no memory of the work it is being corrected
+   * about.
+   *
+   * NOT `sessionId` above: that one names the ACP session this process holds
+   * with the sidecar and dies with the subprocess.
+   */
+  laneSessionRef;
   worktreeRetained;
   cancellationRequested = false;
   terminalAt;
@@ -32009,6 +32040,13 @@ var LaneRun = class {
   sessionUsage;
   observedModel = null;
   observedEffort = null;
+  /**
+   * Model a resume turn re-spawned this run on (#43), when the correction named
+   * one. Overrides `requestOpts.model` in telemetry from that turn onward — see
+   * `telemetry()` for why reporting the dispatch's model there would be a lie
+   * with a siren attached.
+   */
+  resumeModel;
   /** Live worker identity (#32): pid — which is also its pgid — and the ms epoch it was spawned. */
   workerPid;
   workerStartedAt;
@@ -32137,6 +32175,45 @@ var LaneRun = class {
     this.writeResultFileOnce();
     this.writeLedgerRowOnce();
   }
+  /**
+   * Re-open a closed run for a backend-resume turn (#43).
+   *
+   * A lane that resumes from a backend-held conversation does NOT need this
+   * process's session to have survived — that is the whole difference from the
+   * supervised correction flow, whose window closes with the ACP session. What
+   * it does need is for the run's own bookkeeping to stop reading as finished:
+   *
+   *  - `sessionClosed` false again, so `beginTurn` does not short-circuit on
+   *    the terminal-and-closed guard and the forensic streams reopen (append
+   *    mode — nothing already written is lost).
+   *  - `turnStatus` running SYNCHRONOUSLY, before the respawn's handshake. A
+   *    correction that returned `done` while its worker was being spawned would
+   *    be read by the very next `clanker_wait` as "the correction already
+   *    finished", handing back the pre-correction verdict.
+   *  - `cancellationRequested` cleared, exactly as `beginTurn` does. Resuming a
+   *    run whose last turn was cancelled is legitimate (the conversation on the
+   *    backend's side is intact); leaving the flag set would abort the respawn
+   *    during setup and record it as another cancellation.
+   *  - `worktreeRetained` cleared, because it is recomputed by the next close.
+   *    A tree removed at that close would otherwise keep being reported as
+   *    retained at a path that no longer exists.
+   *
+   * `turnsCount`, `corrections`, the ledger-row flag and the digest are all
+   * left alone: this is the same dispatch continuing, and `beginTurn` owns the
+   * per-turn accounting.
+   */
+  reopenForResume() {
+    this.sessionClosed = false;
+    this.cancellationRequested = false;
+    this.worktreeRetained = void 0;
+    this.turnStatus = "running";
+    this.touch("resume_accepted");
+  }
+  /** Record the model a resume turn re-spawned on; see `resumeModel`. */
+  adoptResumeModel(model) {
+    this.resumeModel = model.trim() || void 0;
+    this.persistTelemetry();
+  }
   async markClosed() {
     if (this.sessionClosed) return;
     this.writeEvent({ t: "session_closed" });
@@ -32186,6 +32263,9 @@ var LaneRun = class {
       }
       case "config_option_update":
         this.observeConfigOptions(update.configOptions);
+        break;
+      case "session_info_update":
+        this.observeLaneSession(update._meta);
         break;
       case "usage_update":
         this.sessionUsage = {
@@ -32370,6 +32450,22 @@ var LaneRun = class {
     this.workerStartedAt = startedAt;
     this.persistTelemetry();
   }
+  /**
+   * Pick the backend's own conversation id out of a session_info_update's
+   * `_meta` and persist it (#43).
+   *
+   * Only ever ASSIGNS a ref, never clears one: `laneSessionRefFrom` returns
+   * undefined for an update that carries no (or a malformed) ref, and a
+   * resumed turn whose init event happened to omit the id would otherwise
+   * erase the very ref it was resumed from — leaving the run un-correctable
+   * for a reason that has nothing to do with the backend's real state.
+   */
+  observeLaneSession(meta) {
+    const ref = laneSessionRefFrom(meta);
+    if (!ref || ref === this.laneSessionRef) return;
+    this.laneSessionRef = ref;
+    this.persistTelemetry();
+  }
   observeConfigOptions(options) {
     for (const option of options ?? []) {
       if (option.category === "model") this.observedModel = String(option.currentValue);
@@ -32378,13 +32474,15 @@ var LaneRun = class {
     this.persistTelemetry();
   }
   telemetry() {
-    const resolved = this.lane === "opencode" ? resolveOcModel(this.requestOpts.model) ?? null : this.lane === "grok" ? this.requestOpts.model ?? "grok-4.5" : this.lane === "cursor" ? resolveCursorModel(this.requestOpts.model) || DEFAULT_CURSOR_MODEL : this.requestOpts.model ?? null;
+    const turnModel = this.resumeModel ?? this.requestOpts.model;
+    const resolved = this.lane === "opencode" ? resolveOcModel(turnModel) ?? null : this.lane === "grok" ? turnModel ?? "grok-4.5" : this.lane === "cursor" ? resolveCursorModel(turnModel) || DEFAULT_CURSOR_MODEL : turnModel ?? null;
     return {
       host: this.host,
       requested_lane: this.lane,
       actual_lane: this.lane,
-      requested_model: this.requestOpts.model,
+      requested_model: turnModel,
       resolved_model: resolved,
+      ...this.laneSessionRef !== void 0 ? { lane_session_ref: this.laneSessionRef } : {},
       observed_model: this.observedModel,
       requested_effort: this.requestOpts.effort,
       observed_effort: this.observedEffort,
@@ -33386,6 +33484,47 @@ function resolveProfileDispatch(input, env = process.env) {
   };
 }
 
+// src/resume.ts
+import fs9 from "node:fs";
+function laneCanResume(lane) {
+  return LANES_WITH_RESUME.has(lane);
+}
+function planResumeTurn(run, model) {
+  if (!laneCanResume(run.lane)) {
+    throw new Error(
+      `run '${run.id}' is on lane '${run.lane}', which has no backend resume capability`
+    );
+  }
+  const ref = run.laneSessionRef?.trim();
+  if (!ref) {
+    throw new Error(
+      `run '${run.id}' has no backend session ref recorded, so there is no conversation to resume \u2014 the lane never reported one (a turn that failed before the backend started never does). Report the blocker; a correction turn here would be a fresh worker with no memory of the work.`
+    );
+  }
+  if (!fs9.existsSync(run.cwd)) {
+    throw new Error(
+      `run '${run.id}' cannot take a resume turn: its working directory '${run.cwd}' no longer exists (a worktree with no changes is reclaimed when the run closes). Dispatch a fresh run instead.`
+    );
+  }
+  const requested = model?.trim();
+  if (requested !== void 0 && requested === "") {
+    throw new Error(`run '${run.id}': a resume turn's model override cannot be empty`);
+  }
+  return {
+    ref,
+    ...requested ? { model: requested } : {},
+    // The run's OWN options carry forward — above all `readOnly`, which is this
+    // lane's read/write boundary (backends.ts derives cursor's `--mode` from
+    // it). A correction turn re-spawns the same contract; it is not a second
+    // dispatch, and nothing here may widen what the first one was granted.
+    requestOpts: {
+      ...run.requestOpts,
+      ...requested ? { model: requested } : {},
+      resumeRef: ref
+    }
+  };
+}
+
 // src/host.ts
 var HOSTS = ["claude", "codex", "standalone"];
 var CODEX_LANES = LANE_NAMES.filter((lane) => lane !== "codex");
@@ -33412,7 +33551,7 @@ function hostLaneBlockedReason(host, lane) {
 
 // src/worktree.ts
 import { execFile } from "node:child_process";
-import fs9 from "node:fs";
+import fs10 from "node:fs";
 import path9 from "node:path";
 import { promisify } from "node:util";
 var exec = promisify(execFile);
@@ -33427,7 +33566,7 @@ function deriveWorktreePath(branch, runId) {
 }
 function readWorktreeOwner(worktreePath) {
   try {
-    const first = fs9.readFileSync(path9.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
+    const first = fs10.readFileSync(path9.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
     return first || null;
   } catch {
     return null;
@@ -33498,13 +33637,13 @@ async function headSha(cwd) {
 }
 async function createWorktree(branch, runId, targetRepo = BASE_REPO, base) {
   const wtPath = deriveWorktreePath(branch, runId);
-  if (fs9.existsSync(wtPath)) {
+  if (fs10.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
   const baseRef = base ?? await resolveBaseRef(targetRepo);
-  fs9.mkdirSync(WORKTREES_ROOT, { recursive: true });
+  fs10.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
-  fs9.writeFileSync(path9.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
+  fs10.writeFileSync(path9.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
 `);
   return wtPath;
 }
@@ -33550,7 +33689,7 @@ function realpathBestEffort(p) {
   const tail = [];
   for (; ; ) {
     try {
-      const real = fs9.realpathSync(cur);
+      const real = fs10.realpathSync(cur);
       return tail.length ? path9.join(real, ...tail) : real;
     } catch {
       const parent = path9.dirname(cur);
@@ -33586,7 +33725,7 @@ function matchDoNotTouch(patterns, files) {
   return violations;
 }
 async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runId) {
-  if (fs9.existsSync(worktreePath)) {
+  if (fs10.existsSync(worktreePath)) {
     const owner = readWorktreeOwner(worktreePath);
     if (!runId || owner !== runId) {
       console.error(
@@ -33606,13 +33745,13 @@ async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runI
   const markerPath = path9.join(worktreePath, OWNER_MARKER);
   const marker = (() => {
     try {
-      return fs9.readFileSync(markerPath, "utf8");
+      return fs10.readFileSync(markerPath, "utf8");
     } catch {
       return null;
     }
   })();
   try {
-    fs9.rmSync(markerPath, { force: true });
+    fs10.rmSync(markerPath, { force: true });
   } catch {
   }
   try {
@@ -33622,9 +33761,9 @@ async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runI
       await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
     }
   } catch (err) {
-    if (marker !== null && fs9.existsSync(worktreePath)) {
+    if (marker !== null && fs10.existsSync(worktreePath)) {
       try {
-        fs9.writeFileSync(markerPath, marker);
+        fs10.writeFileSync(markerPath, marker);
       } catch {
       }
     }
@@ -33719,11 +33858,11 @@ function writeTelemetryStub(runDir, stub) {
   const target = path10.join(runDir, "telemetry.json");
   const tmp = `${target}.${process.pid}.tmp`;
   try {
-    fs10.writeFileSync(tmp, JSON.stringify(stub, null, 2));
-    fs10.renameSync(tmp, target);
+    fs11.writeFileSync(tmp, JSON.stringify(stub, null, 2));
+    fs11.renameSync(tmp, target);
   } catch (error40) {
     try {
-      fs10.rmSync(tmp, { force: true });
+      fs11.rmSync(tmp, { force: true });
     } catch {
     }
     console.error(`[clanker] telemetry stub write failed for run dir '${runDir}': ${errMessage(error40)}`);
@@ -33844,7 +33983,7 @@ ${params.prompt}`;
     }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
     const runDir = path10.join(this.runsRoot, id);
-    fs10.mkdirSync(runDir, { recursive: true });
+    fs11.mkdirSync(runDir, { recursive: true });
     const stub = {
       host: this.host,
       lane: params.lane,
@@ -33957,30 +34096,41 @@ ${params.prompt}`;
     await this.attemptInitialTurn(run, spec, prompt, 1);
   }
   /**
-   * Run another turn on a session that is still open — the supervised
-   * correction ("严父") flow.
+   * Run another turn on a job that already came back — the correction ("严父")
+   * flow, in whichever of its two shapes this run's lane supports.
    *
-   * This is turn-by-turn supervision, NOT mid-flight steering: ACP has no way
-   * to redirect a prompt already in progress, so a correction is a new turn
-   * issued after the previous one came back. The window is bounded by the
-   * idle-TTL reaper, which closes a finished session after `sessionTtlMs` —
-   * miss it and the only honest answer is that the session is gone, not a
-   * silently respawned worker with no memory of what it was corrected about.
+   * Both shapes are turn-by-turn supervision, NOT mid-flight steering: ACP has
+   * no way to redirect a prompt already in progress, so a correction is a new
+   * turn issued after the previous one came back.
    *
-   * The capability is checked against the REGISTRY ROW that minted the run
-   * (`run.supervised`), not against which tool the caller holds. Holding
-   * `clanker_prompt` is necessary but not sufficient: an unsupervised profile
-   * refuses the correction server-side, so the narrow-tool property survives a
-   * seat file that drifts.
+   *  1. LIVE SESSION (the original, supervised-only). The ACP session outlived
+   *     its terminal turn and the worker still holds its context in memory, so
+   *     the correction is one more prompt on that session. The window is
+   *     bounded by the idle-TTL reaper, which closes a finished session after
+   *     `sessionTtlMs` — miss it and the only honest answer is that the session
+   *     is gone, not a silently respawned worker with no memory of what it was
+   *     corrected about. The capability is checked against the REGISTRY ROW
+   *     that minted the run (`run.supervised`), not against which tool the
+   *     caller holds: holding `clanker_prompt` is necessary but not sufficient,
+   *     so the narrow-tool property survives a seat file that drifts.
+   *  2. BACKEND RESUME (#43, lanes in LANES_WITH_RESUME). The context lives on
+   *     the lane's own side, keyed by the session ref it reported, so the
+   *     correction is a fresh spawn carrying that ref — and may run a different
+   *     `model` than the turn before it. Supervision does not gate this shape,
+   *     because the property supervision protects is not the one at stake: a
+   *     GLM write's danger is an unsupervised WRITE, which is already gated at
+   *     dispatch and is not widened here (the respawn inherits the run's own
+   *     readOnly and worktree, see resume.ts). What it does need is a ref and a
+   *     directory that still exists; without either it refuses.
+   *
+   * The lane's shape is decided by the capability table, never by which one
+   * happens to be reachable: a resume-capable lane always takes path 2, because
+   * path 1 on a lane whose worker is a one-shot CLI would prompt a process that
+   * has no memory of the previous turn at all.
    */
-  async promptExisting(id, prompt, correction = false) {
+  async promptExisting(id, prompt, correction = false, model) {
     const run = this.runs.get(id);
     if (!run) this.throwUnknownRun(id);
-    if (!run.supervised) {
-      throw new Error(
-        `run '${id}' was not started from a supervised profile, so it takes no correction turn (only the supervised shape accepts one \u2014 see profiles.ts supervision)`
-      );
-    }
     if (this.shuttingDown) {
       throw new Error(`Clanker manager is shutting down; refusing a correction turn for '${id}'`);
     }
@@ -33992,6 +34142,20 @@ ${params.prompt}`;
     if (run.turnStatus === "running" || this.turnDrives.has(id)) {
       throw new Error(`a turn is already running for '${id}'; wait for it to reach a terminal state first`);
     }
+    const turnPrompt = run.readOnly ? prompt : `${WRITE_DISCIPLINE_PREFIX}
+
+${prompt}`;
+    if (laneCanResume(run.lane)) return this.startResumeTurn(run, turnPrompt, correction, model);
+    if (model !== void 0) {
+      throw new Error(
+        `run '${id}' is on lane '${run.lane}', whose correction turn continues a LIVE session \u2014 the model was fixed when that session was spawned and cannot be swapped mid-session. Only a lane that resumes from a backend session ref can hand the next turn to another model.`
+      );
+    }
+    if (!run.supervised) {
+      throw new Error(
+        `run '${id}' was not started from a supervised profile, so it takes no correction turn (only the supervised shape accepts one \u2014 see profiles.ts supervision)`
+      );
+    }
     if (run.sessionClosed) throw new Error(`session for '${id}' is already closed`);
     const conn = this.connections.get(id);
     if (!conn) {
@@ -33999,12 +34163,34 @@ ${params.prompt}`;
         `session for '${id}' is gone \u2014 a finished session is closed by the idle-TTL reaper after ${this.sessionTtlMs}ms (CLANKER_SESSION_TTL_MS). The worker cannot be corrected; report the blocker instead of starting a fresh dispatch on your own.`
       );
     }
-    const turnPrompt = run.readOnly ? prompt : `${WRITE_DISCIPLINE_PREFIX}
-
-${prompt}`;
     const drive = this.driveContinuation(run, conn, turnPrompt, correction);
     this.trackDrive(id, drive);
     return { id, status: run.turnStatus };
+  }
+  /**
+   * The backend-resume correction turn (#43): plan it, build the respawn, and
+   * drive it as this run's next turn.
+   *
+   * The plan is computed and the spec resolved BEFORE anything on the run is
+   * touched, so a refusal (no ref, worktree already reclaimed, a lane gate
+   * inside resolveSpec) leaves the run exactly as terminal as it was — the
+   * caller gets an error and not a job that says "running" forever.
+   *
+   * The drive itself is `attemptInitialTurn`, unchanged: a resume turn IS a
+   * fresh spawn of the lane, so connect/handshake/first-turn/capacity-retry are
+   * the same code path a dispatch takes. Only the accounting differs, which is
+   * the `correction` flag it now forwards to runTurn.
+   */
+  startResumeTurn(run, turnPrompt, correction, model) {
+    const plan = planResumeTurn(run, model);
+    const spec = this.resolveSpec(run.lane, plan.requestOpts, run.runDir);
+    if (spec.warnings.length > 0) {
+      this.warningsById.set(run.id, dedupe([...this.warningsById.get(run.id) ?? [], ...spec.warnings]));
+    }
+    if (plan.model) run.adoptResumeModel(plan.model);
+    run.reopenForResume();
+    this.trackDrive(run.id, this.attemptInitialTurn(run, spec, turnPrompt, 1, correction));
+    return { id: run.id, status: run.turnStatus };
   }
   async driveContinuation(run, conn, prompt, correction) {
     const outcome = await this.runTurn(run, conn, prompt, correction);
@@ -34050,8 +34236,13 @@ ${prompt}`;
    * rejected its shape wastes a turn and hides the real signal (2026-07-13
    * incident: exactly that class was hand-retried 3 times before anyone
    * noticed). Retry scope is intentionally limited to the job's first turn.
+   *
+   * Also drives a backend-resume correction turn (#43), which is a fresh spawn
+   * of the lane in every respect that matters here — hence `correction`, the
+   * one thing that differs: it reaches `runTurn` so the turn is counted as a
+   * correction rather than as another dispatch's first turn.
    */
-  async attemptInitialTurn(run, spec, prompt, attempt) {
+  async attemptInitialTurn(run, spec, prompt, attempt, correction = false) {
     if (run.cancellationRequested || this.shuttingDown) {
       await this.abortDuringSetup(run);
       return;
@@ -34081,7 +34272,7 @@ ${prompt}`;
       const message = errMessage(e);
       if (attempt === 1 && isCapacityTransient(message)) {
         await this.retryAfterBackoff(run, message, attempt + 1);
-        return this.attemptInitialTurn(run, spec, prompt, attempt + 1);
+        return this.attemptInitialTurn(run, spec, prompt, attempt + 1, correction);
       }
       await this.computeTouched(run);
       await this.close(run.id);
@@ -34097,7 +34288,7 @@ ${prompt}`;
     this.connections.set(run.id, conn);
     run.sessionId = conn.sessionId;
     run.observeConfigOptions(conn.session.newSessionResponse.configOptions);
-    const outcome = await this.runTurn(run, conn, prompt);
+    const outcome = await this.runTurn(run, conn, prompt, correction);
     if (run.cancellationRequested) {
       await this.close(run.id);
       run.cancelTurn();
@@ -34113,7 +34304,7 @@ ${prompt}`;
     if (attempt === 1 && failureClass === void 0 && isCapacityTransient(outcome.message)) {
       await this.killConnection(run.id);
       await this.retryAfterBackoff(run, outcome.message, attempt + 1);
-      return this.attemptInitialTurn(run, spec, prompt, attempt + 1);
+      return this.attemptInitialTurn(run, spec, prompt, attempt + 1, correction);
     }
     await this.computeTouched(run);
     await this.close(run.id);
@@ -34303,7 +34494,7 @@ ${grokDetail}` : "";
     if (foreign.result_path) {
       result.result_path = foreign.result_path;
       try {
-        result.result_bytes = fs10.statSync(foreign.result_path).size;
+        result.result_bytes = fs11.statSync(foreign.result_path).size;
       } catch {
       }
     }
@@ -34590,7 +34781,7 @@ ${grokDetail}` : "";
       ];
       return;
     }
-    if (!fs10.existsSync(run.worktreePath)) {
+    if (!fs11.existsSync(run.worktreePath)) {
       run.contractViolations = [
         { pattern: "(validation-failed)", files: [`worktree path '${run.worktreePath}' no longer exists`] }
       ];
@@ -34819,17 +35010,20 @@ function registerTools(server, manager) {
     }
   });
   server.registerTool("clanker_prompt", {
-    title: "Send a correction turn to a supervised Clanker job",
-    description: "Run another turn on a job whose session is still open \u2014 the supervised correction flow. This is turn-by-turn supervision, not mid-flight steering: issue it only after the previous turn has come back terminal, then poll the same id with clanker_wait. Refused when the job did not come from a supervised profile, when a turn is still running, or once the idle-TTL reaper has closed the session. The run keeps its id, its worktree and its single ledger row; result.md is rewritten with the corrected turn's verdict.",
+    title: "Send a correction turn to a Clanker job",
+    description: "Run another turn on a job that already came back terminal. This is turn-by-turn supervision, not mid-flight steering: issue it only after the previous turn has come back terminal, then poll the same id with clanker_wait. Two shapes, chosen by the job's lane: a supervised job continues its still-open session (refused once the idle-TTL reaper closed it, or if the profile was not supervised); a cursor job is re-spawned against the conversation Cursor itself holds, which stays correctable after the session closed and accepts an optional `model` so the next turn runs on another model. Either way the run keeps its id, its worktree and its single ledger row, and result.md is rewritten with the corrected turn's verdict. A hand-off is CONTINUATION, never review: the resumed model reads the previous turn's whole context and is anchored by it, so verification still requires a separately dispatched cold-context job.",
     inputSchema: {
       id: external_exports.string(),
       prompt: external_exports.string().min(1),
-      correction: external_exports.boolean().optional()
+      correction: external_exports.boolean().optional(),
+      model: external_exports.string().trim().min(1).optional().describe(
+        "Optional model (id or lane alias) for this turn \u2014 only on a lane that resumes a backend session (cursor). Omit to keep the model the job is already running."
+      )
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
   }, async (args) => {
     try {
-      return ok(await manager.promptExisting(args.id, args.prompt, args.correction ?? false));
+      return ok(await manager.promptExisting(args.id, args.prompt, args.correction ?? false, args.model));
     } catch (error40) {
       return fail(error40);
     }
@@ -34864,7 +35058,7 @@ function registerTools(server, manager) {
 }
 
 // src/retention.ts
-import fs11 from "node:fs";
+import fs12 from "node:fs";
 import path11 from "node:path";
 function sweepRunStreams(options = {}) {
   const runsRoot = options.runsRoot ?? RUNS_ROOT;
@@ -34874,7 +35068,7 @@ function sweepRunStreams(options = {}) {
   if (!(ttlMs > 0)) return report;
   let entries;
   try {
-    entries = fs11.readdirSync(runsRoot, { withFileTypes: true });
+    entries = fs12.readdirSync(runsRoot, { withFileTypes: true });
   } catch {
     return report;
   }
@@ -34888,7 +35082,7 @@ function sweepRunStreams(options = {}) {
       const file2 = path11.join(runDir, name);
       let stat;
       try {
-        stat = fs11.statSync(file2);
+        stat = fs12.statSync(file2);
       } catch {
         continue;
       }
@@ -34901,7 +35095,7 @@ function sweepRunStreams(options = {}) {
     let swept = 0;
     for (const stream of streams) {
       try {
-        fs11.rmSync(stream.file);
+        fs12.rmSync(stream.file);
         report.sweptFiles++;
         report.bytesFreed += stream.size;
         swept++;
@@ -34918,14 +35112,14 @@ function sweepRunStreams(options = {}) {
 }
 function isEmptyDir(dir) {
   try {
-    return fs11.readdirSync(dir).length === 0;
+    return fs12.readdirSync(dir).length === 0;
   } catch {
     return false;
   }
 }
 function removeDir(dir) {
   try {
-    fs11.rmdirSync(dir);
+    fs12.rmdirSync(dir);
     return true;
   } catch {
     return false;

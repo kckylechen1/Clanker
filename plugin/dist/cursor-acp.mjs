@@ -14504,6 +14504,12 @@ var legacyClientNotificationMethods = /* @__PURE__ */ new Set([
   CLIENT_METHODS.elicitation_complete
 ]);
 
+// src/lane-session.ts
+var LANE_SESSION_META_KEY = "clanker.lane_session";
+function laneSessionMeta(ref) {
+  return { [LANE_SESSION_META_KEY]: { ref } };
+}
+
 // src/cursor-acp.ts
 var REVIEW_ROLE_PREFIX = [
   "You are Clanker: Cursor, a read-only review and reconnaissance lane.",
@@ -14526,6 +14532,9 @@ function rolePrefix(mode) {
 }
 function activeModel() {
   return process.env.CLANKER_CURSOR_MODEL?.trim() || DEFAULT_CURSOR_MODEL;
+}
+function activeResumeRef() {
+  return process.env.CLANKER_CURSOR_RESUME?.trim() || void 0;
 }
 var DEFAULT_PRINT_TIMEOUT_MS = {
   ask: 6e5,
@@ -14551,13 +14560,13 @@ function printTimeoutMs(mode) {
   const override = process.env.CLANKER_CURSOR_PRINT_TIMEOUT?.trim();
   return override ? parseDurationMs(override) : DEFAULT_PRINT_TIMEOUT_MS[mode];
 }
-function cursorArgs(mode, model, prompt) {
-  if (model.startsWith("-")) {
-    throw new Error(
-      `Clanker: Cursor model '${model}' starts with '-' and would reach cursor-agent as a flag, not as the value of --model; refusing (the read-only argv is this lane's write boundary)`
-    );
-  }
+function cursorArgs(mode, model, prompt, resumeRef) {
+  refuseFlagShapedToken("model", model, "--model");
   const args = ["--print", "--output-format", "stream-json", "--stream-partial-output", "--model", model];
+  if (resumeRef !== void 0) {
+    refuseFlagShapedToken("resume ref", resumeRef, "--resume");
+    args.push("--resume", resumeRef);
+  }
   if (mode === "write") {
     args.push("--force", "--trust");
   } else {
@@ -14568,6 +14577,12 @@ function cursorArgs(mode, model, prompt) {
 Task:
 ${prompt}`);
   return args;
+}
+function refuseFlagShapedToken(label, value, flag) {
+  if (!value.startsWith("-")) return;
+  throw new Error(
+    `Clanker: Cursor ${label} '${value}' starts with '-' and would reach cursor-agent as a flag, not as the value of ${flag}; refusing (the read-only argv is this lane's write boundary)`
+  );
 }
 function selectOption(id, name, category, value) {
   return { id, name, category, type: "select", currentValue: value, options: [{ value, name: value }] };
@@ -14671,7 +14686,8 @@ var TurnProjection = class {
           reported_model: event.model,
           permission_mode: event.permissionMode,
           api_key_source: event.apiKeySource
-        }
+        },
+        ...laneSessionMeta(event.session_id)
       }
     });
   }
@@ -14746,7 +14762,8 @@ var TurnProjection = class {
           request_id: event.request_id,
           duration_ms: event.duration_ms,
           subtype: event.subtype
-        }
+        },
+        ...laneSessionMeta(event.session_id)
       }
     });
   }
@@ -14787,7 +14804,7 @@ function runCursor(sessionId, session, prompt, emit) {
   const mode = activeMode();
   const model = activeModel();
   const timeoutMs = printTimeoutMs(mode);
-  const args = cursorArgs(mode, model, prompt);
+  const args = cursorArgs(mode, model, prompt, activeResumeRef());
   const command = process.env.CLANKER_CURSOR_AGENT_PATH || "cursor-agent";
   const childEnv = { ...process.env };
   delete childEnv.CURSOR_API_KEY;
