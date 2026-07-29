@@ -27761,7 +27761,7 @@ var RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 864e5;
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.4.3";
+var SERVER_VERSION = "0.4.4";
 var DEFAULT_CODEX_MODEL = "gpt-5.5";
 var DEFAULT_CODEX_EFFORT = "xhigh";
 var WRITE_DISCIPLINE_PREFIX = `Workspace discipline, enforced by the dispatching contract \u2014 these override any
@@ -28192,12 +28192,6 @@ import path7 from "node:path";
 import fs6 from "node:fs";
 import path6 from "node:path";
 
-// src/issue-comment.ts
-import { execFile } from "node:child_process";
-import fs4 from "node:fs";
-import os4 from "node:os";
-import path4 from "node:path";
-
 // src/failure-classifier.ts
 var INFRA_FAILURE_TAG = "CLANKER-INFRA-FAILURE";
 var INFRA_FAILURE_ADVISORY = "infra \u5C42\u6545\u969C\uFF0C\u91CD\u8BD5\u65E0\u76CA\uFF1B\u5148\u8DD1 `npm run smoke -- <lane>` \u590D\u9A8C\u8F66\u9053\u5065\u5EB7\uFF0C\u518D\u51B3\u5B9A\u662F\u5426\u91CD\u6D3E\u3002";
@@ -28262,6 +28256,35 @@ function classifyBackendFailure(message) {
   if (ENV_DRIFT_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   return void 0;
 }
+var VENDOR_REFUSAL_TAG = "CLANKER-VENDOR-REFUSAL";
+var VENDOR_REFUSAL_ADVISORY = "\u8BE5 lane \u7684 vendor \u7528\u5B89\u5168/\u653F\u7B56\u62D2\u7EDD\u9875\u66FF\u4EE3\u4E86\u672C\u8F6E\u4EA7\u51FA\uFF1A\u8FD9\u4E00\u5355\u6CA1\u6709\u4EA7\u751F\u5224\u51B3\uFF0Cread result.md \u770B\u62D2\u7EDD\u9875\u539F\u6587\u3002\u91CD\u6D3E\u540C\u4E00 prompt \u5230\u540C\u4E00 vendor \u65E0\u7528\uFF1B\u6539\u6D3E\u5F02\u5382\u6216\u6539\u5199 prompt\u3002";
+var VENDOR_REFUSAL_PATTERNS = [
+  // OpenAI's cyber-policy interstitial, verbatim from run codex-45fd0.
+  /\bflagged for possible cybersecurity risk\b/i,
+  /\bTrusted Access for Cyber\b/i,
+  // Gemini's shape, from run gemini-b3dc1: a first-person refusal to do the
+  // job. Generalized only along the axis the two vendors already differ on —
+  // which verb follows — because the sentence frame ("I <cannot> <do the
+  // work>") is what a refusal IS, while `flagged for possible cybersecurity
+  // risk` is one vendor's wording for it.
+  /\bI (?:cannot|can(?:no|')?t|am unable to|'m unable to|will not|won'?t) (?:fulfill|comply with|assist|help|complete|carry out|proceed with|perform|conduct|provide|do)\b/i,
+  /\bI (?:must|have to|will) (?:decline|refuse)\b/i
+];
+var VENDOR_REFUSAL_HEAD_CHARS = 200;
+var VENDOR_REFUSAL_MAX_CHARS = 600;
+function classifyVendorRefusal(finalMessage) {
+  const text = finalMessage.trim();
+  if (text.length === 0 || text.length > VENDOR_REFUSAL_MAX_CHARS) return void 0;
+  const head = text.slice(0, VENDOR_REFUSAL_HEAD_CHARS);
+  if (VENDOR_REFUSAL_PATTERNS.some((re) => re.test(head))) return VENDOR_REFUSAL_TAG;
+  return void 0;
+}
+
+// src/issue-comment.ts
+import { execFile } from "node:child_process";
+import fs4 from "node:fs";
+import os4 from "node:os";
+import path4 from "node:path";
 
 // src/util.ts
 function errMessage(e) {
@@ -28971,9 +28994,16 @@ var LaneRun = class {
    */
   async completeTurn() {
     if (this.isTerminalTurn()) return;
+    const finalMessage = this.currentTurnMessage.trim();
+    const refusal = classifyVendorRefusal(finalMessage);
+    if (refusal) {
+      this.lastFinalMessage = finalMessage;
+      await this.failTurn(VENDOR_REFUSAL_ADVISORY, refusal);
+      return;
+    }
     this.flushMessageDigest();
     this.turnStatus = "done";
-    this.lastFinalMessage = this.currentTurnMessage.trim();
+    this.lastFinalMessage = finalMessage;
     this.idleSince = Date.now();
     this.pushDigest(`\u2713 turn ${this.turnsCount} done (${this.toolCallCount} tools)`, true);
     this.writeEvent({ t: "turn_done", turn: this.turnsCount, stopReason: "end_turn" });
