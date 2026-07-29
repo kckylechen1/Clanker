@@ -255,7 +255,39 @@ function looksRandom(span: string, requireDigitOrNoWord: boolean): boolean {
  * name table, and do not let this comment drift into claiming full coverage.
  */
 const AUTH_HEADER =
-  /\b((?:proxy-)?authorization)(["']?[ \t]*[:=][ \t]*["']?)([A-Za-z][A-Za-z0-9._-]*)([ \t]+)[^\r\n'"`]+/gi;
+  /(["'`]?)\b((?:proxy-)?authorization)(["']?[ \t]*[:=][ \t]*["']?)([A-Za-z][A-Za-z0-9._-]*)([ \t]+)([^\r\n]+)/gi;
+/**
+ * Where the credentials end, which is the one thing about this header that
+ * cannot be read off the header alone — it depends on what the header is
+ * EMBEDDED in, and the third cold review landed both halves of that:
+ *
+ *  - A header quoted inside something else — `curl -H 'Authorization: Basic
+ *    …'`, `{"Authorization": "Basic …"}`, or a verdict quoting one in
+ *    backticks — ends at the closing quote. Eating past it swallows the rest of
+ *    the command line, which is evidence, not credential.
+ *  - A BARE header runs to end of line, auth-params and all. This is the half
+ *    that was wrong: excluding quotes from the credential class (done for the
+ *    curl case) made `Authorization: Digest username="alice", …,
+ *    response="deadbeefcafe1234"` stop at the first quote and publish the
+ *    response hash — a 16-hex digest that no blob rule is going to catch
+ *    either. RFC 9110 credentials are token68 OR a comma-separated auth-param
+ *    list; the list is exactly the shape that carries quotes.
+ *
+ * So the delimiter is decided by the character immediately BEFORE the header
+ * name, and only when that same character reappears later on the line — i.e.
+ * the header really is wrapped in a pair. Otherwise the credentials own the
+ * rest of the line.
+ */
+function authCredentialEnd(rest: string, wrapper: string): number {
+  if (wrapper === "") return rest.length;
+  // An ESCAPED wrapper is not the wrapper: `curl -H "Authorization: Digest
+  // response=\"…\""` puts the same character inside the credentials, and
+  // stopping at the first one republishes the digest.
+  for (let i = rest.indexOf(wrapper); i !== -1; i = rest.indexOf(wrapper, i + 1)) {
+    if (i === 0 || rest[i - 1] !== "\\") return i;
+  }
+  return rest.length;
+}
 /**
  * Where a matched header is parked while the other rules run.
  *
@@ -270,10 +302,16 @@ const AUTH_HEADER =
 const AUTH_PARK = /\[\[clanker-auth-(\d+)\]\]/g;
 export function redactForPublic(text: string): string {
   const parked: string[] = [];
-  let out = text.replace(AUTH_HEADER, (_m, name: string, sep: string, scheme: string, gap: string) => {
-    parked.push(`${name}${sep}${scheme}${gap}[REDACTED]`);
-    return `[[clanker-auth-${parked.length - 1}]]`;
-  });
+  let out = text.replace(
+    AUTH_HEADER,
+    (_m, wrapper: string, name: string, sep: string, scheme: string, gap: string, rest: string) => {
+      // Whatever follows the credentials — the closing quote and the rest of
+      // the command line — is not ours to eat.
+      const tail = rest.slice(authCredentialEnd(rest, wrapper));
+      parked.push(`${name}${sep}${scheme}${gap}[REDACTED]`);
+      return `${wrapper}[[clanker-auth-${parked.length - 1}]]${tail}`;
+    },
+  );
   out = redact(out);
   for (const { re, replace } of PUBLIC_SECRET_RULES) out = out.replace(re, replace);
   out = out.replace(PUBLIC_HEX_BLOB, (m) => (GIT_SHA.test(m) ? m : "[REDACTED]"));

@@ -292,6 +292,36 @@ test("#27: an auth header is redacted by its STRUCTURE, whatever the scheme is c
     assert.ok(out.includes(scheme), `the scheme must survive as evidence: ${out}`);
     assert.ok(out.includes("[REDACTED]"), out);
   }
+  // Where the credentials END depends on what the header is embedded in, and
+  // both halves were landed by cold review. A BARE header runs to end of line,
+  // auth-params and all: excluding quotes (which the curl case below needs)
+  // made `Digest username="alice", …, response="<hash>"` stop at the first
+  // quote and publish the response hash — 16 hex, which no blob rule catches.
+  for (const [line, secret] of [
+    ['Authorization: Digest username="alice", realm="private", response="deadbeefcafe1234"', "deadbeefcafe1234"],
+    ['Authorization: Signature keyId="k1",signature="c2lnbmF0dXJl"', "c2lnbmF0dXJl"],
+  ] as const) {
+    const out = redactForPublic(line);
+    assert.ok(!out.includes(secret), `auth-param credential survived:\n${out}`);
+    assert.ok(!out.includes("alice") || !out.includes("realm"), `the auth-param list must not be left behind:\n${out}`);
+  }
+  // …while a WRAPPED header stops at its wrapper, because everything after it
+  // is the caller's command line, which is evidence rather than credential.
+  const wrapped: [string, string, string][] = [
+    [`curl -H 'Authorization: Basic ${basic}' https://api.example.com`, basic, "https://api.example.com"],
+    [`{"Authorization": "Basic ${basic}", "Accept": "application/json"}`, basic, '"Accept": "application/json"'],
+    ["the header `Authorization: Bearer ghp_short123` is built in src/foo.ts:12", "ghp_short123", "src/foo.ts:12"],
+    // An ESCAPED wrapper is not the wrapper — otherwise the digest below is
+    // republished by the very rule that is supposed to eat it.
+    ['curl -H "Authorization: Digest response=\\"deadbeefcafe1234\\"" https://api.example.com',
+      "deadbeefcafe1234", "https://api.example.com"],
+  ];
+  for (const [line, secret, keep] of wrapped) {
+    const out = redactForPublic(line);
+    assert.ok(!out.includes(secret), `credential survived a wrapped header:\n${out}`);
+    assert.ok(out.includes(keep), `the rule ate past its wrapper and took evidence with it:\n${out}`);
+  }
+
   // Prose about the header is not a header.
   for (const prose of [
     "Authorization header is missing from the request",
@@ -1016,18 +1046,33 @@ test("mutation: a scheme-name list instead of the header's structure lets `Basic
     "util-scheme-list",
     [{
       file: "util.ts",
-      find:
-        "const AUTH_HEADER =\n" +
-        "  /\\b((?:proxy-)?authorization)([\"']?[ \\t]*[:=][ \\t]*[\"']?)([A-Za-z][A-Za-z0-9._-]*)([ \\t]+)[^\\r\\n'\"`]+/gi;",
-      replace:
-        "const AUTH_HEADER =\n" +
-        "  /\\b((?:proxy-)?authorization)([\"']?[ \\t]*[:=][ \\t]*[\"']?)(bearer|token)([ \\t]+)[^\\r\\n'\"`]+/gi;",
+      // Only the SCHEME group is swapped for a name list; everything else about
+      // the rule is left intact, so what the assertion below discriminates is
+      // structure-vs-list and nothing else.
+      find: "([A-Za-z][A-Za-z0-9._-]*)([ \\t]+)([^\\r\\n]+)/gi;",
+      replace: "(bearer|token)([ \\t]+)([^\\r\\n]+)/gi;",
     }],
     "util.ts",
   );
   const basic = Buffer.from("user:hunter2").toString("base64");
   const out = mutant.redactForPublic(`Authorization: Basic ${basic}`);
   assert.ok(out.includes(basic), `the mutant republishes the credential: ${out}`);
+});
+
+test("mutation: credentials that stop at the first quote republish the auth-param they were meant to eat", async () => {
+  // The shipped shape: quotes excluded from the credential class, which is
+  // right for `curl -H '…'` and wrong for every quoted auth-param list.
+  const mutant = await loadMutantModule<typeof import("../src/util.js")>(
+    "util-quote-stops-credentials",
+    [{
+      file: "util.ts",
+      find: "  if (wrapper === \"\") return rest.length;",
+      replace: "  if (wrapper === \"\") wrapper = '\"';",
+    }],
+    "util.ts",
+  );
+  const out = mutant.redactForPublic('Authorization: Digest username="alice", response="deadbeefcafe1234"');
+  assert.ok(out.includes("deadbeefcafe1234"), `the mutant leaves the response hash in the comment: ${out}`);
 });
 
 test("mutation: a summarizing body stops carrying the verdict verbatim", async () => {
