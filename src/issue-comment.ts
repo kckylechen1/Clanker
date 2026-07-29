@@ -266,16 +266,30 @@ export function issueCommentArgs(ref: IssueRef, bodyFile: string): string[] {
 }
 
 /**
- * Refuse any argv that is not exactly a comment.
+ * Refuse any argv whose SHAPE is not `gh issue comment <n> [--repo R]
+ * --body-file F`.
  *
  * This is a code gate rather than a test-only assertion on purpose. "The server
  * only comments, it never closes" is a promise about behaviour under future
  * edits, and the only version of that promise that survives an edit is one the
  * code itself checks. A denylist of dangerous subcommands would not do — so the
  * shape is validated structurally instead: fixed head, then flag/value pairs
- * drawn from a two-entry allowlist. Note that no argv position here can carry
- * worker text at all (the body travels as a file), so the gate never has to
- * make an exception for free-form content.
+ * drawn from a two-entry allowlist. No argv position here can carry worker text
+ * at all (the body travels as a file), so the gate never has to make an
+ * exception for free-form content.
+ *
+ * WHAT THIS GATE DOES NOT PROMISE, stated plainly because a second cold review
+ * read the older wording as a stronger claim than the code makes: it validates
+ * ARGV, not the filesystem. `--body-file` is checked for being present, unique
+ * and not flag-shaped; it is NOT checked for pointing at a finite, readable,
+ * regular file, so a caller that passed `/dev/zero`, a FIFO or a directory
+ * would get whatever `gh` does with those (a hang, or an error) rather than a
+ * refusal here. That is deliberate on two counts: a stat before the spawn is a
+ * TOCTOU check that proves nothing about the file `gh` will actually open, and
+ * "is this path sane" is the caller's job, not the shape gate's. The one
+ * production caller is `postIssueComment`, which passes only a path it just
+ * created with `mkdtempSync` and wrote itself, and deletes it in the same
+ * function. A gate may be narrow; it may not overstate.
  */
 export function assertCommentOnlyArgs(args: readonly string[]): void {
   const refuse = (why: string): never => {
@@ -465,8 +479,16 @@ export async function postIssueComment(
     if (scratch !== undefined) {
       try {
         fs.rmSync(scratch, { recursive: true, force: true });
-      } catch {
-        /* best-effort: a stranded temp body is not worth failing an account over */
+      } catch (error) {
+        // Still best-effort — a stranded temp body must not fail an account —
+        // but no longer silent. A swallowed cleanup failure is how a leak
+        // becomes unattributable: the directory is there, nothing says who left
+        // it or why. One line naming the path and the reason is the difference
+        // between a diagnosable leak and a mystery.
+        logError(
+          `[clanker] issue comment for run '${input.facts.runId}': could not remove the staged body at ` +
+            `${scratch}: ${errMessage(error)}. The comment itself is unaffected.`,
+        );
       }
     }
   }

@@ -473,6 +473,35 @@ test("#27: a body write that fails mid-staging strands nothing on disk", async (
   assert.deepEqual([...scratchDirs()].filter((d) => !before.has(d)), [], "no scratch directory outlives the failure");
 });
 
+test("#27: a cleanup that cannot run says so instead of leaking in silence", async () => {
+  // Second cold review's remaining CONCERN: `rmSync` failing was swallowed
+  // whole, so the directory stayed AND nothing said who left it. Still
+  // best-effort (bookkeeping never fails a dispatch) — but attributable.
+  const rec = recorder();
+  const logged: string[] = [];
+  const realRm = fs.rmSync;
+  (fs as { rmSync: unknown }).rmSync = () => {
+    throw Object.assign(new Error("EPERM: operation not permitted, rm"), { code: "EPERM" });
+  };
+  let out;
+  try {
+    out = await postIssueComment(
+      { ref: parseIssueRef("27"), facts: facts() },
+      { run: rec.runner, logError: (m) => logged.push(m) },
+    );
+  } finally {
+    (fs as { rmSync: unknown }).rmSync = realRm;
+  }
+  assert.equal(out.ok, true, "a failed cleanup does not fail the comment that already landed");
+  assert.equal(logged.length, 1, "…but it is no longer invisible");
+  assert.match(logged[0], /could not remove the staged body/);
+  assert.match(logged[0], /EPERM/, "the reason travels");
+  assert.match(logged[0], /clanker-issue-comment-/, "and so does the path, so the leak is attributable");
+  // The directory really is still there; remove it so the suite leaves nothing.
+  const leaked = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith("clanker-issue-comment-"));
+  for (const dir of leaked) fs.rmSync(path.join(os.tmpdir(), dir), { recursive: true, force: true });
+});
+
 test("mutation: cleanup installed after the write leaks the directory the write failed in", async () => {
   // The shipped shape: `try/finally` opened AFTER staging, so the staging
   // catch returned before the cleanup existed.
