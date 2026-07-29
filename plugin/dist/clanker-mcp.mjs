@@ -27823,10 +27823,2251 @@ import crypto from "node:crypto";
 import fs11 from "node:fs";
 import path10 from "node:path";
 
+// src/backends.ts
+import fs3 from "node:fs";
+import { createRequire } from "node:module";
+import os3 from "node:os";
+import path3 from "node:path";
+import { fileURLToPath } from "node:url";
+
+// src/grok-diagnostics.ts
+import fs from "node:fs";
+import os2 from "node:os";
+import path2 from "node:path";
+function resolveGrokHome() {
+  return process.env.GROK_HOME ?? path2.join(os2.homedir(), ".grok");
+}
+var FAILURE_MSG_PATTERN = /inference_failed|terminal_failure/;
+function grokFailureDetail(turnStartMs, now = Date.now()) {
+  try {
+    const logPath = path2.join(resolveGrokHome(), "logs", "unified.jsonl");
+    const raw = fs.readFileSync(logPath, "utf8");
+    const lines = raw.split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line || !FAILURE_MSG_PATTERN.test(line)) continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (typeof parsed !== "object" || parsed === null) continue;
+      const rec = parsed;
+      if (typeof rec.msg !== "string" || !FAILURE_MSG_PATTERN.test(rec.msg)) continue;
+      const ts = typeof rec.ts === "string" ? Date.parse(rec.ts) : NaN;
+      if (!Number.isFinite(ts) || ts < turnStartMs || ts > now) continue;
+      const statusCode = rec.ctx?.status_code;
+      const message = rec.ctx?.message;
+      if (statusCode === void 0 && message === void 0) continue;
+      return `Grok backend error \u2014 status_code=${statusCode ?? "?"} message=${message ?? "?"}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// src/node-binary.ts
+import { execFileSync } from "node:child_process";
+import fs2 from "node:fs";
+var PATH_NODE = "node";
+var RESOLVED_NODE = resolveAtStartup();
+function resolveAtStartup() {
+  try {
+    return fs2.realpathSync(process.execPath);
+  } catch {
+    return process.execPath;
+  }
+}
+function resolveNodeBinary() {
+  return resolveNodeBinaryFrom(RESOLVED_NODE);
+}
+function resolveNodeBinaryFrom(recorded) {
+  if (fs2.existsSync(recorded)) return recorded;
+  console.error(
+    `[clanker] node binary drift (#37): '${recorded}' no longer exists (homebrew revision bump, or an in-place runtime upgrade) \u2014 falling back to '${PATH_NODE}' on PATH. ` + driftDetail()
+  );
+  return PATH_NODE;
+}
+function driftDetail() {
+  const probed = probePathNodeVersion();
+  if (probed === null) {
+    return `Could not run '${PATH_NODE} --version' either \u2014 sidecar spawns will most likely fail with ENOENT (CLANKER-ENV-DRIFT). Restart the MCP server on a node that exists.`;
+  }
+  const theirs = majorOf(probed);
+  const ours = majorOf(process.version);
+  if (theirs !== null && theirs === ours) {
+    return `PATH ${PATH_NODE} is ${probed}, same major as this server's ${process.version} \u2014 degraded but consistent.`;
+  }
+  return `MAJOR VERSION MISMATCH: PATH ${PATH_NODE} is ${probed}, this server runs ${process.version}. Spawning anyway \u2014 a lane on a different major beats no lane at all \u2014 but sidecars are NO LONGER on the server's runtime. Restart the MCP server to get back onto one node.`;
+}
+function probePathNodeVersion() {
+  try {
+    const out = execFileSync(PATH_NODE, ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+function majorOf(version2) {
+  return /^v?(\d+)\./.exec(version2.trim())?.[1] ?? null;
+}
+
+// src/backends.ts
+var nodeRequire = createRequire(import.meta.url);
+function resolveCodexAcpEntry() {
+  const packagedEntry = fileURLToPath(new URL("./codex-acp.mjs", import.meta.url));
+  if (fs3.existsSync(packagedEntry)) return packagedEntry;
+  const pkgJsonPath = nodeRequire.resolve("@agentclientprotocol/codex-acp/package.json");
+  return path3.join(path3.dirname(pkgJsonPath), "dist", "index.js");
+}
+function resolveGeminiAcpEntry() {
+  const candidates = [
+    fileURLToPath(new URL("./gemini-acp.mjs", import.meta.url)),
+    fileURLToPath(new URL("./gemini-acp.js", import.meta.url)),
+    fileURLToPath(new URL("../plugin/dist/gemini-acp.mjs", import.meta.url))
+  ];
+  const entry = candidates.find((candidate) => fs3.existsSync(candidate));
+  if (entry) return entry;
+  throw new Error("Gemini ACP sidecar is missing; run `npm run bundle` before dispatching Clanker: Gemini");
+}
+function resolveCursorAcpEntry() {
+  const candidates = [
+    fileURLToPath(new URL("./cursor-acp.mjs", import.meta.url)),
+    fileURLToPath(new URL("./cursor-acp.js", import.meta.url)),
+    fileURLToPath(new URL("../plugin/dist/cursor-acp.mjs", import.meta.url))
+  ];
+  const entry = candidates.find((candidate) => fs3.existsSync(candidate));
+  if (entry) return entry;
+  throw new Error("Cursor ACP sidecar is missing; run `npm run bundle` before dispatching Clanker: Cursor");
+}
+function isGeminiModel(model) {
+  return model.trim().toLowerCase().startsWith("gemini-");
+}
+function requireGeminiWorkspaceSandbox() {
+  if (process.platform !== "darwin") {
+    throw new Error("Clanker: Gemini currently requires macOS sandbox-exec for a fail-closed workspace read-only boundary");
+  }
+  try {
+    fs3.accessSync("/usr/bin/sandbox-exec", fs3.constants.X_OK);
+  } catch {
+    throw new Error("Clanker: Gemini requires executable /usr/bin/sandbox-exec for a fail-closed workspace read-only boundary");
+  }
+}
+function resolveSystemCodexPath() {
+  const searchPath = process.env.PATH ?? "";
+  for (const dir of searchPath.split(path3.delimiter)) {
+    if (!dir) continue;
+    const candidate = path3.join(dir, "codex");
+    try {
+      fs3.accessSync(candidate, fs3.constants.X_OK);
+      return candidate;
+    } catch {
+    }
+  }
+  return "codex";
+}
+function resolveSystemAgyPath() {
+  return resolveLocalBinPath("agy");
+}
+function resolveLocalBinPath(binary) {
+  const candidates = [
+    ...(process.env.PATH ?? "").split(path3.delimiter).filter(Boolean).map((dir) => path3.join(dir, binary)),
+    path3.join(os3.homedir(), ".local", "bin", binary)
+  ];
+  for (const candidate of candidates) {
+    try {
+      fs3.accessSync(candidate, fs3.constants.X_OK);
+      return candidate;
+    } catch {
+    }
+  }
+  return binary;
+}
+var CAPS = {
+  codex: { model: true, effort: true, sandbox: true },
+  opencode: { model: true, effort: false, sandbox: false },
+  grok: { model: true, effort: true, sandbox: false },
+  gemini: { model: true, effort: true, sandbox: false },
+  // cursor has no reasoning-effort flag at all: the effort tier is baked into
+  // the model id (`gpt-5.3-codex-high` vs `-xhigh`), so an effort override has
+  // nowhere to go and warns. Its `--sandbox enabled|disabled` is a boolean of
+  // its own, not codex-acp's three-tier CodexSandboxMode, so it is not exposed
+  // through that option either — the read-only lane sets it unconditionally.
+  cursor: { model: true, effort: false, sandbox: false }
+};
+var REQUIRED_ENV = {
+  codex: [],
+  grok: [],
+  gemini: [],
+  // Cursor holds its own login state under ~/.cursor (the observed init event
+  // reports `apiKeySource: "login"`), so Clanker never carries a secret for it.
+  cursor: []
+};
+function opencodeRequiredEnv(model) {
+  return isGlmModel(model) ? ["ZHIPUAI_API_KEY"] : [];
+}
+function requiredEnvFor(lane, opts) {
+  const base = lane === "opencode" ? opencodeRequiredEnv(opts.model) : REQUIRED_ENV[lane];
+  return [.../* @__PURE__ */ new Set([...base, ...opts.secrets ?? []])];
+}
+function wrapWithVaultExec(spec, requiredEnv) {
+  if (requiredEnv.length === 0) return spec;
+  return {
+    ...spec,
+    command: "tachi",
+    args: ["vault", "exec", "--keychain", "--require", requiredEnv.join(","), "--", spec.command, ...spec.args]
+  };
+}
+var SANDBOX_TO_AGENT_MODE = {
+  "read-only": "read-only",
+  "workspace-write": "agent",
+  "danger-full-access": "agent-full-access"
+};
+function opencodeClankerAgent(readOnly) {
+  return {
+    description: "Dedicated OpenCode ACP worker controlled by Clanker.",
+    mode: "primary",
+    permission: {
+      // OpenCode flattens every injected MCP tool to `${server}_${tool}` and
+      // matches the permission globs against those concrete names before the
+      // LLM request (session/tools.ts -> permission/index.ts). Denying that
+      // namespace is what actually closes the door: a read-only lane was
+      // observed calling `tachi_task` (it really spawned a claude dispatch)
+      // and `tachi_skill`, because `task`/`skill` below only ever matched the
+      // NATIVE tools of those exact names. Native tools are all compact
+      // lowercase — bash/read/glob/grep/edit/write/webfetch/todowrite — so
+      // this costs the worker nothing (`apply_patch` and the MCP resource
+      // helpers are normalized to `edit`/`read` before the glob runs).
+      // Do NOT "simplify" this to `mcp: {}` in the config: configs deep-merge,
+      // so an empty mcp object removes no ambient server. This is the fix.
+      "*_*": "deny",
+      task: "deny",
+      skill: "deny",
+      external_directory: "deny",
+      edit: readOnly ? "deny" : "allow",
+      bash: readOnly ? "deny" : "allow"
+    },
+    prompt: [
+      "You are a Clanker-controlled OpenCode ACP worker.",
+      "Execute only the exact task supplied by the parent in the provided working directory.",
+      "Clanker owns the session lifecycle, workspace or worktree selection, cancellation, and progress reporting.",
+      "Never spawn or delegate to subagents, load skills, access paths outside the current worktree, create or switch worktrees, or attempt to manage Clanker itself.",
+      "Return concrete results, changed files, verification evidence, and any remaining risk to the parent."
+    ].join("\n")
+  };
+}
+function buildSpawnSpec(lane, opts, runDir) {
+  const warnings = [];
+  const env = {};
+  const caps = CAPS[lane];
+  if (opts.model && !caps.model) {
+    warnings.push(`lane '${lane}' does not support model override; ignoring model='${opts.model}'`);
+  }
+  if (opts.effort && !caps.effort) {
+    warnings.push(`lane '${lane}' does not support reasoning-effort override; ignoring effort='${opts.effort}'`);
+  }
+  if (opts.sandbox && !caps.sandbox) {
+    warnings.push(`lane '${lane}' does not support sandbox override; ignoring sandbox='${opts.sandbox}'`);
+  }
+  if (opts.resumeRef && !LANES_WITH_RESUME.has(lane)) {
+    warnings.push(`lane '${lane}' cannot resume a backend session; ignoring resumeRef='${opts.resumeRef}'`);
+  }
+  switch (lane) {
+    case "cursor": {
+      const mode = opts.readOnly === true ? process.env.CLANKER_CURSOR_MODE?.trim() === "plan" ? "plan" : "ask" : "write";
+      env.CLANKER_CURSOR_MODE = mode;
+      env.CLANKER_CURSOR_MODEL = resolveCursorModel(opts.model) || DEFAULT_CURSOR_MODEL;
+      env.CLANKER_CURSOR_AGENT_PATH = process.env.CLANKER_CURSOR_AGENT_PATH ?? resolveLocalBinPath("cursor-agent");
+      if (opts.resumeRef) env.CLANKER_CURSOR_RESUME = opts.resumeRef;
+      if (process.env.CLANKER_CURSOR_PRINT_TIMEOUT) {
+        env.CLANKER_CURSOR_PRINT_TIMEOUT = process.env.CLANKER_CURSOR_PRINT_TIMEOUT;
+      }
+      return wrapWithVaultExec(
+        // resolveNodeBinary(), not process.execPath: this server can outlive
+        // the path it was launched from (#37).
+        { command: resolveNodeBinary(), args: [resolveCursorAcpEntry()], env, warnings },
+        requiredEnvFor(lane, opts)
+      );
+    }
+    case "gemini": {
+      if (opts.readOnly !== true) {
+        throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
+      }
+      requireGeminiWorkspaceSandbox();
+      const model = opts.model?.trim() || "gemini-3.6-flash-high";
+      if (!isGeminiModel(model)) {
+        throw new Error(`Clanker: Gemini requires a Gemini model id; received '${model}'`);
+      }
+      const effort = opts.effort?.trim();
+      if (effort && effort !== "medium" && effort !== "high") {
+        throw new Error(`Clanker: Gemini effort must be 'medium' or 'high'; received '${effort}'`);
+      }
+      env.CLANKER_AGY_PATH = process.env.CLANKER_AGY_PATH ?? resolveSystemAgyPath();
+      env.CLANKER_GEMINI_MODEL = model;
+      if (opts.geminiRole) env.CLANKER_GEMINI_ROLE = opts.geminiRole;
+      if (process.env.CLANKER_GEMINI_PRINT_TIMEOUT) {
+        env.CLANKER_GEMINI_PRINT_TIMEOUT = process.env.CLANKER_GEMINI_PRINT_TIMEOUT;
+      }
+      if (effort) env.CLANKER_GEMINI_EFFORT = effort;
+      return wrapWithVaultExec(
+        // resolveNodeBinary(), not process.execPath: this server can outlive
+        // the path it was launched from (#37).
+        { command: resolveNodeBinary(), args: [resolveGeminiAcpEntry()], env, warnings },
+        requiredEnvFor(lane, opts)
+      );
+    }
+    case "grok": {
+      env.GROK_HOME = resolveGrokHome();
+      const args = [
+        "--sandbox",
+        opts.readOnly === true ? "read-only" : "workspace",
+        "--permission-mode",
+        "default",
+        "--no-subagents",
+        "agent",
+        "--no-leader",
+        "--model",
+        opts.model ?? "grok-4.5"
+      ];
+      if (opts.effort) args.push("--reasoning-effort", opts.effort);
+      args.push("stdio");
+      return wrapWithVaultExec({ command: "grok", args, env, warnings }, requiredEnvFor(lane, opts));
+    }
+    case "opencode": {
+      if (!opts.model?.trim()) {
+        throw new Error(
+          "opencode lane requires an explicit model id \u2014 omitting it would let OpenCode's interactive default choose a different model"
+        );
+      }
+      const args = ["acp"];
+      const model = resolveOcModel(opts.model);
+      const profile = opts.profile === "kimi-crew" ? "kimi-crew" : "clanker-worker";
+      const config2 = {
+        $schema: "https://opencode.ai/config.json",
+        default_agent: profile
+      };
+      if (opts.profile !== "kimi-crew") config2.agent = { [profile]: opencodeClankerAgent(opts.readOnly === true) };
+      if (model) config2.model = model;
+      const cfgPath = path3.join(runDir, "opencode-config.json");
+      fs3.writeFileSync(cfgPath, JSON.stringify(config2, null, 2));
+      env.OPENCODE_CONFIG = cfgPath;
+      env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config2);
+      if (opts.profile !== "kimi-crew") {
+        env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
+        env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
+      }
+      return wrapWithVaultExec({ command: "opencode", args, env, warnings }, requiredEnvFor(lane, opts));
+    }
+    case "codex": {
+      const codexConfig = {
+        features: { multi_agent_v2: { enabled: false } }
+      };
+      codexConfig.model = opts.model?.trim() || DEFAULT_CODEX_MODEL;
+      codexConfig.model_reasoning_effort = opts.effort?.trim() || DEFAULT_CODEX_EFFORT;
+      env.CODEX_CONFIG = JSON.stringify(codexConfig);
+      const agentMode = opts.sandbox ? SANDBOX_TO_AGENT_MODE[opts.sandbox] ?? (opts.readOnly ? "read-only" : "agent") : opts.readOnly ? "read-only" : "agent";
+      env.INITIAL_AGENT_MODE = agentMode;
+      env.CODEX_PATH = resolveSystemCodexPath();
+      return wrapWithVaultExec(
+        // resolveNodeBinary(), not process.execPath: this server can outlive
+        // the path it was launched from (#37).
+        { command: resolveNodeBinary(), args: [resolveCodexAcpEntry()], env, warnings },
+        requiredEnvFor(lane, opts)
+      );
+    }
+  }
+}
+
+// src/adopt.ts
+import { spawnSync } from "node:child_process";
+import fs6 from "node:fs";
+import path6 from "node:path";
+
+// src/run.ts
+import fs5 from "node:fs";
+import path5 from "node:path";
+
+// src/lane-session.ts
+var LANE_SESSION_META_KEY = "clanker.lane_session";
+function laneSessionRefFrom(meta) {
+  const block = meta?.[LANE_SESSION_META_KEY];
+  if (block === null || typeof block !== "object") return void 0;
+  const ref = block.ref;
+  if (typeof ref !== "string") return void 0;
+  return ref.trim() || void 0;
+}
+
+// src/ledger.ts
+import fs4 from "node:fs";
+import os4 from "node:os";
+import path4 from "node:path";
+var rawLedgerDirEnv = process.env.CLANKER_LEDGER_DIR?.trim();
+var LEDGER_DIR = rawLedgerDirEnv ? rawLedgerDirEnv : path4.join(os4.homedir(), ".agents", "dispatch-ledger");
+var LEDGER_PATH = path4.join(LEDGER_DIR, "ledger.jsonl");
+var HOOK_ERRORS_PATH = path4.join(LEDGER_DIR, "hook_errors.log");
+var PROMPT_HEAD_CHAR_BUDGET = 200;
+var ERROR_CLASS_CHAR_BUDGET = 200;
+var DEFAULT_AGENT_PROFILE = "worker";
+function buildLedgerRow(input) {
+  const profile = input.agentProfile ?? DEFAULT_AGENT_PROFILE;
+  const agentType = profile !== DEFAULT_AGENT_PROFILE ? `${input.lane}:${profile}` : input.lane;
+  const isError = input.turnStatus === "error";
+  const isCancelled = input.turnStatus === "cancelled";
+  return {
+    ts: (/* @__PURE__ */ new Date()).toISOString(),
+    session: null,
+    repo: input.cwd,
+    tool: "ClankerMCP",
+    agent_type: agentType,
+    model: input.model ?? null,
+    label: input.id,
+    prompt_head: input.initialPrompt.slice(0, PROMPT_HEAD_CHAR_BUDGET),
+    outcome: isError ? "blocked" : null,
+    review: null,
+    refix_rounds: null,
+    // #37 D1: `error_class` used to be null for BOTH "done" and "cancelled" —
+    // the 13-key contract is grep-consumed downstream (no schema migration
+    // possible without a coordinated change there), so a cancelled run gets a
+    // literal "cancelled" tag here instead of a new column. `outcome` stays
+    // null either way: it is reserved for a human/terminal-review backfill,
+    // not something this writer should synthesize.
+    error_class: isError && input.error ? input.error.slice(0, ERROR_CLASS_CHAR_BUDGET) : isCancelled ? "cancelled" : null,
+    lesson_ref: null
+  };
+}
+function appendLedgerRow(input) {
+  try {
+    fs4.mkdirSync(LEDGER_DIR, { recursive: true });
+    fs4.appendFileSync(LEDGER_PATH, JSON.stringify(buildLedgerRow(input)) + "\n");
+  } catch (error40) {
+    logHookError(input.id, error40);
+  }
+}
+function logHookError(runId, error40) {
+  try {
+    fs4.mkdirSync(LEDGER_DIR, { recursive: true });
+    const message = error40 instanceof Error ? error40.stack ?? error40.message : String(error40);
+    fs4.appendFileSync(
+      HOOK_ERRORS_PATH,
+      `[${(/* @__PURE__ */ new Date()).toISOString()}] native-ledger-writer append failed for run '${runId}': ${message}
+`
+    );
+  } catch (fallbackError) {
+    console.error(
+      `[clanker] ledger write AND hook_errors.log fallback both failed for run '${runId}': ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`
+    );
+  }
+}
+
+// src/run.ts
+var RESULT_FILE = "result.md";
+var RESULT_FINAL_MESSAGE_HEADING = "## final_message";
+var EVENTS_FILE = "events.jsonl";
+var CHUNKS_FILE = "chunks.log";
+var RUN_STREAM_FILES = [EVENTS_FILE, CHUNKS_FILE];
+var EMPTY_PLAN = {
+  entries: [],
+  completed: 0,
+  inProgress: 0,
+  pending: 0,
+  total: 0,
+  currentStep: null
+};
+var LaneRun = class {
+  id;
+  lane;
+  host;
+  cwd;
+  worktreeBranch;
+  worktreePath;
+  /**
+   * The repo the worktree was cut from (resolved from the dispatch cwd, #12).
+   * Cleanup (`git worktree remove`) must run against THIS repo, not the host
+   * baseRepo, or it silently no-ops on the wrong repo and leaks the worktree.
+   */
+  targetRepo;
+  /**
+   * Full SHA the worktree was cut from when the dispatcher supplied an
+   * explicit `base` (verified server-side in manager.ts before the worktree
+   * was created). Undefined when the repo's default base resolution ran;
+   * surfaced in telemetry as `base_sha`.
+   */
+  baseSha;
+  /**
+   * Full SHA of the commit the worktree was cut from, captured at creation
+   * time regardless of whether the caller named a base. This is the diff base
+   * for `doNotTouch` terminal validation (worktree.ts changedFilesSince).
+   */
+  worktreeBaseSha;
+  /**
+   * Caller-declared paths the worker must not touch, validated server-side at
+   * terminal time (manager.ts computeContractViolations) against the real
+   * worktree diff. Undefined when the dispatcher declared none — in which
+   * case NO validation runs and nothing is reported anywhere.
+   */
+  doNotTouch;
+  /**
+   * Violations found while the worktree still existed (closeRun runs before
+   * the terminal status flip, and a clean tree may be removed there — so the
+   * result is stored here for buildWaitResult / writeResultFileOnce to read
+   * afterwards). Recomputed-and-overwritten on every validation pass — a
+   * supervised run validates at its first terminal AND again on close after a
+   * correction round, and the later pass must replace the earlier verdict,
+   * never accumulate with it. Only set when doNotTouch was declared.
+   */
+  contractViolations;
+  readOnly;
+  runDir;
+  createdAt = Date.now();
+  requestOpts;
+  /**
+   * The dispatch's original (first-turn) prompt — retained verbatim so the
+   * native ledger writer (ledger.ts) can derive `prompt_head` at close()
+   * time, when the LaneManager call site no longer has the prompt in scope.
+   * Deliberately never overwritten by a later clanker_prompt continuation:
+   * the ledger row describes the dispatch's lifetime, not its latest turn.
+   */
+  initialPrompt;
+  /**
+   * Hard per-turn ceiling declared by this run's dispatch profile
+   * (profiles.ts). Undefined for dispatches that named no profile — the manager
+   * then falls back to the global CLANKER_TURN_TIMEOUT_MS.
+   */
+  turnTimeoutMs;
+  /**
+   * Whether this run's profile is the supervised shape. Only a supervised run
+   * accepts a correction turn (manager.promptExisting): the capability is
+   * checked against the registry row that minted the run, not against which
+   * tool the caller happens to hold, so a seat cannot talk its way into
+   * steering an unsupervised worker.
+   */
+  supervised;
+  turnStatus = "running";
+  turnsCount = 0;
+  sessionClosed = false;
+  error;
+  /** Set alongside `error` when the failure was classified (see failure-classifier.ts). */
+  failureClass;
+  sessionId;
+  /**
+   * The BACKEND's own conversation id for this run, when the lane reports one
+   * (#43) — see lane-session.ts for what it is and what it is not.
+   *
+   * Written by `observeLaneSession` from the lane-neutral `_meta` key on a
+   * session_info_update, read by manager.ts's resume path (which spawns the
+   * lane again carrying it) and surfaced as telemetry `lane_session_ref`.
+   * Undefined on every lane that reports none, which is every lane but cursor
+   * today — its absence is what makes a correction turn refuse rather than
+   * silently start a worker with no memory of the work it is being corrected
+   * about.
+   *
+   * NOT `sessionId` above: that one names the ACP session this process holds
+   * with the sidecar and dies with the subprocess.
+   */
+  laneSessionRef;
+  worktreeRetained;
+  cancellationRequested = false;
+  terminalAt;
+  startedAt;
+  /**
+   * Wall-clock time the CURRENT turn began (set fresh on every beginTurn
+   * call, unlike `startedAt` above which is job-level and set once via
+   * `??=`). Exists so grok-diagnostics.ts's log tail (issue #9) can bound
+   * its search to the failing turn's own window instead of the whole job's
+   * lifetime.
+   */
+  turnStartedAt;
+  retries = 0;
+  corrections = 0;
+  forcedKill = false;
+  stopReason;
+  promptUsage;
+  sessionUsage;
+  observedModel = null;
+  observedEffort = null;
+  /**
+   * Model a resume turn re-spawned this run on (#43), when the correction named
+   * one. Overrides `requestOpts.model` in telemetry from that turn onward — see
+   * `telemetry()` for why reporting the dispatch's model there would be a lie
+   * with a siren attached.
+   */
+  resumeModel;
+  /** Live worker identity (#32): pid — which is also its pgid — and the ms epoch it was spawned. */
+  workerPid;
+  workerStartedAt;
+  plan = EMPTY_PLAN;
+  finalTouchedFiles = [];
+  toolCallCount = 0;
+  toolCallTitles = /* @__PURE__ */ new Map();
+  /** Last known ToolCall.kind per toolCallId — updates may omit it (see tool_call_update above). */
+  toolCallKinds = /* @__PURE__ */ new Map();
+  touchedFromTools = /* @__PURE__ */ new Set();
+  touchedFromWrites = /* @__PURE__ */ new Set();
+  currentTurnMessage = "";
+  lastFinalMessage = "";
+  lastEventAt = Date.now();
+  idleSince = null;
+  /** Cleared on every real event; see `suspectedStallEdge`. */
+  stallAcknowledged = false;
+  seq = 0;
+  reportedSeq = 0;
+  digestLog = [];
+  lastEmittedMsgLen = 0;
+  waiters = [];
+  eventsStream = null;
+  chunksStream = null;
+  constructor(init) {
+    this.id = init.id;
+    this.lane = init.lane;
+    this.host = init.host ?? "standalone";
+    this.cwd = init.cwd;
+    this.runDir = init.runDir;
+    this.readOnly = init.readOnly;
+    this.worktreeBranch = init.worktreeBranch;
+    this.worktreePath = init.worktreePath;
+    this.targetRepo = init.targetRepo;
+    this.baseSha = init.baseSha;
+    this.worktreeBaseSha = init.worktreeBaseSha;
+    this.doNotTouch = init.doNotTouch;
+    this.requestOpts = init.requestOpts ?? {};
+    this.initialPrompt = init.initialPrompt ?? "";
+    this.turnTimeoutMs = init.turnTimeoutMs;
+    this.supervised = init.supervised ?? false;
+  }
+  // ---- lifecycle ----------------------------------------------------------
+  beginTurn(prompt, correction = false) {
+    if (this.isTerminalTurn() && this.sessionClosed) return;
+    this.startedAt ??= Date.now();
+    this.turnStartedAt = Date.now();
+    this.cancellationRequested = false;
+    this.terminalAt = void 0;
+    this.stopReason = void 0;
+    this.promptUsage = void 0;
+    this.forcedKill = false;
+    this.error = void 0;
+    this.failureClass = void 0;
+    this.turnsCount += 1;
+    if (correction) this.corrections += 1;
+    this.turnStatus = "running";
+    this.currentTurnMessage = "";
+    this.lastEmittedMsgLen = 0;
+    this.idleSince = null;
+    this.touch("turn_start");
+    this.pushDigest(`\u25B6 turn ${this.turnsCount}: ${truncate(prompt, 160)}`, true);
+    this.writeEvent({ t: "turn_start", turn: this.turnsCount, prompt });
+    this.persistTelemetry();
+  }
+  /** Wall-clock start of the current turn (see `turnStartedAt` field doc). */
+  get turnStartedAtMs() {
+    return this.turnStartedAt;
+  }
+  completeTurn() {
+    if (this.isTerminalTurn()) return;
+    this.flushMessageDigest();
+    this.turnStatus = "done";
+    this.lastFinalMessage = this.currentTurnMessage.trim();
+    this.idleSince = Date.now();
+    this.pushDigest(`\u2713 turn ${this.turnsCount} done (${this.toolCallCount} tools)`, true);
+    this.writeEvent({ t: "turn_done", turn: this.turnsCount, stopReason: "end_turn" });
+    this.touch("turn_done");
+    this.markTerminal("done");
+    this.writeResultFileOnce();
+    this.writeLedgerRowOnce();
+  }
+  /**
+   * @param failureClass optional classification tag (e.g. CLANKER-INFRA-FAILURE)
+   *   from failure-classifier.ts, surfaced verbatim to wait/status callers.
+   */
+  failTurn(message, failureClass) {
+    if (this.isTerminalTurn()) return;
+    this.flushMessageDigest();
+    this.turnStatus = "error";
+    this.error = message;
+    this.failureClass = failureClass;
+    this.idleSince = Date.now();
+    const tag = failureClass ? ` [${failureClass}]` : "";
+    this.pushDigest(`\u2717 error: ${truncate(message, 200)}${tag}`, true);
+    this.writeEvent({ t: "turn_error", turn: this.turnsCount, message, failureClass });
+    this.touch("turn_error");
+    this.markTerminal("error");
+    this.writeResultFileOnce();
+    this.writeLedgerRowOnce();
+  }
+  /**
+   * Record a non-terminal capacity-transient retry (see failure-classifier.ts
+   * isCapacityTransient). Does not touch turnStatus — the turn is still
+   * "running" from a caller's perspective while the retry backoff is in
+   * flight, so a concurrent clanker_wait keeps long-polling instead of
+   * seeing a premature terminal state.
+   */
+  recordTransientRetry(message, backoffMs, attempt) {
+    this.retries += 1;
+    this.pushDigest(
+      `\u21BB transient backend failure, retrying in ${backoffMs}ms (attempt ${attempt}): ${truncate(message, 160)}`
+    );
+    this.writeEvent({ t: "transient_retry", backoffMs, attempt, message });
+    this.touch("transient_retry");
+  }
+  cancelTurn() {
+    if (this.isTerminalTurn()) return;
+    this.flushMessageDigest();
+    this.turnStatus = "cancelled";
+    this.idleSince = Date.now();
+    this.pushDigest(`\u2298 turn ${this.turnsCount} cancelled`, true);
+    this.writeEvent({ t: "turn_cancelled", turn: this.turnsCount });
+    this.touch("turn_cancelled");
+    this.markTerminal("cancelled");
+    this.writeResultFileOnce();
+    this.writeLedgerRowOnce();
+  }
+  /**
+   * Re-open a closed run for a backend-resume turn (#43).
+   *
+   * A lane that resumes from a backend-held conversation does NOT need this
+   * process's session to have survived — that is the whole difference from the
+   * supervised correction flow, whose window closes with the ACP session. What
+   * it does need is for the run's own bookkeeping to stop reading as finished:
+   *
+   *  - `sessionClosed` false again, so `beginTurn` does not short-circuit on
+   *    the terminal-and-closed guard and the forensic streams reopen (append
+   *    mode — nothing already written is lost).
+   *  - `turnStatus` running SYNCHRONOUSLY, before the respawn's handshake. A
+   *    correction that returned `done` while its worker was being spawned would
+   *    be read by the very next `clanker_wait` as "the correction already
+   *    finished", handing back the pre-correction verdict.
+   *  - `cancellationRequested` cleared, exactly as `beginTurn` does. Resuming a
+   *    run whose last turn was cancelled is legitimate (the conversation on the
+   *    backend's side is intact); leaving the flag set would abort the respawn
+   *    during setup and record it as another cancellation.
+   *  - `worktreeRetained` cleared, because it is recomputed by the next close.
+   *    A tree removed at that close would otherwise keep being reported as
+   *    retained at a path that no longer exists.
+   *
+   * `turnsCount`, `corrections`, the ledger-row flag and the digest are all
+   * left alone: this is the same dispatch continuing, and `beginTurn` owns the
+   * per-turn accounting.
+   */
+  reopenForResume() {
+    this.sessionClosed = false;
+    this.cancellationRequested = false;
+    this.worktreeRetained = void 0;
+    this.observedModel = null;
+    this.observedEffort = null;
+    this.turnStatus = "running";
+    this.touch("resume_accepted");
+  }
+  /** Record the model a resume turn re-spawned on; see `resumeModel`. */
+  adoptResumeModel(model) {
+    this.resumeModel = model.trim() || void 0;
+    this.persistTelemetry();
+  }
+  async markClosed() {
+    if (this.sessionClosed) return;
+    this.writeEvent({ t: "session_closed" });
+    await this.closeStreamsAndWait();
+    this.sessionClosed = true;
+    this.touch("session_closed");
+  }
+  // ---- event ingestion ----------------------------------------------------
+  onUpdate(update) {
+    this.writeEvent({ t: "update", update });
+    switch (update.sessionUpdate) {
+      case "plan":
+        this.applyPlan(update.entries);
+        break;
+      case "plan_update": {
+        const entries = update.entries;
+        if (Array.isArray(entries)) this.applyPlan(entries);
+        break;
+      }
+      case "tool_call": {
+        this.toolCallCount += 1;
+        this.toolCallTitles.set(update.toolCallId, update.title);
+        if (update.kind != null) this.toolCallKinds.set(update.toolCallId, update.kind);
+        this.collectLocations(update.locations, update.kind);
+        this.pushDigest(`\u{1F527} ${truncate(update.title, 120)}`);
+        break;
+      }
+      case "tool_call_update": {
+        if (update.kind != null) this.toolCallKinds.set(update.toolCallId, update.kind);
+        this.collectLocations(update.locations, update.kind ?? this.toolCallKinds.get(update.toolCallId));
+        if (update.status === "failed") {
+          const title = this.toolCallTitles.get(update.toolCallId) ?? update.toolCallId;
+          this.pushDigest(`\u26A0 tool failed: ${truncate(title, 100)}`, true);
+        }
+        break;
+      }
+      case "agent_message_chunk": {
+        const text = blockText(update.content);
+        this.currentTurnMessage += text;
+        this.logChunk("message", text);
+        this.maybeEmitMessageDigest();
+        break;
+      }
+      case "agent_thought_chunk": {
+        this.logChunk("thought", blockText(update.content));
+        break;
+      }
+      case "config_option_update":
+        this.observeConfigOptions(update.configOptions);
+        break;
+      case "session_info_update":
+        this.observeLaneSession(update._meta);
+        break;
+      case "usage_update":
+        this.sessionUsage = {
+          used: update.used,
+          size: update.size,
+          ...update.cost ? { cost: { amount: update.cost.amount, currency: update.cost.currency } } : {}
+        };
+        this.persistTelemetry();
+        break;
+      default:
+        break;
+    }
+    this.touch("update");
+  }
+  applyPlan(entries) {
+    const snap = (entries ?? []).map((e) => ({
+      content: e.content,
+      status: e.status
+    }));
+    const completed = snap.filter((e) => e.status === "completed").length;
+    const inProgress = snap.filter((e) => e.status === "in_progress").length;
+    const pending = snap.filter((e) => e.status === "pending").length;
+    const currentStep = snap.find((e) => e.status === "in_progress")?.content ?? null;
+    const next = { entries: snap, completed, inProgress, pending, total: snap.length, currentStep };
+    if (JSON.stringify(next) === JSON.stringify(this.plan)) return;
+    this.plan = next;
+    this.pushDigest(`\u{1F4CB} ${this.planSummary()}`, true);
+  }
+  /**
+   * ACP's "follow-along" `locations` signal fires on tool_calls of EVERY
+   * kind, reads included: a `Read src/foo.ts` reports a location exactly
+   * like an `Edit` does (see ToolCall.kind in the ACP schema — "read" |
+   * "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" |
+   * "switch_mode" | "other"). Treating any reported location as "touched"
+   * therefore turned a read-only reviewer's own Read calls into
+   * false-positive touched_files entries (observed live in run codex-212e2:
+   * a read-only review dispatch reported a pile of src files touched on a
+   * tree with zero actual diff). Only a `read` kind is excluded here — an
+   * absent `kind` (optional per the ACP schema) keeps the prior, inclusive
+   * behavior rather than guessing, and every other kind (including the
+   * write-class ones this signal exists for) is unaffected.
+   */
+  collectLocations(locations, kind) {
+    if (kind === "read") return;
+    for (const loc of locations ?? []) {
+      if (loc.path) {
+        this.touchedFromTools.add(loc.path);
+        this.pushDigest(`\u270F ${truncate(this.relToCwd(loc.path), 120)}`);
+      }
+    }
+  }
+  /** Record a file the agent wrote through the client fs capability. */
+  recordFileWritten(absPath) {
+    this.touchedFromWrites.add(absPath);
+    this.pushDigest(`\u270F wrote ${truncate(this.relToCwd(absPath), 120)}`);
+    this.touch("file_written");
+  }
+  maybeEmitMessageDigest() {
+    const grown = this.currentTurnMessage.length - this.lastEmittedMsgLen;
+    if (grown >= 40 || this.currentTurnMessage.endsWith("\n")) {
+      this.flushMessageDigest();
+    }
+  }
+  /** Emit any not-yet-reported agent-message text as a digest fragment. */
+  flushMessageDigest() {
+    const delta = this.currentTurnMessage.slice(this.lastEmittedMsgLen).trim();
+    this.lastEmittedMsgLen = this.currentTurnMessage.length;
+    if (delta) this.pushDigest(`\u{1F4AC} ${truncate(delta, 200)}`);
+  }
+  // ---- projections --------------------------------------------------------
+  planSummary() {
+    const p = this.plan;
+    if (p.total === 0) return "no plan yet";
+    const now = p.currentStep ? ` \xB7 now: ${truncate(p.currentStep, 80)}` : "";
+    return `${p.completed}/${p.total} done, ${p.inProgress} in progress${now}`;
+  }
+  planState() {
+    return this.plan;
+  }
+  lastEventAgeMs() {
+    return Date.now() - this.lastEventAt;
+  }
+  suspectedStall(stallThresholdMs) {
+    return this.turnStatus === "running" && this.lastEventAgeMs() > stallThresholdMs;
+  }
+  /**
+   * Edge-triggered variant of `suspectedStall` for quiet-mode long-poll: true
+   * only the first time it's observed stalled since the last real event —
+   * subsequent calls while still silently stalled return false so a caller
+   * polling in a loop blocks out its full timeout budget each time instead of
+   * spinning (every call re-observing "still stalled" would otherwise make
+   * clanker_wait return near-instantly forever, starving the event loop of
+   * the real timers — e.g. the hard per-turn timeout — that need to run).
+   */
+  suspectedStallEdge(stallThresholdMs) {
+    if (!this.suspectedStall(stallThresholdMs)) return false;
+    if (this.stallAcknowledged) return false;
+    this.stallAcknowledged = true;
+    return true;
+  }
+  sessionState(stallThresholdMs) {
+    if (this.sessionClosed) return "closed";
+    if (this.turnStatus === "running") {
+      return this.suspectedStall(stallThresholdMs) ? "stalled" : "working";
+    }
+    return "idle";
+  }
+  idleMs() {
+    if (this.idleSince !== null) return Date.now() - this.idleSince;
+    return this.lastEventAgeMs();
+  }
+  isTerminalTurn() {
+    return this.turnStatus !== "running";
+  }
+  hasUnreported() {
+    return this.seq > this.reportedSeq;
+  }
+  /**
+   * True if any digest entry since the last drain is `significant` (plan/status
+   * change, tool error, or turn-boundary transition) — as opposed to the
+   * high-frequency chatter (tool_call start, file-location echo, message-chunk
+   * fragment) that `hasUnreported()` alone treats as wake-worthy. Used by
+   * clanker_wait's quiet mode so a run that's merely grepping/reading doesn't
+   * wake every long-poller on each tool call.
+   */
+  hasUnreportedSignificant() {
+    for (let i = this.digestLog.length - 1; i >= 0; i--) {
+      const d = this.digestLog[i];
+      if (d.seq <= this.reportedSeq) return false;
+      if (d.significant) return true;
+    }
+    return false;
+  }
+  finalMessage() {
+    return truncate(this.lastFinalMessage, FINAL_MESSAGE_CHAR_BUDGET);
+  }
+  toolTouchedFiles() {
+    return [...this.touchedFromTools, ...this.touchedFromWrites];
+  }
+  toolCalls() {
+    return this.toolCallCount;
+  }
+  requestCancellation() {
+    this.cancellationRequested = true;
+    this.touch("cancellation_requested");
+    this.persistTelemetry();
+  }
+  markForcedKill() {
+    this.forcedKill = true;
+    this.persistTelemetry();
+  }
+  recordStop(response) {
+    if (this.isTerminalTurn()) return;
+    this.stopReason = response.stopReason;
+    if (response.usage != null) {
+      const usage = response.usage;
+      this.promptUsage = {
+        totalTokens: usage.totalTokens,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        ...usage.thoughtTokens !== void 0 ? { thoughtTokens: usage.thoughtTokens } : {},
+        ...usage.cachedReadTokens !== void 0 ? { cachedReadTokens: usage.cachedReadTokens } : {},
+        ...usage.cachedWriteTokens !== void 0 ? { cachedWriteTokens: usage.cachedWriteTokens } : {}
+      };
+    }
+    this.persistTelemetry();
+  }
+  /**
+   * Record the worker this run is currently driven by, and flush it to disk
+   * immediately (#32).
+   *
+   * Called from the spawn itself, not from the post-handshake path: the
+   * unrecorded window has to be as close to zero as the syscall allows, or a
+   * server that dies during a 30s handshake leaves a live, unkillable worker
+   * on disk with no pid next to it.
+   *
+   * A capacity retry respawns, and overwrites both fields — the pid that
+   * matters is the one that is running now, not the one that already died.
+   */
+  noteWorkerSpawned(pid, startedAt) {
+    this.workerPid = pid;
+    this.workerStartedAt = startedAt;
+    this.persistTelemetry();
+  }
+  /**
+   * Pick the backend's own conversation id out of a session_info_update's
+   * `_meta` and persist it (#43).
+   *
+   * Only ever ASSIGNS a ref, never clears one: `laneSessionRefFrom` returns
+   * undefined for an update that carries no (or a malformed) ref, and a
+   * resumed turn whose init event happened to omit the id would otherwise
+   * erase the very ref it was resumed from — leaving the run un-correctable
+   * for a reason that has nothing to do with the backend's real state.
+   */
+  observeLaneSession(meta) {
+    const ref = laneSessionRefFrom(meta);
+    if (!ref || ref === this.laneSessionRef) return;
+    this.laneSessionRef = ref;
+    this.persistTelemetry();
+  }
+  observeConfigOptions(options) {
+    for (const option of options ?? []) {
+      if (option.category === "model") this.observedModel = String(option.currentValue);
+      if (option.category === "thought_level") this.observedEffort = String(option.currentValue);
+    }
+    this.persistTelemetry();
+  }
+  telemetry() {
+    const turnModel = this.resumeModel ?? this.requestOpts.model;
+    const resolved = this.lane === "opencode" ? resolveOcModel(turnModel) ?? null : this.lane === "grok" ? turnModel ?? "grok-4.5" : this.lane === "cursor" ? resolveCursorModel(turnModel) || DEFAULT_CURSOR_MODEL : turnModel ?? null;
+    return {
+      host: this.host,
+      requested_lane: this.lane,
+      actual_lane: this.lane,
+      requested_model: turnModel,
+      resolved_model: resolved,
+      ...this.laneSessionRef !== void 0 ? { lane_session_ref: this.laneSessionRef } : {},
+      observed_model: this.observedModel,
+      requested_effort: this.requestOpts.effort,
+      observed_effort: this.observedEffort,
+      lane: this.lane,
+      transport: "acp-stdio",
+      backend: this.lane,
+      read_only: this.readOnly,
+      sandbox: this.requestOpts.sandbox,
+      ...this.baseSha !== void 0 ? { base_sha: this.baseSha } : {},
+      ...this.turnTimeoutMs !== void 0 ? { turn_timeout_ms: this.turnTimeoutMs } : {},
+      // Process identity (#32): server_pid is unconditional — every persisted
+      // record names the process that owns it — while the worker pair appears
+      // only once a worker really exists, so "no pid on disk" keeps meaning
+      // "nothing was spawned" rather than "spawned, pid unknown".
+      server_pid: process.pid,
+      ...this.workerPid !== void 0 ? { worker_pid: this.workerPid } : {},
+      ...this.workerStartedAt !== void 0 ? { worker_started_at: this.workerStartedAt } : {},
+      created_at: new Date(this.createdAt).toISOString(),
+      ...this.startedAt ? { started_at: new Date(this.startedAt).toISOString() } : {},
+      ...this.terminalAt ? { terminal_at: new Date(this.terminalAt).toISOString(), duration_ms: this.terminalAt - (this.startedAt ?? this.createdAt) } : {},
+      turns: this.turnsCount,
+      retries: this.retries,
+      corrections: this.corrections,
+      continuation_turns: Math.max(0, this.turnsCount - 1),
+      cancellation_requested: this.cancellationRequested,
+      forced_kill: this.forcedKill,
+      tool_calls: this.toolCallCount,
+      stop_reason: this.stopReason,
+      ...this.terminalAt ? { terminal_reason: this.turnStatus } : {},
+      prompt_usage: this.promptUsage,
+      session_usage: this.sessionUsage
+    };
+  }
+  markTerminal(reason) {
+    this.terminalAt = Date.now();
+    this.stopReason ??= reason;
+    this.persistTelemetry();
+  }
+  /**
+   * Native dispatch-ledger row: called exactly once from the tail of
+   * completeTurn()/failTurn()/cancelTurn() — the true single choke point a
+   * run's lifetime passes through exactly once, guarded by the very same
+   * `isTerminalTurn()` check already at the top of all three (per-run state,
+   * not a module-level set): whichever of the three fires first flips
+   * `turnStatus` off "running", so any other terminal-transition call for
+   * this run (including a later one of these same three methods, should that
+   * ever happen) short-circuits before doing anything, this row included.
+   *
+   * Deliberately NOT wired from LaneManager's close()/closeRun(): this
+   * refactor's one-shot job controller calls `close()` *before* the
+   * corresponding completeTurn()/failTurn()/cancelTurn() at every one of its
+   * call sites (worktree/session teardown first, status flip second — see
+   * manager.ts), so at closeRun() time `run.turnStatus` is still "running"
+   * and `run.error` is still unset. That ordering is exercised concretely by
+   * manager-close-diagnostics.test.ts's direct `m.close(id)` calls on a still-
+   * running turn: closeRun() runs (and, per its own `sessionClosed` dedup,
+   * ends up being the ONLY invocation that ever executes) strictly before the
+   * turn's own failTurn() call discovers the mid-turn exit and sets the real
+   * error. Reading the terminal fields from here instead — after they're
+   * genuinely final — avoids depending on manager.ts's close-vs-status-flip
+   * ordering entirely. See ledger.ts for why this write exists at all
+   * (MCP-direct dispatches bypass the harness PostToolUse hook).
+   */
+  /** Absolute path of this run's terminal-judgment artifact (see RESULT_FILE). */
+  resultPath() {
+    return path5.join(this.runDir, RESULT_FILE);
+  }
+  /**
+   * Size in bytes of an already-written `result.md`, or 0 when it is missing or
+   * empty. Callers use it to answer the only question a relay seat can honestly
+   * answer about the verdict: "is there a file to read?" — never "what does it
+   * say?".
+   */
+  resultBytes() {
+    try {
+      return fs5.statSync(this.resultPath()).size;
+    } catch {
+      return 0;
+    }
+  }
+  /**
+   * Write `<runDir>/result.md` exactly once, from the same three terminal tails
+   * as writeLedgerRowOnce() and guarded by the same per-run `isTerminalTurn()`
+   * check at the top of completeTurn()/failTurn()/cancelTurn(): whichever fires
+   * first flips `turnStatus` off "running", so every later terminal transition
+   * short-circuits before reaching here.
+   *
+   * The final message is written UNTRUNCATED, unlike `finalMessage()` (capped at
+   * FINAL_MESSAGE_CHAR_BUDGET for the wire). That asymmetry is the point: the
+   * budget exists to keep a tool response small, and a verdict clipped at 20k
+   * characters is exactly the kind of loss the reader must not be handed
+   * silently. The file is the lossless artifact; the wire field is the preview.
+   *
+   * Fail-silent by design, like the ledger row: a diagnostics artifact must
+   * never fail or delay terminal handling of a real dispatch. Written via
+   * tmp+rename so a reader never observes a half-written verdict.
+   */
+  writeResultFileOnce() {
+    const target = this.resultPath();
+    const tmp = `${target}.${process.pid}.tmp`;
+    const lines = [
+      `# clanker run ${this.id}`,
+      "",
+      `- status: ${this.turnStatus}`,
+      `- lane: ${this.lane}`,
+      `- run_dir: ${this.runDir}`,
+      `- cwd: ${this.cwd}`,
+      ...this.worktreeRetained ? [`- worktree_retained: ${this.worktreeRetained}`] : [],
+      ""
+    ];
+    if (this.error) {
+      lines.push("## error", "", this.error, "");
+      if (this.failureClass) lines.push(`failure_class: ${this.failureClass}`, "");
+    }
+    if (this.contractViolations && this.contractViolations.length > 0) {
+      lines.push("## contract_violations", "");
+      for (const violation of this.contractViolations) {
+        lines.push(`- pattern \`${violation.pattern}\`:`);
+        for (const file2 of violation.files) lines.push(`  - ${file2}`);
+      }
+      lines.push("");
+    }
+    lines.push(RESULT_FINAL_MESSAGE_HEADING, "", this.lastFinalMessage, "");
+    try {
+      fs5.mkdirSync(this.runDir, { recursive: true });
+      fs5.writeFileSync(tmp, lines.join("\n"));
+      fs5.renameSync(tmp, target);
+    } catch (error40) {
+      try {
+        fs5.rmSync(tmp, { force: true });
+      } catch {
+      }
+      console.error(
+        `[clanker] result file write failed for run '${this.id}' at '${target}': ${error40 instanceof Error ? error40.message : String(error40)}`
+      );
+    }
+  }
+  /**
+   * One ledger row per DISPATCH, not per terminal transition.
+   *
+   * "Once" used to be an emergent property rather than a rule: `completeTurn`
+   * and `failTurn` both return early on an already-terminal run, so with a
+   * strictly one-shot controller they could only fire once. A correction turn
+   * (manager.promptExisting) breaks that arithmetic — it clears `terminalAt`
+   * and reaches a second terminal transition — so a supervised run would have
+   * appended two rows describing one dispatch, quietly double-counting every
+   * GLM write in the ledger's stats. The invariant now belongs to a flag that
+   * says so, instead of to a coincidence of control flow.
+   *
+   * Deliberately NOT symmetric with `writeResultFileOnce`, which has no such
+   * flag and must not have one: the verdict file has to hold the LATEST turn's
+   * result, or a corrected run would hand its reader the very output the
+   * correction was issued to replace.
+   */
+  ledgerRowWritten = false;
+  writeLedgerRowOnce() {
+    if (this.ledgerRowWritten) return;
+    this.ledgerRowWritten = true;
+    appendLedgerRow({
+      id: this.id,
+      lane: this.lane,
+      cwd: this.cwd,
+      agentProfile: this.requestOpts.profile,
+      model: this.telemetry().resolved_model ?? null,
+      initialPrompt: this.initialPrompt,
+      turnStatus: this.turnStatus,
+      error: this.error
+    });
+  }
+  persistTelemetry() {
+    const target = path5.join(this.runDir, "telemetry.json");
+    const tmp = `${target}.${process.pid}.tmp`;
+    try {
+      fs5.writeFileSync(tmp, JSON.stringify(this.telemetry(), null, 2));
+      fs5.renameSync(tmp, target);
+    } catch (error40) {
+      try {
+        fs5.rmSync(tmp, { force: true });
+      } catch {
+      }
+      console.error(`[clanker] telemetry persistence failed for run '${this.id}' at '${target}': ${error40 instanceof Error ? error40.message : String(error40)}`);
+    }
+  }
+  setFinalTouched(files) {
+    this.finalTouchedFiles = files;
+  }
+  finalTouched() {
+    return this.finalTouchedFiles;
+  }
+  /** Drain digest fragments accumulated since the last wait, advancing cursor. */
+  drainDigest() {
+    const fresh = this.digestLog.filter((d) => d.seq > this.reportedSeq);
+    this.reportedSeq = this.seq;
+    if (fresh.length === 0) return "";
+    let text = fresh.map((d) => d.text).join("\n");
+    if (text.length > DIGEST_CHAR_BUDGET) {
+      text = "\u2026\n" + text.slice(text.length - DIGEST_CHAR_BUDGET);
+    }
+    return text;
+  }
+  // ---- long-poll signaling ------------------------------------------------
+  /** Resolve after the next event/state change or after `ms`, whichever first. */
+  waitForSignal(ms) {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(finish, ms);
+      timer.unref?.();
+      this.waiters.push(finish);
+    });
+  }
+  touch(_reason) {
+    this.lastEventAt = Date.now();
+    this.stallAcknowledged = false;
+    const w = this.waiters;
+    this.waiters = [];
+    for (const fn of w) fn();
+  }
+  // ---- persistence --------------------------------------------------------
+  pushDigest(text, significant = false) {
+    this.seq += 1;
+    this.digestLog.push({ seq: this.seq, text, significant });
+    if (this.digestLog.length > 500) this.digestLog.splice(0, this.digestLog.length - 500);
+  }
+  /**
+   * Shared append template for both forensic streams (#37 A6): once
+   * `sessionClosed`, append synchronously (no stream to keep open past
+   * teardown); otherwise lazily open a durable append stream and write
+   * through it. `streamField` names which of the two per-instance
+   * WriteStream slots (`eventsStream` / `chunksStream`) this call owns.
+   */
+  appendToStream(file2, streamField, line) {
+    if (this.sessionClosed) {
+      fs5.mkdirSync(this.runDir, { recursive: true });
+      fs5.appendFileSync(path5.join(this.runDir, file2), line);
+      return;
+    }
+    if (!this[streamField]) {
+      fs5.mkdirSync(this.runDir, { recursive: true });
+      this[streamField] = fs5.createWriteStream(path5.join(this.runDir, file2), { flags: "a" });
+    }
+    this[streamField].write(line);
+  }
+  writeEvent(obj) {
+    const line = JSON.stringify({ ts: Date.now(), ...obj }) + "\n";
+    this.appendToStream(EVENTS_FILE, "eventsStream", line);
+  }
+  logChunk(kind, text) {
+    if (!text) return;
+    const line = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${kind}: ${text}
+`;
+    this.appendToStream(CHUNKS_FILE, "chunksStream", line);
+  }
+  closeStreams() {
+    this.eventsStream?.end();
+    this.chunksStream?.end();
+    this.eventsStream = null;
+    this.chunksStream = null;
+  }
+  async closeStreamsAndWait() {
+    const eventsStream = this.eventsStream;
+    const chunksStream = this.chunksStream;
+    await Promise.all([
+      this.finishStream(eventsStream, "events"),
+      this.finishStream(chunksStream, "chunks")
+    ]);
+    if (this.eventsStream === eventsStream) this.eventsStream = null;
+    if (this.chunksStream === chunksStream) this.chunksStream = null;
+  }
+  finishStream(stream, artifact) {
+    if (!stream) return Promise.resolve();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        stream.off("error", onError);
+        resolve();
+      };
+      const onError = (error40) => {
+        console.error(
+          `[clanker] ${artifact} stream close failed for '${this.id}': ${error40.message}`
+        );
+        finish();
+      };
+      stream.once("error", onError);
+      stream.end(finish);
+    });
+  }
+  relToCwd(p) {
+    try {
+      const rel = path5.relative(this.cwd, p);
+      return rel && !rel.startsWith("..") ? rel : p;
+    } catch {
+      return p;
+    }
+  }
+};
+function blockText(block) {
+  if (block && typeof block === "object" && "type" in block) {
+    if (block.type === "text") return block.text;
+    return `[${block.type}]`;
+  }
+  return "";
+}
+function truncate(s, max) {
+  if (s.length <= max) return s;
+  return s.slice(0, Math.max(0, max - 1)) + "\u2026";
+}
+
+// src/adopt.ts
+var IDENTITY_TOLERANCE_MS = 2e3;
+var DEATH_POLL_MS = 50;
+var KILL_SETTLE_MS = 1e3;
+function probeOwner(serverPid, self = process.pid) {
+  if (typeof serverPid !== "number" || !Number.isInteger(serverPid) || serverPid <= 0) {
+    return {
+      state: "unknown",
+      pid: null,
+      detail: "this run's telemetry names no server_pid (it predates PR #40), so whether its owner is still alive cannot be established"
+    };
+  }
+  if (serverPid === self) {
+    return { state: "alive", pid: serverPid, detail: `server_pid ${serverPid} is this very process` };
+  }
+  try {
+    process.kill(serverPid, 0);
+    return { state: "alive", pid: serverPid, detail: `server_pid ${serverPid} answers to kill(pid, 0)` };
+  } catch (error40) {
+    const code = error40.code;
+    if (code === "ESRCH") {
+      return { state: "dead", pid: serverPid, detail: `server_pid ${serverPid} no longer exists (ESRCH)` };
+    }
+    if (code === "EPERM") {
+      return {
+        state: "alive",
+        pid: serverPid,
+        detail: `server_pid ${serverPid} exists but belongs to another user (EPERM)`
+      };
+    }
+    return {
+      state: "unknown",
+      pid: serverPid,
+      detail: `probing server_pid ${serverPid} failed with ${code ?? "an unknown error"}`
+    };
+  }
+}
+function readProcessFacts(pid) {
+  if (process.platform === "win32") {
+    return { ok: false, reason: "process identity cannot be verified on win32 (no ps, no process groups)" };
+  }
+  let result;
+  try {
+    result = spawnSync("ps", ["-p", String(pid), "-o", "lstart=,comm="], {
+      encoding: "utf8",
+      env: { ...process.env, LC_ALL: "C", LANG: "C" },
+      timeout: 5e3
+    });
+  } catch (error40) {
+    return { ok: false, reason: `ps could not be run: ${error40 instanceof Error ? error40.message : String(error40)}` };
+  }
+  if (result.error) return { ok: false, reason: `ps could not be run: ${result.error.message}` };
+  if (result.status !== 0) {
+    return { ok: false, reason: `ps reports no process with pid ${pid} (exit ${result.status})` };
+  }
+  const line = (result.stdout ?? "").split("\n").find((l) => l.trim().length > 0);
+  if (!line) return { ok: false, reason: `ps returned no row for pid ${pid}` };
+  const match = /^\s*(\w{3}\s+(?:\w{3}\s+\d{1,2}|\d{1,2}\s+\w{3})\s+\d{1,2}:\d{2}:\d{2}\s+\d{4})\s*(\S.*)?$/.exec(line);
+  if (!match) return { ok: false, reason: `ps start time is not in a format this build can parse: '${line.trim()}'` };
+  const startedAt = Date.parse(match[1]);
+  if (!Number.isFinite(startedAt)) {
+    return { ok: false, reason: `ps start time '${match[1]}' did not parse as a date` };
+  }
+  return { ok: true, facts: { startedAt, comm: (match[2] ?? "").trim() } };
+}
+var LANE_COMMANDS = {
+  codex: ["node", "tachi", "codex", "codex-acp"],
+  cursor: ["node", "tachi", "cursor-agent", "cursor"],
+  gemini: ["node", "tachi", "agy", "gemini"],
+  grok: ["grok", "tachi", "node"],
+  opencode: ["opencode", "tachi", "node", "bun"]
+};
+function verifyWorkerIdentity(pid, recordedStartedAt, lane, toleranceMs = IDENTITY_TOLERANCE_MS) {
+  if (typeof recordedStartedAt !== "number" || !Number.isFinite(recordedStartedAt)) {
+    return {
+      verified: false,
+      reason: "no worker_started_at on record, so a pid-reuse check is impossible \u2014 refusing to signal a pid that cannot be shown to still be the worker"
+    };
+  }
+  const probe = readProcessFacts(pid);
+  if (!probe.ok) return { verified: false, reason: probe.reason };
+  const skew = probe.facts.startedAt - recordedStartedAt;
+  const expected = LANE_COMMANDS[lane ?? ""] ?? [];
+  const base = path6.basename(probe.facts.comm);
+  const commMatches = expected.length === 0 ? void 0 : expected.some((c) => base === c || base.startsWith(c));
+  const shared = {
+    observed_started_at: probe.facts.startedAt,
+    skew_ms: skew,
+    comm: probe.facts.comm,
+    ...commMatches === void 0 ? {} : { comm_matches_lane: commMatches }
+  };
+  if (Math.abs(skew) > toleranceMs) {
+    return {
+      ...shared,
+      verified: false,
+      reason: `pid ${pid} started ${new Date(probe.facts.startedAt).toISOString()}, but this run recorded its worker starting ${new Date(recordedStartedAt).toISOString()} (${skew}ms apart, tolerance \xB1${toleranceMs}ms) \u2014 the pid has been recycled onto a different process and must not be signalled`
+    };
+  }
+  return {
+    ...shared,
+    verified: true,
+    reason: `pid ${pid} start time matches the recorded worker within ${Math.abs(skew)}ms` + (commMatches === false ? `, though its command '${probe.facts.comm}' is not one lane '${lane}' usually spawns` : "")
+  };
+}
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error40) {
+    return error40.code === "EPERM";
+  }
+}
+var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitForDeath(pid, budgetMs) {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (!alive(pid)) return true;
+    await sleep(Math.min(DEATH_POLL_MS, Math.max(1, deadline - Date.now())));
+  }
+  return !alive(pid);
+}
+function signalGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+    return { sent: `${signal}\u2192group ${pid}` };
+  } catch (error40) {
+    const code = error40.code;
+    return {
+      sent: null,
+      code,
+      reason: code === "ESRCH" ? `process group ${pid} no longer exists (ESRCH)` : `process group ${pid} could not be signalled (${code ?? "unknown error"})`
+    };
+  }
+}
+async function killAdoptedWorker(opts) {
+  const { workerPid, workerStartedAt, lane, graceMs } = opts;
+  if (typeof workerPid !== "number" || !Number.isInteger(workerPid) || workerPid <= 0) {
+    return {
+      killed: false,
+      identity_verified: false,
+      worker_gone: true,
+      signals: [],
+      note: "no worker_pid on record \u2014 the dispatch died before it ever spawned a worker; nothing to signal"
+    };
+  }
+  if (!alive(workerPid)) {
+    return {
+      killed: false,
+      identity_verified: false,
+      worker_gone: true,
+      signals: [],
+      note: `worker pid ${workerPid} is already gone; archiving the record only`
+    };
+  }
+  const identity = verifyWorkerIdentity(workerPid, workerStartedAt, lane);
+  if (!identity.verified) {
+    return {
+      killed: false,
+      identity_verified: false,
+      // Something IS alive on that pid; it is just not provably our worker.
+      worker_gone: false,
+      signals: [],
+      identity,
+      note: `no signal sent: ${identity.reason}`
+    };
+  }
+  const signals = [];
+  const term = signalGroup(workerPid, "SIGTERM");
+  if (term.sent === null) {
+    const groupGone = term.code === "ESRCH";
+    return {
+      killed: false,
+      identity_verified: true,
+      worker_gone: groupGone,
+      signals,
+      identity,
+      note: groupGone ? `no signal sent: ${term.reason} \u2014 the worker died between the identity check and the signal, so the record is archived and nothing else is signalled (a pid whose group is gone is not this run's worker)` : `no signal sent: ${term.reason}`
+    };
+  }
+  signals.push(term.sent);
+  if (await waitForDeath(workerPid, graceMs)) {
+    return {
+      killed: true,
+      identity_verified: true,
+      worker_gone: true,
+      signals,
+      identity,
+      note: `worker group ${workerPid} exited on SIGTERM`
+    };
+  }
+  const recheck = verifyWorkerIdentity(workerPid, workerStartedAt, lane);
+  if (!recheck.verified) {
+    return {
+      killed: signals.length > 0,
+      identity_verified: false,
+      worker_gone: false,
+      signals,
+      identity: recheck,
+      note: `SIGTERM was sent, but pid ${workerPid} no longer verifies as this run's worker (${recheck.reason}) \u2014 SIGKILL withheld`
+    };
+  }
+  const kill = signalGroup(workerPid, "SIGKILL");
+  if (kill.sent) signals.push(kill.sent);
+  const gone = await waitForDeath(workerPid, KILL_SETTLE_MS);
+  return {
+    killed: signals.length > 0,
+    identity_verified: true,
+    worker_gone: gone,
+    signals,
+    identity: recheck,
+    note: gone ? `worker group ${workerPid} survived SIGTERM for ${graceMs}ms and was SIGKILLed` : `worker group ${workerPid} did not exit within ${KILL_SETTLE_MS}ms of SIGKILL \u2014 it may be stuck in the kernel`
+  };
+}
+var ADOPTED_TERMINAL_REASON = "cancelled-foreign";
+function archiveAdoptedRun(input) {
+  const { runDir, id, adopterPid, ownerPid, workerPid, outcome } = input;
+  const nowIso = new Date(input.now ?? Date.now()).toISOString();
+  const problems = [];
+  const explanation = `run '${id}' was adopted and cancelled by Clanker server pid ${adopterPid} at ${nowIso}: its own server (pid ${ownerPid ?? "unknown"}) was gone, so this process took over. worker_pid ${workerPid ?? "none"}; identity_verified=${outcome.identity_verified}; signals=[${outcome.signals.join(", ") || "none"}]; ${outcome.note}`;
+  const telemetryPath = path6.join(runDir, "telemetry.json");
+  let record2 = {};
+  let recordUnreadable = false;
+  try {
+    record2 = JSON.parse(fs6.readFileSync(telemetryPath, "utf8"));
+  } catch {
+    record2 = { id };
+    recordUnreadable = true;
+  }
+  if (record2.terminal_at) {
+    return {
+      archived: false,
+      reason: `owner wrote terminal first (terminal_at=${String(record2.terminal_at)}, terminal_reason=${String(record2.terminal_reason ?? "unknown")}) \u2014 nothing in ${runDir} was modified, because a terminal record means the owner's own account of this run is already on disk`,
+      telemetry_written: false,
+      result_stub_written: false,
+      problems: []
+    };
+  }
+  if (recordUnreadable) {
+    problems.push("existing telemetry.json was unreadable; wrote a minimal terminal record over it");
+  }
+  let telemetryWritten = false;
+  try {
+    record2.terminal_at = nowIso;
+    record2.terminal_reason = ADOPTED_TERMINAL_REASON;
+    record2.error = record2.error ? `${String(record2.error)}
+${explanation}` : explanation;
+    const tmp = `${telemetryPath}.${process.pid}.tmp`;
+    fs6.writeFileSync(tmp, JSON.stringify(record2, null, 2));
+    fs6.renameSync(tmp, telemetryPath);
+    telemetryWritten = true;
+  } catch (error40) {
+    problems.push(`telemetry archival failed: ${error40 instanceof Error ? error40.message : String(error40)}`);
+  }
+  let resultStubWritten = false;
+  const resultPath = path6.join(runDir, RESULT_FILE);
+  try {
+    let size = 0;
+    try {
+      size = fs6.statSync(resultPath).size;
+    } catch {
+    }
+    if (size === 0) {
+      const lines = [
+        `# clanker run ${id}`,
+        "",
+        "- status: cancelled",
+        `- terminal_reason: ${ADOPTED_TERMINAL_REASON}`,
+        `- run_dir: ${runDir}`,
+        "",
+        "## adoption",
+        "",
+        explanation,
+        "",
+        RESULT_FINAL_MESSAGE_HEADING,
+        "",
+        "(no verdict: this run was cancelled by an adopting server process, which never held its event stream. Nothing here was produced by the worker.)",
+        ""
+      ];
+      const tmp = `${resultPath}.${process.pid}.tmp`;
+      fs6.writeFileSync(tmp, lines.join("\n"));
+      fs6.renameSync(tmp, resultPath);
+      resultStubWritten = true;
+    }
+  } catch (error40) {
+    problems.push(`result stub write failed: ${error40 instanceof Error ? error40.message : String(error40)}`);
+  }
+  return {
+    archived: telemetryWritten,
+    ...telemetryWritten ? {} : { reason: "the terminal record could not be written; the run stays on the in-flight board" },
+    telemetry_written: telemetryWritten,
+    result_stub_written: resultStubWritten,
+    problems
+  };
+}
+
+// src/foreign.ts
+import fs8 from "node:fs";
+import path8 from "node:path";
+
+// src/worktree.ts
+import { execFile } from "node:child_process";
+import fs7 from "node:fs";
+import path7 from "node:path";
+import { promisify } from "node:util";
+var exec = promisify(execFile);
+async function git(cwd, args) {
+  const { stdout } = await exec("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 });
+  return stdout;
+}
+var OWNER_MARKER = ".clanker-owner";
+var sanitize = (s) => s.replace(/[^A-Za-z0-9._-]/g, "-");
+function deriveWorktreePath(branch, runId) {
+  return path7.join(WORKTREES_ROOT, `${sanitize(branch)}-${sanitize(runId).slice(-6)}`);
+}
+function readWorktreeOwner(worktreePath) {
+  try {
+    const first = fs7.readFileSync(path7.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
+    return first || null;
+  } catch {
+    return null;
+  }
+}
+async function isGitWorkTree(cwd) {
+  try {
+    const out = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
+    return out.trim() === "true";
+  } catch {
+    return false;
+  }
+}
+async function resolveTargetRepo(cwd) {
+  try {
+    const top = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
+    if (top) return top;
+  } catch {
+  }
+  throw new Error(
+    `cwd '${cwd}' is not inside a git work tree; a write dispatch cannot be isolated into a worktree cut from a non-repo directory (refusing to silently fall back to the host checkout \u2014 see issue #12)`
+  );
+}
+async function localHeadRef(targetRepo) {
+  try {
+    const head = (await git(targetRepo, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
+    return head || null;
+  } catch {
+    return null;
+  }
+}
+async function remoteDefaultRef(targetRepo) {
+  try {
+    const head = (await git(targetRepo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).trim();
+    if (head) return head;
+  } catch {
+  }
+  for (const ref of ["refs/remotes/origin/main", "refs/remotes/origin/master"]) {
+    try {
+      await git(targetRepo, ["rev-parse", "--verify", "--quiet", ref]);
+      return ref.replace("refs/remotes/", "");
+    } catch {
+    }
+  }
+  return null;
+}
+async function resolveBaseRef(targetRepo) {
+  const head = await localHeadRef(targetRepo);
+  if (head) return head;
+  const remote = await remoteDefaultRef(targetRepo);
+  if (remote) return remote;
+  throw new Error(
+    `target repo '${targetRepo}' has no local HEAD commit, origin/HEAD, origin/main, or origin/master to cut a worktree from (a repo with zero commits cannot be worktree'd)`
+  );
+}
+async function resolveBaseCommit(targetRepo, base) {
+  try {
+    const sha = (await git(targetRepo, ["rev-parse", "--verify", `${base}^{commit}`])).trim();
+    if (sha) return sha;
+  } catch {
+  }
+  throw new Error(
+    `dispatch base '${base}' does not resolve to a commit in target repo '${targetRepo}'; refusing to fall back to the repo's default base (the worktree would be cut from a commit the dispatcher did not name)`
+  );
+}
+async function headSha(cwd) {
+  return (await git(cwd, ["rev-parse", "--verify", "HEAD"])).trim();
+}
+async function createWorktree(branch, runId, targetRepo = BASE_REPO, base) {
+  const wtPath = deriveWorktreePath(branch, runId);
+  if (fs7.existsSync(wtPath)) {
+    throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
+  }
+  const baseRef = base ?? await resolveBaseRef(targetRepo);
+  fs7.mkdirSync(WORKTREES_ROOT, { recursive: true });
+  await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
+  fs7.writeFileSync(path7.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
+`);
+  return wtPath;
+}
+function parsePorcelainZ(out) {
+  const entries = out.split("\0");
+  if (entries.length > 0 && entries[entries.length - 1] === "") entries.pop();
+  const files = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.length < 3) continue;
+    const status = entry.slice(0, 2);
+    const destPath = entry.slice(3);
+    const isRename = status[0] === "R" || status[1] === "R";
+    const isCopy = status[0] === "C" || status[1] === "C";
+    if (isRename || isCopy) {
+      const srcPath = entries[++i];
+      files.push(destPath);
+      if (isRename && srcPath !== void 0) files.push(srcPath);
+    } else {
+      files.push(destPath);
+    }
+  }
+  return files;
+}
+function isGovernanceFile(file2) {
+  return file2 === OWNER_MARKER;
+}
+async function changedFiles(cwd) {
+  const out = await git(cwd, ["status", "--porcelain=v1", "-z"]);
+  return parsePorcelainZ(out).filter((file2) => !isGovernanceFile(file2));
+}
+async function holdsUnmergedWork(worktreePath, targetRepo, baseSha) {
+  if (!baseSha) return true;
+  try {
+    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseSha}..HEAD`])).trim();
+    return ahead !== "0";
+  } catch {
+    return true;
+  }
+}
+function realpathBestEffort(p) {
+  let cur = path7.resolve(p);
+  const tail = [];
+  for (; ; ) {
+    try {
+      const real = fs7.realpathSync(cur);
+      return tail.length ? path7.join(real, ...tail) : real;
+    } catch {
+      const parent = path7.dirname(cur);
+      if (parent === cur) return path7.resolve(p);
+      tail.unshift(path7.basename(cur));
+      cur = parent;
+    }
+  }
+}
+function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
+  const wt = realpathBestEffort(worktreePath);
+  const repo = realpathBestEffort(targetRepo);
+  if (wt === repo || wt.startsWith(repo + path7.sep) || repo.startsWith(wt + path7.sep)) {
+    throw new Error(
+      `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT outside the repo)`
+    );
+  }
+}
+async function changedFilesSince(worktreePath, base) {
+  const out = await git(worktreePath, ["diff", "--name-only", base, "HEAD"]);
+  const committed = out.split("\n").filter((line) => line.trim().length > 0);
+  const uncommitted = await changedFiles(worktreePath);
+  return [.../* @__PURE__ */ new Set([...committed, ...uncommitted])];
+}
+function matchDoNotTouch(patterns, files) {
+  const violations = [];
+  for (const pattern of patterns) {
+    const dir = pattern.replace(/\/+$/, "");
+    if (!dir) continue;
+    const matched = files.filter((file2) => file2 === dir || file2.startsWith(dir + "/"));
+    if (matched.length > 0) violations.push({ pattern, files: matched });
+  }
+  return violations;
+}
+async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runId) {
+  if (fs7.existsSync(worktreePath)) {
+    const owner = readWorktreeOwner(worktreePath);
+    if (!runId || owner !== runId) {
+      console.error(
+        `[clanker] refusing to remove worktree '${worktreePath}': it is owned by ${owner === null ? `no readable ${OWNER_MARKER} marker` : `run '${owner}'`}, and the caller claims ${runId === void 0 ? "no run id at all" : `run '${runId}'`} (a worktree is only ever reclaimed by the run it was created for \u2014 issue #3)`
+      );
+      return false;
+    }
+  }
+  const changes = await changedFiles(worktreePath);
+  if (changes.length > 0) return false;
+  try {
+    const ahead = (await git(worktreePath, ["rev-list", "--count", "@{upstream}..HEAD"])).trim();
+    if (ahead !== "0") return false;
+  } catch {
+    if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return false;
+  }
+  const markerPath = path7.join(worktreePath, OWNER_MARKER);
+  const marker = (() => {
+    try {
+      return fs7.readFileSync(markerPath, "utf8");
+    } catch {
+      return null;
+    }
+  })();
+  try {
+    fs7.rmSync(markerPath, { force: true });
+  } catch {
+  }
+  try {
+    try {
+      await git(targetRepo, ["worktree", "remove", worktreePath]);
+    } catch {
+      await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
+    }
+  } catch (err) {
+    if (marker !== null && fs7.existsSync(worktreePath)) {
+      try {
+        fs7.writeFileSync(markerPath, marker);
+      } catch {
+      }
+    }
+    throw err;
+  }
+  return true;
+}
+
+// src/foreign.ts
+var RUN_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)+$/;
+function isValidRunId(id) {
+  return typeof id === "string" && id.length <= 128 && RUN_ID_PATTERN.test(id);
+}
+function containedRunDir(runsRoot, id) {
+  const root = realpathBestEffort(path8.resolve(runsRoot));
+  const runDir = realpathBestEffort(path8.resolve(path8.resolve(runsRoot), id));
+  if (runDir === root || !runDir.startsWith(root + path8.sep)) return null;
+  return runDir;
+}
+function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
+  if (!isValidRunId(id)) return null;
+  const runDir = containedRunDir(runsRoot, id);
+  if (runDir === null) return null;
+  let telemetry;
+  try {
+    telemetry = JSON.parse(fs8.readFileSync(path8.join(runDir, "telemetry.json"), "utf8"));
+  } catch {
+    return null;
+  }
+  let newestMtimeMs = 0;
+  try {
+    for (const entry of fs8.readdirSync(runDir)) {
+      try {
+        newestMtimeMs = Math.max(newestMtimeMs, fs8.statSync(path8.join(runDir, entry)).mtimeMs);
+      } catch {
+      }
+    }
+  } catch {
+  }
+  let resultPath;
+  try {
+    if (fs8.statSync(path8.join(runDir, RESULT_FILE)).size > 0) resultPath = path8.join(runDir, RESULT_FILE);
+  } catch {
+  }
+  return {
+    id,
+    lane: telemetry.lane ?? null,
+    host: telemetry.host ?? null,
+    created_at: telemetry.created_at ?? null,
+    terminal_at: telemetry.terminal_at ?? null,
+    terminal_reason: telemetry.terminal_reason ?? null,
+    observed_model: telemetry.observed_model ?? null,
+    read_only: telemetry.read_only ?? null,
+    turns: telemetry.turns ?? null,
+    server_pid: typeof telemetry.server_pid === "number" ? telemetry.server_pid : null,
+    worker_pid: typeof telemetry.worker_pid === "number" ? telemetry.worker_pid : null,
+    worker_started_at: typeof telemetry.worker_started_at === "number" ? telemetry.worker_started_at : null,
+    run_dir: runDir,
+    ...resultPath ? { result_path: resultPath } : {},
+    last_activity_ms: newestMtimeMs > 0 ? Math.max(0, now - newestMtimeMs) : -1
+  };
+}
+function foreignRunStatus(run) {
+  if (!run.terminal_at) return "running";
+  switch (run.terminal_reason) {
+    case "done":
+      return "done";
+    case "error":
+      return "error";
+    default:
+      return "cancelled";
+  }
+}
+function scanForeignRuns(options = {}) {
+  const runsRoot = options.runsRoot ?? RUNS_ROOT;
+  const exclude = options.exclude ?? /* @__PURE__ */ new Set();
+  const inFlightOnly = options.inFlightOnly ?? true;
+  const now = options.now ?? Date.now();
+  let ids;
+  try {
+    ids = fs8.readdirSync(runsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
+  const found = [];
+  for (const id of ids) {
+    if (exclude.has(id)) continue;
+    const run = readForeignRun(id, runsRoot, now);
+    if (!run) continue;
+    if (inFlightOnly && run.terminal_at) continue;
+    found.push(run);
+  }
+  const activityRank = (ms) => ms < 0 ? Infinity : ms;
+  found.sort((a, b) => activityRank(a.last_activity_ms) - activityRank(b.last_activity_ms));
+  return found;
+}
+function foreignControlRefusal(id, run, owner) {
+  const state = run.terminal_at ? `already terminal (${run.terminal_reason ?? "unknown"})` : "still in flight";
+  const ownerClause = owner?.state === "alive" ? ` The owner session is still alive (${owner.detail}) \u2014 cancel or wait for this run from THAT session; control transfers only once the owning server is provably dead.` : owner?.state === "unknown" ? ` Ownership could not be established (${owner.detail}), so this process will not take it over: adoption requires proof the owning server is dead, and an unproven owner is treated as a live one.` : "";
+  return `run '${id}' belongs to a different Clanker server process and is ${state}. Each session spawns its own server, and control (wait/cancel/prompt) needs the process that holds the worker's stdio \u2014 it cannot be recovered from disk. You can read its record at ${run.run_dir}${run.result_path ? ` and its verdict at ${run.result_path}` : ""}. Do NOT re-dispatch on the assumption that it never started.${ownerClause}`;
+}
+
+// src/types.ts
+var LANE_NAMES = ["codex", "opencode", "grok", "gemini", "cursor"];
+
+// src/profiles.ts
+var GEMINI_TURN_TIMEOUT_MS = 66e4;
+var CURSOR_REVIEW_TURN_TIMEOUT_MS = 9e5;
+var CURSOR_ROUTING_NOTE = "Routing: the default Composer 2.5 is a bounded single-layer-scaffolding tier (composer-2.5 lane card, #1368) \u2014 provenance and identity-critical cores still require a cross-vendor screen, so do not route those here. Model is a free parameter: the same Cursor subscription also serves cursor-grok-4.5-high (alias `grok`) and gpt-5.3-codex-high (alias `codex53`).";
+var DISPATCH_PROFILES = [
+  {
+    id: "codex-review",
+    title: "Codex cold review (read-only, in place)",
+    description: "Read-only Codex review. lane, read_only=true and sandbox=read-only are welded server-side: the sandbox is welded because a Codex dispatch with read_only=true but a write-capable native sandbox can still write the workspace, so leaving sandbox callable would be a way around the read-only gate. Runs in place by default; an optional worktree branch runs the review inside an isolated tree instead.",
+    lane: "codex",
+    model: { kind: "lane-default" },
+    readOnly: true,
+    sandbox: { kind: "welded", mode: "read-only" },
+    isolation: "optional",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "reviewer",
+    status: "active"
+  },
+  {
+    id: "codex-write",
+    title: "Codex implementation (isolated worktree)",
+    description: "Write-capable Codex worker. read_only=false is welded and a managed worktree branch is mandatory, so writes are boxed to the worktree. Sandbox strictness stays caller-selectable across all three Codex tiers and defaults to workspace-write. Model omitted on purpose: Codex runs its configured default.",
+    lane: "codex",
+    model: { kind: "lane-default" },
+    readOnly: false,
+    sandbox: { kind: "caller", defaultMode: "workspace-write" },
+    isolation: "required",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "implementer",
+    status: "active"
+  },
+  {
+    id: "oc-review",
+    title: "OpenCode cold review (read-only, in place)",
+    description: "Read-only OpenCode review on the fixed clanker-worker permission profile. read_only=true is welded; an optional worktree branch runs the review inside an isolated tree. An explicit model is required: omitting it lets OpenCode's own interactive config pick the provider (possibly GLM) outside the vault-exec credential wrap.",
+    lane: "opencode",
+    model: { kind: "caller-required" },
+    readOnly: true,
+    isolation: "optional",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "reviewer",
+    ocProfile: "worker",
+    status: "active"
+  },
+  {
+    id: "oc-write",
+    title: "OpenCode implementation (isolated worktree)",
+    description: "Write-capable OpenCode worker on the fixed clanker-worker permission profile. read_only=false is welded and a managed worktree branch is mandatory. An explicit non-GLM model is required; GLM writes are rejected here and belong to the supervised oc-glm-write profile.",
+    lane: "opencode",
+    model: { kind: "caller-required" },
+    readOnly: false,
+    isolation: "required",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "implementer",
+    ocProfile: "worker",
+    status: "active"
+  },
+  {
+    id: "oc-glm-write",
+    title: "Supervised GLM implementation (isolated worktree)",
+    description: "The only supervised GLM write shape. lane=opencode, model=glm and read_only=false are welded, a managed worktree branch is mandatory, ZHIPUAI_API_KEY is materialized from the OS keychain through `tachi vault exec` at spawn time, and the profile requires a Sonnet supervisor seat that can correct or cancel the worker.",
+    lane: "opencode",
+    model: { kind: "welded", id: "glm" },
+    readOnly: false,
+    isolation: "required",
+    secrets: ["ZHIPUAI_API_KEY"],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "sonnet",
+    roleClass: "implementer",
+    ocProfile: "worker",
+    status: "active"
+  },
+  {
+    id: "oc-kimi-crew",
+    title: "Kimi Crew (OpenCode-owned multi-agent profile)",
+    description: "Runs the installed OpenCode `kimi-crew` profile, which owns its own child agents, prompts and permissions. lane=opencode, model=kimi and read_only=false are welded and a managed worktree branch is mandatory. Not a GLM lane and not externally supervised.",
+    lane: "opencode",
+    model: { kind: "welded", id: "kimi" },
+    readOnly: false,
+    isolation: "required",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "implementer",
+    ocProfile: "kimi-crew",
+    status: "active"
+  },
+  {
+    id: "gemini-recon",
+    title: "Gemini reconnaissance (read-only, in place)",
+    description: "Read-only Gemini survey. The lane is reconnaissance-only server-side and rejects both write mode and worktrees (the only profile whose isolation is forbidden rather than optional \u2014 it is the lane's own rule, not a registry preference); the model defaults to the sidecar's configured Gemini model.",
+    lane: "gemini",
+    model: { kind: "lane-default" },
+    readOnly: true,
+    isolation: "forbidden",
+    secrets: [],
+    turnTimeoutMs: GEMINI_TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "scout",
+    status: "active"
+  },
+  {
+    id: "gemini-research",
+    title: "Gemini online research (read-only, in place)",
+    description: "Read-only Gemini web research entry \u2014 the online-research counterpart to gemini-recon's quick survey. Every conclusion must carry its source URL and anything unsourced is reported as unverified. Same lane rules as gemini-recon: reconnaissance-only server-side, write mode and worktrees rejected; the model defaults to the sidecar's configured Gemini model.",
+    lane: "gemini",
+    model: { kind: "lane-default" },
+    readOnly: true,
+    isolation: "forbidden",
+    secrets: [],
+    turnTimeoutMs: GEMINI_TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "scout",
+    status: "active"
+  },
+  {
+    id: "cursor-review",
+    title: "Cursor cold review (read-only, in place)",
+    description: "Read-only Cursor review through the cursor-agent headless stream. read_only=true is welded and the lane runs cursor's own read-only execution mode plus its sandbox on top of it; an optional worktree branch runs the review inside an isolated tree instead of the working checkout. " + CURSOR_ROUTING_NOTE,
+    lane: "cursor",
+    model: { kind: "caller-optional", defaultId: "composer-2.5" },
+    readOnly: true,
+    isolation: "optional",
+    secrets: [],
+    turnTimeoutMs: CURSOR_REVIEW_TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "reviewer",
+    status: "active"
+  },
+  {
+    id: "cursor-write",
+    title: "Cursor implementation (isolated worktree)",
+    description: "Write-capable Cursor worker. read_only=false is welded and a managed worktree branch is mandatory, so writes are boxed to the worktree rather than to cursor's own `--worktree`, which Clanker does not use. " + CURSOR_ROUTING_NOTE,
+    lane: "cursor",
+    model: { kind: "caller-optional", defaultId: "composer-2.5" },
+    readOnly: false,
+    isolation: "required",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "implementer",
+    status: "active"
+  },
+  {
+    id: "grok-review",
+    title: "Grok cold review (read-only, in place)",
+    description: "Read-only Grok review with Clanker's own native containment flags. read_only=true is welded; an optional worktree branch runs the review inside an isolated tree. Model may be omitted \u2014 the grok lane has its own configured default. Currently dormant: the account returns HTTP 402 (out of credit).",
+    lane: "grok",
+    model: { kind: "lane-default" },
+    readOnly: true,
+    isolation: "optional",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "reviewer",
+    status: "dormant",
+    dormantReason: "grok account is out of credit (HTTP 402)"
+  },
+  {
+    id: "grok-write",
+    title: "Grok implementation (isolated worktree)",
+    description: "Write-capable Grok worker with a native workspace sandbox. read_only=false is welded and a managed worktree branch is mandatory; an explicit model is required. Currently dormant: the account returns HTTP 402 (out of credit).",
+    lane: "grok",
+    model: { kind: "caller-required" },
+    readOnly: false,
+    isolation: "required",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "none",
+    roleClass: "implementer",
+    status: "dormant",
+    dormantReason: "grok account is out of credit (HTTP 402)"
+  }
+];
+var PROFILE_IDS = DISPATCH_PROFILES.map((p) => p.id);
+var BY_ID = new Map(DISPATCH_PROFILES.map((p) => [p.id, p]));
+function getProfile(id) {
+  const profile = BY_ID.get(id);
+  if (!profile) throw new Error(`unknown profile '${id}'; expected one of ${PROFILE_IDS.join(", ")}`);
+  return profile;
+}
+var ENV_PREFIX = "CLANKER_TURN_TIMEOUT_MS_";
+function profileTurnTimeoutMs(profile, env = process.env) {
+  const raw = env[ENV_PREFIX + profile.id.replace(/-/g, "_").toUpperCase()];
+  if (raw === void 0) return profile.turnTimeoutMs;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : profile.turnTimeoutMs;
+}
+function resolveProfileDispatch(input, env = process.env) {
+  const profile = getProfile(input.profile);
+  if (profile.isolation === "forbidden" && input.worktree !== void 0) {
+    throw new Error(`profile '${profile.id}' runs in place and does not take a worktree`);
+  }
+  if (profile.isolation === "forbidden" && input.base !== void 0) {
+    throw new Error(`profile '${profile.id}' cuts no worktree and therefore takes no base`);
+  }
+  if (profile.isolation === "forbidden" && input.doNotTouch !== void 0) {
+    throw new Error(`profile '${profile.id}' cuts no worktree and therefore takes no doNotTouch`);
+  }
+  if (profile.isolation === "required" && !input.worktree?.trim()) {
+    throw new Error(`profile '${profile.id}' is write-capable and requires a managed worktree branch name`);
+  }
+  let sandbox;
+  if (profile.sandbox === void 0) {
+    if (input.sandbox !== void 0) {
+      throw new Error(`profile '${profile.id}' runs on a lane with no native sandbox tier; it takes no sandbox argument`);
+    }
+  } else if (profile.sandbox.kind === "welded") {
+    if (input.sandbox !== void 0 && input.sandbox !== profile.sandbox.mode) {
+      throw new Error(`profile '${profile.id}' welds sandbox='${profile.sandbox.mode}'; it cannot be overridden`);
+    }
+    sandbox = profile.sandbox.mode;
+  } else {
+    sandbox = input.sandbox ?? profile.sandbox.defaultMode;
+  }
+  let model;
+  switch (profile.model.kind) {
+    case "welded":
+      if (input.model !== void 0 && input.model.trim() !== profile.model.id) {
+        throw new Error(`profile '${profile.id}' welds model='${profile.model.id}'; it cannot be overridden`);
+      }
+      model = profile.model.id;
+      break;
+    case "lane-default":
+      if (input.model !== void 0) {
+        throw new Error(`profile '${profile.id}' uses the lane's configured default model; it takes no model argument`);
+      }
+      model = void 0;
+      break;
+    case "caller-optional":
+      model = input.model?.trim() || void 0;
+      break;
+    case "caller-required":
+      if (!input.model?.trim()) {
+        throw new Error(`profile '${profile.id}' requires an explicit model id`);
+      }
+      model = input.model.trim();
+      if (!profile.readOnly && profile.supervision !== "sonnet" && isGlmModel(model)) {
+        throw new Error(
+          `profile '${profile.id}' cannot run a GLM write; GLM writes are supervised and belong to profile 'oc-glm-write'`
+        );
+      }
+      break;
+  }
+  return {
+    lane: profile.lane,
+    prompt: input.prompt,
+    cwd: input.cwd,
+    worktree: input.worktree,
+    base: input.base,
+    doNotTouch: input.doNotTouch,
+    model,
+    effort: input.effort,
+    readOnly: profile.readOnly,
+    sandbox,
+    profile: profile.ocProfile,
+    secrets: profile.secrets,
+    supervision: profile.supervision,
+    turnTimeoutMs: profileTurnTimeoutMs(profile, env),
+    profileId: profile.id
+  };
+}
+
+// src/host.ts
+var HOSTS = ["claude", "codex", "standalone"];
+var CODEX_LANES = LANE_NAMES.filter((lane) => lane !== "codex");
+function parseHostArgs(args) {
+  let host;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg !== "--host" && !arg.startsWith("--host=")) continue;
+    if (host !== void 0) throw new Error("duplicate --host option");
+    const value = arg === "--host" ? args[++i] : arg.slice("--host=".length);
+    if (!value || !HOSTS.includes(value)) {
+      throw new Error(`invalid --host '${value ?? ""}'; expected one of ${HOSTS.join(", ")}`);
+    }
+    host = value;
+  }
+  return host ?? "standalone";
+}
+function hostLaneBlockedReason(host, lane) {
+  if (host === "codex" && lane === "codex") {
+    return "host=codex cannot dispatch the codex ACP lane (self-dispatch is prohibited)";
+  }
+  return void 0;
+}
+
 // src/acp-client.ts
 import { spawn } from "node:child_process";
-import fs2 from "node:fs";
-import path2 from "node:path";
+import fs9 from "node:fs";
+import path9 from "node:path";
 import { Readable, Writable } from "node:stream";
 
 // node_modules/@agentclientprotocol/sdk/dist/schema/index.js
@@ -31184,55 +33425,6 @@ var legacyClientNotificationMethods = /* @__PURE__ */ new Set([
   CLIENT_METHODS.elicitation_complete
 ]);
 
-// src/node-binary.ts
-import { execFileSync } from "node:child_process";
-import fs from "node:fs";
-var PATH_NODE = "node";
-var RESOLVED_NODE = resolveAtStartup();
-function resolveAtStartup() {
-  try {
-    return fs.realpathSync(process.execPath);
-  } catch {
-    return process.execPath;
-  }
-}
-function resolveNodeBinary() {
-  return resolveNodeBinaryFrom(RESOLVED_NODE);
-}
-function resolveNodeBinaryFrom(recorded) {
-  if (fs.existsSync(recorded)) return recorded;
-  console.error(
-    `[clanker] node binary drift (#37): '${recorded}' no longer exists (homebrew revision bump, or an in-place runtime upgrade) \u2014 falling back to '${PATH_NODE}' on PATH. ` + driftDetail()
-  );
-  return PATH_NODE;
-}
-function driftDetail() {
-  const probed = probePathNodeVersion();
-  if (probed === null) {
-    return `Could not run '${PATH_NODE} --version' either \u2014 sidecar spawns will most likely fail with ENOENT (CLANKER-ENV-DRIFT). Restart the MCP server on a node that exists.`;
-  }
-  const theirs = majorOf(probed);
-  const ours = majorOf(process.version);
-  if (theirs !== null && theirs === ours) {
-    return `PATH ${PATH_NODE} is ${probed}, same major as this server's ${process.version} \u2014 degraded but consistent.`;
-  }
-  return `MAJOR VERSION MISMATCH: PATH ${PATH_NODE} is ${probed}, this server runs ${process.version}. Spawning anyway \u2014 a lane on a different major beats no lane at all \u2014 but sidecars are NO LONGER on the server's runtime. Restart the MCP server to get back onto one node.`;
-}
-function probePathNodeVersion() {
-  try {
-    const out = execFileSync(PATH_NODE, ["--version"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    }).trim();
-    return out || null;
-  } catch {
-    return null;
-  }
-}
-function majorOf(version2) {
-  return /^v?(\d+)\./.exec(version2.trim())?.[1] ?? null;
-}
-
 // src/acp-client.ts
 var Deferred = class {
   promise;
@@ -31345,13 +33537,13 @@ var LaneConnection = class _LaneConnection {
   static async connect(options) {
     const { spec, cwd, readOnly, onFileWritten } = options;
     const handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
-    if (cwd && !fs2.existsSync(cwd)) {
+    if (cwd && !fs9.existsSync(cwd)) {
       throw new Error(
         `lane cwd does not exist: ${cwd} (worktree reaped or path typo?) \u2014 refusing to spawn`
       );
     }
     const nodeBin = resolveNodeBinary();
-    const nodeBinDir = path2.isAbsolute(nodeBin) ? path2.dirname(nodeBin) + path2.delimiter : "";
+    const nodeBinDir = path9.isAbsolute(nodeBin) ? path9.dirname(nodeBin) + path9.delimiter : "";
     const child = spawn(spec.command, spec.args, {
       cwd,
       env: {
@@ -31428,11 +33620,11 @@ var LaneConnection = class _LaneConnection {
     const output = Readable.toWeb(child.stdout);
     const stream = ndJsonStream(input, output);
     const handlePermission = (params) => choosePermissionOption(params.options ?? [], readOnly);
-    const root = fs2.realpathSync(cwd);
+    const root = fs9.realpathSync(cwd);
     const handleReadTextFile = (params) => {
       try {
         const target = resolveContainedReadPath(root, params.path);
-        const content = fs2.readFileSync(target, "utf8");
+        const content = fs9.readFileSync(target, "utf8");
         return { content };
       } catch (e) {
         throw new Error(`read_text_file failed for ${params.path}: ${e instanceof Error ? e.message : String(e)}`);
@@ -31480,1940 +33672,46 @@ var LaneConnection = class _LaneConnection {
   }
 };
 function assertContained(root, target, requested) {
-  if (target !== root && !target.startsWith(root + path2.sep)) {
+  if (target !== root && !target.startsWith(root + path9.sep)) {
     throw new Error(`filesystem boundary rejection: path is outside session cwd (${requested})`);
   }
   return target;
 }
 function resolveContainedReadPath(root, requested) {
-  const canonicalRoot = fs2.realpathSync(root);
-  const lexical = path2.resolve(canonicalRoot, requested);
-  if (!path2.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
-  return assertContained(canonicalRoot, fs2.realpathSync(lexical), requested);
+  const canonicalRoot = fs9.realpathSync(root);
+  const lexical = path9.resolve(canonicalRoot, requested);
+  if (!path9.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
+  return assertContained(canonicalRoot, fs9.realpathSync(lexical), requested);
 }
 function resolveContainedWritePath(root, requested) {
-  const canonicalRoot = fs2.realpathSync(root);
-  const lexical = path2.resolve(canonicalRoot, requested);
-  if (!path2.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
+  const canonicalRoot = fs9.realpathSync(root);
+  const lexical = path9.resolve(canonicalRoot, requested);
+  if (!path9.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
   try {
-    if (fs2.lstatSync(lexical).isSymbolicLink()) {
+    if (fs9.lstatSync(lexical).isSymbolicLink()) {
       throw new Error(`filesystem boundary rejection: final write target is a symlink (${requested})`);
     }
   } catch (e) {
     if (e.code !== "ENOENT") throw e;
   }
-  const parent = assertContained(canonicalRoot, fs2.realpathSync(path2.dirname(lexical)), requested);
-  return assertContained(canonicalRoot, path2.join(parent, path2.basename(lexical)), requested);
+  const parent = assertContained(canonicalRoot, fs9.realpathSync(path9.dirname(lexical)), requested);
+  return assertContained(canonicalRoot, path9.join(parent, path9.basename(lexical)), requested);
 }
 function writeContainedTextFile(target, requested, content) {
-  const flags = fs2.constants.O_WRONLY | fs2.constants.O_CREAT | (fs2.constants.O_NOFOLLOW ?? 0);
-  const fd = fs2.openSync(target, flags, 438);
+  const flags = fs9.constants.O_WRONLY | fs9.constants.O_CREAT | (fs9.constants.O_NOFOLLOW ?? 0);
+  const fd = fs9.openSync(target, flags, 438);
   try {
-    const stat = fs2.fstatSync(fd);
+    const stat = fs9.fstatSync(fd);
     if (stat.nlink > 1) {
       throw new Error(
         `filesystem boundary rejection: write target has ${stat.nlink} hardlinks (${requested})`
       );
     }
-    fs2.ftruncateSync(fd, 0);
-    fs2.writeFileSync(fd, content);
+    fs9.ftruncateSync(fd, 0);
+    fs9.writeFileSync(fd, content);
   } finally {
-    fs2.closeSync(fd);
+    fs9.closeSync(fd);
   }
-}
-
-// src/backends.ts
-import fs4 from "node:fs";
-import { createRequire } from "node:module";
-import os3 from "node:os";
-import path4 from "node:path";
-import { fileURLToPath } from "node:url";
-
-// src/grok-diagnostics.ts
-import fs3 from "node:fs";
-import os2 from "node:os";
-import path3 from "node:path";
-function resolveGrokHome() {
-  return process.env.GROK_HOME ?? path3.join(os2.homedir(), ".grok");
-}
-var FAILURE_MSG_PATTERN = /inference_failed|terminal_failure/;
-function grokFailureDetail(turnStartMs, now = Date.now()) {
-  try {
-    const logPath = path3.join(resolveGrokHome(), "logs", "unified.jsonl");
-    const raw = fs3.readFileSync(logPath, "utf8");
-    const lines = raw.split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i].trim();
-      if (!line || !FAILURE_MSG_PATTERN.test(line)) continue;
-      let parsed;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (typeof parsed !== "object" || parsed === null) continue;
-      const rec = parsed;
-      if (typeof rec.msg !== "string" || !FAILURE_MSG_PATTERN.test(rec.msg)) continue;
-      const ts = typeof rec.ts === "string" ? Date.parse(rec.ts) : NaN;
-      if (!Number.isFinite(ts) || ts < turnStartMs || ts > now) continue;
-      const statusCode = rec.ctx?.status_code;
-      const message = rec.ctx?.message;
-      if (statusCode === void 0 && message === void 0) continue;
-      return `Grok backend error \u2014 status_code=${statusCode ?? "?"} message=${message ?? "?"}`;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// src/backends.ts
-var nodeRequire = createRequire(import.meta.url);
-function resolveCodexAcpEntry() {
-  const packagedEntry = fileURLToPath(new URL("./codex-acp.mjs", import.meta.url));
-  if (fs4.existsSync(packagedEntry)) return packagedEntry;
-  const pkgJsonPath = nodeRequire.resolve("@agentclientprotocol/codex-acp/package.json");
-  return path4.join(path4.dirname(pkgJsonPath), "dist", "index.js");
-}
-function resolveGeminiAcpEntry() {
-  const candidates = [
-    fileURLToPath(new URL("./gemini-acp.mjs", import.meta.url)),
-    fileURLToPath(new URL("./gemini-acp.js", import.meta.url)),
-    fileURLToPath(new URL("../plugin/dist/gemini-acp.mjs", import.meta.url))
-  ];
-  const entry = candidates.find((candidate) => fs4.existsSync(candidate));
-  if (entry) return entry;
-  throw new Error("Gemini ACP sidecar is missing; run `npm run bundle` before dispatching Clanker: Gemini");
-}
-function resolveCursorAcpEntry() {
-  const candidates = [
-    fileURLToPath(new URL("./cursor-acp.mjs", import.meta.url)),
-    fileURLToPath(new URL("./cursor-acp.js", import.meta.url)),
-    fileURLToPath(new URL("../plugin/dist/cursor-acp.mjs", import.meta.url))
-  ];
-  const entry = candidates.find((candidate) => fs4.existsSync(candidate));
-  if (entry) return entry;
-  throw new Error("Cursor ACP sidecar is missing; run `npm run bundle` before dispatching Clanker: Cursor");
-}
-function isGeminiModel(model) {
-  return model.trim().toLowerCase().startsWith("gemini-");
-}
-function requireGeminiWorkspaceSandbox() {
-  if (process.platform !== "darwin") {
-    throw new Error("Clanker: Gemini currently requires macOS sandbox-exec for a fail-closed workspace read-only boundary");
-  }
-  try {
-    fs4.accessSync("/usr/bin/sandbox-exec", fs4.constants.X_OK);
-  } catch {
-    throw new Error("Clanker: Gemini requires executable /usr/bin/sandbox-exec for a fail-closed workspace read-only boundary");
-  }
-}
-function resolveSystemCodexPath() {
-  const searchPath = process.env.PATH ?? "";
-  for (const dir of searchPath.split(path4.delimiter)) {
-    if (!dir) continue;
-    const candidate = path4.join(dir, "codex");
-    try {
-      fs4.accessSync(candidate, fs4.constants.X_OK);
-      return candidate;
-    } catch {
-    }
-  }
-  return "codex";
-}
-function resolveSystemAgyPath() {
-  return resolveLocalBinPath("agy");
-}
-function resolveLocalBinPath(binary) {
-  const candidates = [
-    ...(process.env.PATH ?? "").split(path4.delimiter).filter(Boolean).map((dir) => path4.join(dir, binary)),
-    path4.join(os3.homedir(), ".local", "bin", binary)
-  ];
-  for (const candidate of candidates) {
-    try {
-      fs4.accessSync(candidate, fs4.constants.X_OK);
-      return candidate;
-    } catch {
-    }
-  }
-  return binary;
-}
-var CAPS = {
-  codex: { model: true, effort: true, sandbox: true },
-  opencode: { model: true, effort: false, sandbox: false },
-  grok: { model: true, effort: true, sandbox: false },
-  gemini: { model: true, effort: true, sandbox: false },
-  // cursor has no reasoning-effort flag at all: the effort tier is baked into
-  // the model id (`gpt-5.3-codex-high` vs `-xhigh`), so an effort override has
-  // nowhere to go and warns. Its `--sandbox enabled|disabled` is a boolean of
-  // its own, not codex-acp's three-tier CodexSandboxMode, so it is not exposed
-  // through that option either — the read-only lane sets it unconditionally.
-  cursor: { model: true, effort: false, sandbox: false }
-};
-var REQUIRED_ENV = {
-  codex: [],
-  grok: [],
-  gemini: [],
-  // Cursor holds its own login state under ~/.cursor (the observed init event
-  // reports `apiKeySource: "login"`), so Clanker never carries a secret for it.
-  cursor: []
-};
-function opencodeRequiredEnv(model) {
-  return isGlmModel(model) ? ["ZHIPUAI_API_KEY"] : [];
-}
-function requiredEnvFor(lane, opts) {
-  const base = lane === "opencode" ? opencodeRequiredEnv(opts.model) : REQUIRED_ENV[lane];
-  return [.../* @__PURE__ */ new Set([...base, ...opts.secrets ?? []])];
-}
-function wrapWithVaultExec(spec, requiredEnv) {
-  if (requiredEnv.length === 0) return spec;
-  return {
-    ...spec,
-    command: "tachi",
-    args: ["vault", "exec", "--keychain", "--require", requiredEnv.join(","), "--", spec.command, ...spec.args]
-  };
-}
-var SANDBOX_TO_AGENT_MODE = {
-  "read-only": "read-only",
-  "workspace-write": "agent",
-  "danger-full-access": "agent-full-access"
-};
-function opencodeClankerAgent(readOnly) {
-  return {
-    description: "Dedicated OpenCode ACP worker controlled by Clanker.",
-    mode: "primary",
-    permission: {
-      // OpenCode flattens every injected MCP tool to `${server}_${tool}` and
-      // matches the permission globs against those concrete names before the
-      // LLM request (session/tools.ts -> permission/index.ts). Denying that
-      // namespace is what actually closes the door: a read-only lane was
-      // observed calling `tachi_task` (it really spawned a claude dispatch)
-      // and `tachi_skill`, because `task`/`skill` below only ever matched the
-      // NATIVE tools of those exact names. Native tools are all compact
-      // lowercase — bash/read/glob/grep/edit/write/webfetch/todowrite — so
-      // this costs the worker nothing (`apply_patch` and the MCP resource
-      // helpers are normalized to `edit`/`read` before the glob runs).
-      // Do NOT "simplify" this to `mcp: {}` in the config: configs deep-merge,
-      // so an empty mcp object removes no ambient server. This is the fix.
-      "*_*": "deny",
-      task: "deny",
-      skill: "deny",
-      external_directory: "deny",
-      edit: readOnly ? "deny" : "allow",
-      bash: readOnly ? "deny" : "allow"
-    },
-    prompt: [
-      "You are a Clanker-controlled OpenCode ACP worker.",
-      "Execute only the exact task supplied by the parent in the provided working directory.",
-      "Clanker owns the session lifecycle, workspace or worktree selection, cancellation, and progress reporting.",
-      "Never spawn or delegate to subagents, load skills, access paths outside the current worktree, create or switch worktrees, or attempt to manage Clanker itself.",
-      "Return concrete results, changed files, verification evidence, and any remaining risk to the parent."
-    ].join("\n")
-  };
-}
-function buildSpawnSpec(lane, opts, runDir) {
-  const warnings = [];
-  const env = {};
-  const caps = CAPS[lane];
-  if (opts.model && !caps.model) {
-    warnings.push(`lane '${lane}' does not support model override; ignoring model='${opts.model}'`);
-  }
-  if (opts.effort && !caps.effort) {
-    warnings.push(`lane '${lane}' does not support reasoning-effort override; ignoring effort='${opts.effort}'`);
-  }
-  if (opts.sandbox && !caps.sandbox) {
-    warnings.push(`lane '${lane}' does not support sandbox override; ignoring sandbox='${opts.sandbox}'`);
-  }
-  if (opts.resumeRef && !LANES_WITH_RESUME.has(lane)) {
-    warnings.push(`lane '${lane}' cannot resume a backend session; ignoring resumeRef='${opts.resumeRef}'`);
-  }
-  switch (lane) {
-    case "cursor": {
-      const mode = opts.readOnly === true ? process.env.CLANKER_CURSOR_MODE?.trim() === "plan" ? "plan" : "ask" : "write";
-      env.CLANKER_CURSOR_MODE = mode;
-      env.CLANKER_CURSOR_MODEL = resolveCursorModel(opts.model) || DEFAULT_CURSOR_MODEL;
-      env.CLANKER_CURSOR_AGENT_PATH = process.env.CLANKER_CURSOR_AGENT_PATH ?? resolveLocalBinPath("cursor-agent");
-      if (opts.resumeRef) env.CLANKER_CURSOR_RESUME = opts.resumeRef;
-      if (process.env.CLANKER_CURSOR_PRINT_TIMEOUT) {
-        env.CLANKER_CURSOR_PRINT_TIMEOUT = process.env.CLANKER_CURSOR_PRINT_TIMEOUT;
-      }
-      return wrapWithVaultExec(
-        // resolveNodeBinary(), not process.execPath: this server can outlive
-        // the path it was launched from (#37).
-        { command: resolveNodeBinary(), args: [resolveCursorAcpEntry()], env, warnings },
-        requiredEnvFor(lane, opts)
-      );
-    }
-    case "gemini": {
-      if (opts.readOnly !== true) {
-        throw new Error("Clanker: Gemini is reconnaissance-only and cannot run write-capable dispatches");
-      }
-      requireGeminiWorkspaceSandbox();
-      const model = opts.model?.trim() || "gemini-3.6-flash-high";
-      if (!isGeminiModel(model)) {
-        throw new Error(`Clanker: Gemini requires a Gemini model id; received '${model}'`);
-      }
-      const effort = opts.effort?.trim();
-      if (effort && effort !== "medium" && effort !== "high") {
-        throw new Error(`Clanker: Gemini effort must be 'medium' or 'high'; received '${effort}'`);
-      }
-      env.CLANKER_AGY_PATH = process.env.CLANKER_AGY_PATH ?? resolveSystemAgyPath();
-      env.CLANKER_GEMINI_MODEL = model;
-      if (opts.geminiRole) env.CLANKER_GEMINI_ROLE = opts.geminiRole;
-      if (process.env.CLANKER_GEMINI_PRINT_TIMEOUT) {
-        env.CLANKER_GEMINI_PRINT_TIMEOUT = process.env.CLANKER_GEMINI_PRINT_TIMEOUT;
-      }
-      if (effort) env.CLANKER_GEMINI_EFFORT = effort;
-      return wrapWithVaultExec(
-        // resolveNodeBinary(), not process.execPath: this server can outlive
-        // the path it was launched from (#37).
-        { command: resolveNodeBinary(), args: [resolveGeminiAcpEntry()], env, warnings },
-        requiredEnvFor(lane, opts)
-      );
-    }
-    case "grok": {
-      env.GROK_HOME = resolveGrokHome();
-      const args = [
-        "--sandbox",
-        opts.readOnly === true ? "read-only" : "workspace",
-        "--permission-mode",
-        "default",
-        "--no-subagents",
-        "agent",
-        "--no-leader",
-        "--model",
-        opts.model ?? "grok-4.5"
-      ];
-      if (opts.effort) args.push("--reasoning-effort", opts.effort);
-      args.push("stdio");
-      return wrapWithVaultExec({ command: "grok", args, env, warnings }, requiredEnvFor(lane, opts));
-    }
-    case "opencode": {
-      if (!opts.model?.trim()) {
-        throw new Error(
-          "opencode lane requires an explicit model id \u2014 omitting it would let OpenCode's interactive default choose a different model"
-        );
-      }
-      const args = ["acp"];
-      const model = resolveOcModel(opts.model);
-      const profile = opts.profile === "kimi-crew" ? "kimi-crew" : "clanker-worker";
-      const config2 = {
-        $schema: "https://opencode.ai/config.json",
-        default_agent: profile
-      };
-      if (opts.profile !== "kimi-crew") config2.agent = { [profile]: opencodeClankerAgent(opts.readOnly === true) };
-      if (model) config2.model = model;
-      const cfgPath = path4.join(runDir, "opencode-config.json");
-      fs4.writeFileSync(cfgPath, JSON.stringify(config2, null, 2));
-      env.OPENCODE_CONFIG = cfgPath;
-      env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config2);
-      if (opts.profile !== "kimi-crew") {
-        env.OPENCODE_DISABLE_CLAUDE_CODE = "1";
-        env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
-      }
-      return wrapWithVaultExec({ command: "opencode", args, env, warnings }, requiredEnvFor(lane, opts));
-    }
-    case "codex": {
-      const codexConfig = {
-        features: { multi_agent_v2: { enabled: false } }
-      };
-      codexConfig.model = opts.model?.trim() || DEFAULT_CODEX_MODEL;
-      codexConfig.model_reasoning_effort = opts.effort?.trim() || DEFAULT_CODEX_EFFORT;
-      env.CODEX_CONFIG = JSON.stringify(codexConfig);
-      const agentMode = opts.sandbox ? SANDBOX_TO_AGENT_MODE[opts.sandbox] ?? (opts.readOnly ? "read-only" : "agent") : opts.readOnly ? "read-only" : "agent";
-      env.INITIAL_AGENT_MODE = agentMode;
-      env.CODEX_PATH = resolveSystemCodexPath();
-      return wrapWithVaultExec(
-        // resolveNodeBinary(), not process.execPath: this server can outlive
-        // the path it was launched from (#37).
-        { command: resolveNodeBinary(), args: [resolveCodexAcpEntry()], env, warnings },
-        requiredEnvFor(lane, opts)
-      );
-    }
-  }
-}
-
-// src/adopt.ts
-import { spawnSync } from "node:child_process";
-import fs7 from "node:fs";
-import path7 from "node:path";
-
-// src/run.ts
-import fs6 from "node:fs";
-import path6 from "node:path";
-
-// src/lane-session.ts
-var LANE_SESSION_META_KEY = "clanker.lane_session";
-function laneSessionRefFrom(meta) {
-  const block = meta?.[LANE_SESSION_META_KEY];
-  if (block === null || typeof block !== "object") return void 0;
-  const ref = block.ref;
-  if (typeof ref !== "string") return void 0;
-  return ref.trim() || void 0;
-}
-
-// src/ledger.ts
-import fs5 from "node:fs";
-import os4 from "node:os";
-import path5 from "node:path";
-var rawLedgerDirEnv = process.env.CLANKER_LEDGER_DIR?.trim();
-var LEDGER_DIR = rawLedgerDirEnv ? rawLedgerDirEnv : path5.join(os4.homedir(), ".agents", "dispatch-ledger");
-var LEDGER_PATH = path5.join(LEDGER_DIR, "ledger.jsonl");
-var HOOK_ERRORS_PATH = path5.join(LEDGER_DIR, "hook_errors.log");
-var PROMPT_HEAD_CHAR_BUDGET = 200;
-var ERROR_CLASS_CHAR_BUDGET = 200;
-var DEFAULT_AGENT_PROFILE = "worker";
-function buildLedgerRow(input) {
-  const profile = input.agentProfile ?? DEFAULT_AGENT_PROFILE;
-  const agentType = profile !== DEFAULT_AGENT_PROFILE ? `${input.lane}:${profile}` : input.lane;
-  const isError = input.turnStatus === "error";
-  const isCancelled = input.turnStatus === "cancelled";
-  return {
-    ts: (/* @__PURE__ */ new Date()).toISOString(),
-    session: null,
-    repo: input.cwd,
-    tool: "ClankerMCP",
-    agent_type: agentType,
-    model: input.model ?? null,
-    label: input.id,
-    prompt_head: input.initialPrompt.slice(0, PROMPT_HEAD_CHAR_BUDGET),
-    outcome: isError ? "blocked" : null,
-    review: null,
-    refix_rounds: null,
-    // #37 D1: `error_class` used to be null for BOTH "done" and "cancelled" —
-    // the 13-key contract is grep-consumed downstream (no schema migration
-    // possible without a coordinated change there), so a cancelled run gets a
-    // literal "cancelled" tag here instead of a new column. `outcome` stays
-    // null either way: it is reserved for a human/terminal-review backfill,
-    // not something this writer should synthesize.
-    error_class: isError && input.error ? input.error.slice(0, ERROR_CLASS_CHAR_BUDGET) : isCancelled ? "cancelled" : null,
-    lesson_ref: null
-  };
-}
-function appendLedgerRow(input) {
-  try {
-    fs5.mkdirSync(LEDGER_DIR, { recursive: true });
-    fs5.appendFileSync(LEDGER_PATH, JSON.stringify(buildLedgerRow(input)) + "\n");
-  } catch (error40) {
-    logHookError(input.id, error40);
-  }
-}
-function logHookError(runId, error40) {
-  try {
-    fs5.mkdirSync(LEDGER_DIR, { recursive: true });
-    const message = error40 instanceof Error ? error40.stack ?? error40.message : String(error40);
-    fs5.appendFileSync(
-      HOOK_ERRORS_PATH,
-      `[${(/* @__PURE__ */ new Date()).toISOString()}] native-ledger-writer append failed for run '${runId}': ${message}
-`
-    );
-  } catch (fallbackError) {
-    console.error(
-      `[clanker] ledger write AND hook_errors.log fallback both failed for run '${runId}': ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`
-    );
-  }
-}
-
-// src/run.ts
-var RESULT_FILE = "result.md";
-var RESULT_FINAL_MESSAGE_HEADING = "## final_message";
-var EVENTS_FILE = "events.jsonl";
-var CHUNKS_FILE = "chunks.log";
-var RUN_STREAM_FILES = [EVENTS_FILE, CHUNKS_FILE];
-var EMPTY_PLAN = {
-  entries: [],
-  completed: 0,
-  inProgress: 0,
-  pending: 0,
-  total: 0,
-  currentStep: null
-};
-var LaneRun = class {
-  id;
-  lane;
-  host;
-  cwd;
-  worktreeBranch;
-  worktreePath;
-  /**
-   * The repo the worktree was cut from (resolved from the dispatch cwd, #12).
-   * Cleanup (`git worktree remove`) must run against THIS repo, not the host
-   * baseRepo, or it silently no-ops on the wrong repo and leaks the worktree.
-   */
-  targetRepo;
-  /**
-   * Full SHA the worktree was cut from when the dispatcher supplied an
-   * explicit `base` (verified server-side in manager.ts before the worktree
-   * was created). Undefined when the repo's default base resolution ran;
-   * surfaced in telemetry as `base_sha`.
-   */
-  baseSha;
-  /**
-   * Full SHA of the commit the worktree was cut from, captured at creation
-   * time regardless of whether the caller named a base. This is the diff base
-   * for `doNotTouch` terminal validation (worktree.ts changedFilesSince).
-   */
-  worktreeBaseSha;
-  /**
-   * Caller-declared paths the worker must not touch, validated server-side at
-   * terminal time (manager.ts computeContractViolations) against the real
-   * worktree diff. Undefined when the dispatcher declared none — in which
-   * case NO validation runs and nothing is reported anywhere.
-   */
-  doNotTouch;
-  /**
-   * Violations found while the worktree still existed (closeRun runs before
-   * the terminal status flip, and a clean tree may be removed there — so the
-   * result is stored here for buildWaitResult / writeResultFileOnce to read
-   * afterwards). Recomputed-and-overwritten on every validation pass — a
-   * supervised run validates at its first terminal AND again on close after a
-   * correction round, and the later pass must replace the earlier verdict,
-   * never accumulate with it. Only set when doNotTouch was declared.
-   */
-  contractViolations;
-  readOnly;
-  runDir;
-  createdAt = Date.now();
-  requestOpts;
-  /**
-   * The dispatch's original (first-turn) prompt — retained verbatim so the
-   * native ledger writer (ledger.ts) can derive `prompt_head` at close()
-   * time, when the LaneManager call site no longer has the prompt in scope.
-   * Deliberately never overwritten by a later clanker_prompt continuation:
-   * the ledger row describes the dispatch's lifetime, not its latest turn.
-   */
-  initialPrompt;
-  /**
-   * Hard per-turn ceiling declared by this run's dispatch profile
-   * (profiles.ts). Undefined for dispatches that named no profile — the manager
-   * then falls back to the global CLANKER_TURN_TIMEOUT_MS.
-   */
-  turnTimeoutMs;
-  /**
-   * Whether this run's profile is the supervised shape. Only a supervised run
-   * accepts a correction turn (manager.promptExisting): the capability is
-   * checked against the registry row that minted the run, not against which
-   * tool the caller happens to hold, so a seat cannot talk its way into
-   * steering an unsupervised worker.
-   */
-  supervised;
-  turnStatus = "running";
-  turnsCount = 0;
-  sessionClosed = false;
-  error;
-  /** Set alongside `error` when the failure was classified (see failure-classifier.ts). */
-  failureClass;
-  sessionId;
-  /**
-   * The BACKEND's own conversation id for this run, when the lane reports one
-   * (#43) — see lane-session.ts for what it is and what it is not.
-   *
-   * Written by `observeLaneSession` from the lane-neutral `_meta` key on a
-   * session_info_update, read by manager.ts's resume path (which spawns the
-   * lane again carrying it) and surfaced as telemetry `lane_session_ref`.
-   * Undefined on every lane that reports none, which is every lane but cursor
-   * today — its absence is what makes a correction turn refuse rather than
-   * silently start a worker with no memory of the work it is being corrected
-   * about.
-   *
-   * NOT `sessionId` above: that one names the ACP session this process holds
-   * with the sidecar and dies with the subprocess.
-   */
-  laneSessionRef;
-  worktreeRetained;
-  cancellationRequested = false;
-  terminalAt;
-  startedAt;
-  /**
-   * Wall-clock time the CURRENT turn began (set fresh on every beginTurn
-   * call, unlike `startedAt` above which is job-level and set once via
-   * `??=`). Exists so grok-diagnostics.ts's log tail (issue #9) can bound
-   * its search to the failing turn's own window instead of the whole job's
-   * lifetime.
-   */
-  turnStartedAt;
-  retries = 0;
-  corrections = 0;
-  forcedKill = false;
-  stopReason;
-  promptUsage;
-  sessionUsage;
-  observedModel = null;
-  observedEffort = null;
-  /**
-   * Model a resume turn re-spawned this run on (#43), when the correction named
-   * one. Overrides `requestOpts.model` in telemetry from that turn onward — see
-   * `telemetry()` for why reporting the dispatch's model there would be a lie
-   * with a siren attached.
-   */
-  resumeModel;
-  /** Live worker identity (#32): pid — which is also its pgid — and the ms epoch it was spawned. */
-  workerPid;
-  workerStartedAt;
-  plan = EMPTY_PLAN;
-  finalTouchedFiles = [];
-  toolCallCount = 0;
-  toolCallTitles = /* @__PURE__ */ new Map();
-  /** Last known ToolCall.kind per toolCallId — updates may omit it (see tool_call_update above). */
-  toolCallKinds = /* @__PURE__ */ new Map();
-  touchedFromTools = /* @__PURE__ */ new Set();
-  touchedFromWrites = /* @__PURE__ */ new Set();
-  currentTurnMessage = "";
-  lastFinalMessage = "";
-  lastEventAt = Date.now();
-  idleSince = null;
-  /** Cleared on every real event; see `suspectedStallEdge`. */
-  stallAcknowledged = false;
-  seq = 0;
-  reportedSeq = 0;
-  digestLog = [];
-  lastEmittedMsgLen = 0;
-  waiters = [];
-  eventsStream = null;
-  chunksStream = null;
-  constructor(init) {
-    this.id = init.id;
-    this.lane = init.lane;
-    this.host = init.host ?? "standalone";
-    this.cwd = init.cwd;
-    this.runDir = init.runDir;
-    this.readOnly = init.readOnly;
-    this.worktreeBranch = init.worktreeBranch;
-    this.worktreePath = init.worktreePath;
-    this.targetRepo = init.targetRepo;
-    this.baseSha = init.baseSha;
-    this.worktreeBaseSha = init.worktreeBaseSha;
-    this.doNotTouch = init.doNotTouch;
-    this.requestOpts = init.requestOpts ?? {};
-    this.initialPrompt = init.initialPrompt ?? "";
-    this.turnTimeoutMs = init.turnTimeoutMs;
-    this.supervised = init.supervised ?? false;
-  }
-  // ---- lifecycle ----------------------------------------------------------
-  beginTurn(prompt, correction = false) {
-    if (this.isTerminalTurn() && this.sessionClosed) return;
-    this.startedAt ??= Date.now();
-    this.turnStartedAt = Date.now();
-    this.cancellationRequested = false;
-    this.terminalAt = void 0;
-    this.stopReason = void 0;
-    this.promptUsage = void 0;
-    this.forcedKill = false;
-    this.error = void 0;
-    this.failureClass = void 0;
-    this.turnsCount += 1;
-    if (correction) this.corrections += 1;
-    this.turnStatus = "running";
-    this.currentTurnMessage = "";
-    this.lastEmittedMsgLen = 0;
-    this.idleSince = null;
-    this.touch("turn_start");
-    this.pushDigest(`\u25B6 turn ${this.turnsCount}: ${truncate(prompt, 160)}`, true);
-    this.writeEvent({ t: "turn_start", turn: this.turnsCount, prompt });
-    this.persistTelemetry();
-  }
-  /** Wall-clock start of the current turn (see `turnStartedAt` field doc). */
-  get turnStartedAtMs() {
-    return this.turnStartedAt;
-  }
-  completeTurn() {
-    if (this.isTerminalTurn()) return;
-    this.flushMessageDigest();
-    this.turnStatus = "done";
-    this.lastFinalMessage = this.currentTurnMessage.trim();
-    this.idleSince = Date.now();
-    this.pushDigest(`\u2713 turn ${this.turnsCount} done (${this.toolCallCount} tools)`, true);
-    this.writeEvent({ t: "turn_done", turn: this.turnsCount, stopReason: "end_turn" });
-    this.touch("turn_done");
-    this.markTerminal("done");
-    this.writeResultFileOnce();
-    this.writeLedgerRowOnce();
-  }
-  /**
-   * @param failureClass optional classification tag (e.g. CLANKER-INFRA-FAILURE)
-   *   from failure-classifier.ts, surfaced verbatim to wait/status callers.
-   */
-  failTurn(message, failureClass) {
-    if (this.isTerminalTurn()) return;
-    this.flushMessageDigest();
-    this.turnStatus = "error";
-    this.error = message;
-    this.failureClass = failureClass;
-    this.idleSince = Date.now();
-    const tag = failureClass ? ` [${failureClass}]` : "";
-    this.pushDigest(`\u2717 error: ${truncate(message, 200)}${tag}`, true);
-    this.writeEvent({ t: "turn_error", turn: this.turnsCount, message, failureClass });
-    this.touch("turn_error");
-    this.markTerminal("error");
-    this.writeResultFileOnce();
-    this.writeLedgerRowOnce();
-  }
-  /**
-   * Record a non-terminal capacity-transient retry (see failure-classifier.ts
-   * isCapacityTransient). Does not touch turnStatus — the turn is still
-   * "running" from a caller's perspective while the retry backoff is in
-   * flight, so a concurrent clanker_wait keeps long-polling instead of
-   * seeing a premature terminal state.
-   */
-  recordTransientRetry(message, backoffMs, attempt) {
-    this.retries += 1;
-    this.pushDigest(
-      `\u21BB transient backend failure, retrying in ${backoffMs}ms (attempt ${attempt}): ${truncate(message, 160)}`
-    );
-    this.writeEvent({ t: "transient_retry", backoffMs, attempt, message });
-    this.touch("transient_retry");
-  }
-  cancelTurn() {
-    if (this.isTerminalTurn()) return;
-    this.flushMessageDigest();
-    this.turnStatus = "cancelled";
-    this.idleSince = Date.now();
-    this.pushDigest(`\u2298 turn ${this.turnsCount} cancelled`, true);
-    this.writeEvent({ t: "turn_cancelled", turn: this.turnsCount });
-    this.touch("turn_cancelled");
-    this.markTerminal("cancelled");
-    this.writeResultFileOnce();
-    this.writeLedgerRowOnce();
-  }
-  /**
-   * Re-open a closed run for a backend-resume turn (#43).
-   *
-   * A lane that resumes from a backend-held conversation does NOT need this
-   * process's session to have survived — that is the whole difference from the
-   * supervised correction flow, whose window closes with the ACP session. What
-   * it does need is for the run's own bookkeeping to stop reading as finished:
-   *
-   *  - `sessionClosed` false again, so `beginTurn` does not short-circuit on
-   *    the terminal-and-closed guard and the forensic streams reopen (append
-   *    mode — nothing already written is lost).
-   *  - `turnStatus` running SYNCHRONOUSLY, before the respawn's handshake. A
-   *    correction that returned `done` while its worker was being spawned would
-   *    be read by the very next `clanker_wait` as "the correction already
-   *    finished", handing back the pre-correction verdict.
-   *  - `cancellationRequested` cleared, exactly as `beginTurn` does. Resuming a
-   *    run whose last turn was cancelled is legitimate (the conversation on the
-   *    backend's side is intact); leaving the flag set would abort the respawn
-   *    during setup and record it as another cancellation.
-   *  - `worktreeRetained` cleared, because it is recomputed by the next close.
-   *    A tree removed at that close would otherwise keep being reported as
-   *    retained at a path that no longer exists.
-   *
-   * `turnsCount`, `corrections`, the ledger-row flag and the digest are all
-   * left alone: this is the same dispatch continuing, and `beginTurn` owns the
-   * per-turn accounting.
-   */
-  reopenForResume() {
-    this.sessionClosed = false;
-    this.cancellationRequested = false;
-    this.worktreeRetained = void 0;
-    this.observedModel = null;
-    this.observedEffort = null;
-    this.turnStatus = "running";
-    this.touch("resume_accepted");
-  }
-  /** Record the model a resume turn re-spawned on; see `resumeModel`. */
-  adoptResumeModel(model) {
-    this.resumeModel = model.trim() || void 0;
-    this.persistTelemetry();
-  }
-  async markClosed() {
-    if (this.sessionClosed) return;
-    this.writeEvent({ t: "session_closed" });
-    await this.closeStreamsAndWait();
-    this.sessionClosed = true;
-    this.touch("session_closed");
-  }
-  // ---- event ingestion ----------------------------------------------------
-  onUpdate(update) {
-    this.writeEvent({ t: "update", update });
-    switch (update.sessionUpdate) {
-      case "plan":
-        this.applyPlan(update.entries);
-        break;
-      case "plan_update": {
-        const entries = update.entries;
-        if (Array.isArray(entries)) this.applyPlan(entries);
-        break;
-      }
-      case "tool_call": {
-        this.toolCallCount += 1;
-        this.toolCallTitles.set(update.toolCallId, update.title);
-        if (update.kind != null) this.toolCallKinds.set(update.toolCallId, update.kind);
-        this.collectLocations(update.locations, update.kind);
-        this.pushDigest(`\u{1F527} ${truncate(update.title, 120)}`);
-        break;
-      }
-      case "tool_call_update": {
-        if (update.kind != null) this.toolCallKinds.set(update.toolCallId, update.kind);
-        this.collectLocations(update.locations, update.kind ?? this.toolCallKinds.get(update.toolCallId));
-        if (update.status === "failed") {
-          const title = this.toolCallTitles.get(update.toolCallId) ?? update.toolCallId;
-          this.pushDigest(`\u26A0 tool failed: ${truncate(title, 100)}`, true);
-        }
-        break;
-      }
-      case "agent_message_chunk": {
-        const text = blockText(update.content);
-        this.currentTurnMessage += text;
-        this.logChunk("message", text);
-        this.maybeEmitMessageDigest();
-        break;
-      }
-      case "agent_thought_chunk": {
-        this.logChunk("thought", blockText(update.content));
-        break;
-      }
-      case "config_option_update":
-        this.observeConfigOptions(update.configOptions);
-        break;
-      case "session_info_update":
-        this.observeLaneSession(update._meta);
-        break;
-      case "usage_update":
-        this.sessionUsage = {
-          used: update.used,
-          size: update.size,
-          ...update.cost ? { cost: { amount: update.cost.amount, currency: update.cost.currency } } : {}
-        };
-        this.persistTelemetry();
-        break;
-      default:
-        break;
-    }
-    this.touch("update");
-  }
-  applyPlan(entries) {
-    const snap = (entries ?? []).map((e) => ({
-      content: e.content,
-      status: e.status
-    }));
-    const completed = snap.filter((e) => e.status === "completed").length;
-    const inProgress = snap.filter((e) => e.status === "in_progress").length;
-    const pending = snap.filter((e) => e.status === "pending").length;
-    const currentStep = snap.find((e) => e.status === "in_progress")?.content ?? null;
-    const next = { entries: snap, completed, inProgress, pending, total: snap.length, currentStep };
-    if (JSON.stringify(next) === JSON.stringify(this.plan)) return;
-    this.plan = next;
-    this.pushDigest(`\u{1F4CB} ${this.planSummary()}`, true);
-  }
-  /**
-   * ACP's "follow-along" `locations` signal fires on tool_calls of EVERY
-   * kind, reads included: a `Read src/foo.ts` reports a location exactly
-   * like an `Edit` does (see ToolCall.kind in the ACP schema — "read" |
-   * "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" |
-   * "switch_mode" | "other"). Treating any reported location as "touched"
-   * therefore turned a read-only reviewer's own Read calls into
-   * false-positive touched_files entries (observed live in run codex-212e2:
-   * a read-only review dispatch reported a pile of src files touched on a
-   * tree with zero actual diff). Only a `read` kind is excluded here — an
-   * absent `kind` (optional per the ACP schema) keeps the prior, inclusive
-   * behavior rather than guessing, and every other kind (including the
-   * write-class ones this signal exists for) is unaffected.
-   */
-  collectLocations(locations, kind) {
-    if (kind === "read") return;
-    for (const loc of locations ?? []) {
-      if (loc.path) {
-        this.touchedFromTools.add(loc.path);
-        this.pushDigest(`\u270F ${truncate(this.relToCwd(loc.path), 120)}`);
-      }
-    }
-  }
-  /** Record a file the agent wrote through the client fs capability. */
-  recordFileWritten(absPath) {
-    this.touchedFromWrites.add(absPath);
-    this.pushDigest(`\u270F wrote ${truncate(this.relToCwd(absPath), 120)}`);
-    this.touch("file_written");
-  }
-  maybeEmitMessageDigest() {
-    const grown = this.currentTurnMessage.length - this.lastEmittedMsgLen;
-    if (grown >= 40 || this.currentTurnMessage.endsWith("\n")) {
-      this.flushMessageDigest();
-    }
-  }
-  /** Emit any not-yet-reported agent-message text as a digest fragment. */
-  flushMessageDigest() {
-    const delta = this.currentTurnMessage.slice(this.lastEmittedMsgLen).trim();
-    this.lastEmittedMsgLen = this.currentTurnMessage.length;
-    if (delta) this.pushDigest(`\u{1F4AC} ${truncate(delta, 200)}`);
-  }
-  // ---- projections --------------------------------------------------------
-  planSummary() {
-    const p = this.plan;
-    if (p.total === 0) return "no plan yet";
-    const now = p.currentStep ? ` \xB7 now: ${truncate(p.currentStep, 80)}` : "";
-    return `${p.completed}/${p.total} done, ${p.inProgress} in progress${now}`;
-  }
-  planState() {
-    return this.plan;
-  }
-  lastEventAgeMs() {
-    return Date.now() - this.lastEventAt;
-  }
-  suspectedStall(stallThresholdMs) {
-    return this.turnStatus === "running" && this.lastEventAgeMs() > stallThresholdMs;
-  }
-  /**
-   * Edge-triggered variant of `suspectedStall` for quiet-mode long-poll: true
-   * only the first time it's observed stalled since the last real event —
-   * subsequent calls while still silently stalled return false so a caller
-   * polling in a loop blocks out its full timeout budget each time instead of
-   * spinning (every call re-observing "still stalled" would otherwise make
-   * clanker_wait return near-instantly forever, starving the event loop of
-   * the real timers — e.g. the hard per-turn timeout — that need to run).
-   */
-  suspectedStallEdge(stallThresholdMs) {
-    if (!this.suspectedStall(stallThresholdMs)) return false;
-    if (this.stallAcknowledged) return false;
-    this.stallAcknowledged = true;
-    return true;
-  }
-  sessionState(stallThresholdMs) {
-    if (this.sessionClosed) return "closed";
-    if (this.turnStatus === "running") {
-      return this.suspectedStall(stallThresholdMs) ? "stalled" : "working";
-    }
-    return "idle";
-  }
-  idleMs() {
-    if (this.idleSince !== null) return Date.now() - this.idleSince;
-    return this.lastEventAgeMs();
-  }
-  isTerminalTurn() {
-    return this.turnStatus !== "running";
-  }
-  hasUnreported() {
-    return this.seq > this.reportedSeq;
-  }
-  /**
-   * True if any digest entry since the last drain is `significant` (plan/status
-   * change, tool error, or turn-boundary transition) — as opposed to the
-   * high-frequency chatter (tool_call start, file-location echo, message-chunk
-   * fragment) that `hasUnreported()` alone treats as wake-worthy. Used by
-   * clanker_wait's quiet mode so a run that's merely grepping/reading doesn't
-   * wake every long-poller on each tool call.
-   */
-  hasUnreportedSignificant() {
-    for (let i = this.digestLog.length - 1; i >= 0; i--) {
-      const d = this.digestLog[i];
-      if (d.seq <= this.reportedSeq) return false;
-      if (d.significant) return true;
-    }
-    return false;
-  }
-  finalMessage() {
-    return truncate(this.lastFinalMessage, FINAL_MESSAGE_CHAR_BUDGET);
-  }
-  toolTouchedFiles() {
-    return [...this.touchedFromTools, ...this.touchedFromWrites];
-  }
-  toolCalls() {
-    return this.toolCallCount;
-  }
-  requestCancellation() {
-    this.cancellationRequested = true;
-    this.touch("cancellation_requested");
-    this.persistTelemetry();
-  }
-  markForcedKill() {
-    this.forcedKill = true;
-    this.persistTelemetry();
-  }
-  recordStop(response) {
-    if (this.isTerminalTurn()) return;
-    this.stopReason = response.stopReason;
-    if (response.usage != null) {
-      const usage = response.usage;
-      this.promptUsage = {
-        totalTokens: usage.totalTokens,
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        ...usage.thoughtTokens !== void 0 ? { thoughtTokens: usage.thoughtTokens } : {},
-        ...usage.cachedReadTokens !== void 0 ? { cachedReadTokens: usage.cachedReadTokens } : {},
-        ...usage.cachedWriteTokens !== void 0 ? { cachedWriteTokens: usage.cachedWriteTokens } : {}
-      };
-    }
-    this.persistTelemetry();
-  }
-  /**
-   * Record the worker this run is currently driven by, and flush it to disk
-   * immediately (#32).
-   *
-   * Called from the spawn itself, not from the post-handshake path: the
-   * unrecorded window has to be as close to zero as the syscall allows, or a
-   * server that dies during a 30s handshake leaves a live, unkillable worker
-   * on disk with no pid next to it.
-   *
-   * A capacity retry respawns, and overwrites both fields — the pid that
-   * matters is the one that is running now, not the one that already died.
-   */
-  noteWorkerSpawned(pid, startedAt) {
-    this.workerPid = pid;
-    this.workerStartedAt = startedAt;
-    this.persistTelemetry();
-  }
-  /**
-   * Pick the backend's own conversation id out of a session_info_update's
-   * `_meta` and persist it (#43).
-   *
-   * Only ever ASSIGNS a ref, never clears one: `laneSessionRefFrom` returns
-   * undefined for an update that carries no (or a malformed) ref, and a
-   * resumed turn whose init event happened to omit the id would otherwise
-   * erase the very ref it was resumed from — leaving the run un-correctable
-   * for a reason that has nothing to do with the backend's real state.
-   */
-  observeLaneSession(meta) {
-    const ref = laneSessionRefFrom(meta);
-    if (!ref || ref === this.laneSessionRef) return;
-    this.laneSessionRef = ref;
-    this.persistTelemetry();
-  }
-  observeConfigOptions(options) {
-    for (const option of options ?? []) {
-      if (option.category === "model") this.observedModel = String(option.currentValue);
-      if (option.category === "thought_level") this.observedEffort = String(option.currentValue);
-    }
-    this.persistTelemetry();
-  }
-  telemetry() {
-    const turnModel = this.resumeModel ?? this.requestOpts.model;
-    const resolved = this.lane === "opencode" ? resolveOcModel(turnModel) ?? null : this.lane === "grok" ? turnModel ?? "grok-4.5" : this.lane === "cursor" ? resolveCursorModel(turnModel) || DEFAULT_CURSOR_MODEL : turnModel ?? null;
-    return {
-      host: this.host,
-      requested_lane: this.lane,
-      actual_lane: this.lane,
-      requested_model: turnModel,
-      resolved_model: resolved,
-      ...this.laneSessionRef !== void 0 ? { lane_session_ref: this.laneSessionRef } : {},
-      observed_model: this.observedModel,
-      requested_effort: this.requestOpts.effort,
-      observed_effort: this.observedEffort,
-      lane: this.lane,
-      transport: "acp-stdio",
-      backend: this.lane,
-      read_only: this.readOnly,
-      sandbox: this.requestOpts.sandbox,
-      ...this.baseSha !== void 0 ? { base_sha: this.baseSha } : {},
-      ...this.turnTimeoutMs !== void 0 ? { turn_timeout_ms: this.turnTimeoutMs } : {},
-      // Process identity (#32): server_pid is unconditional — every persisted
-      // record names the process that owns it — while the worker pair appears
-      // only once a worker really exists, so "no pid on disk" keeps meaning
-      // "nothing was spawned" rather than "spawned, pid unknown".
-      server_pid: process.pid,
-      ...this.workerPid !== void 0 ? { worker_pid: this.workerPid } : {},
-      ...this.workerStartedAt !== void 0 ? { worker_started_at: this.workerStartedAt } : {},
-      created_at: new Date(this.createdAt).toISOString(),
-      ...this.startedAt ? { started_at: new Date(this.startedAt).toISOString() } : {},
-      ...this.terminalAt ? { terminal_at: new Date(this.terminalAt).toISOString(), duration_ms: this.terminalAt - (this.startedAt ?? this.createdAt) } : {},
-      turns: this.turnsCount,
-      retries: this.retries,
-      corrections: this.corrections,
-      continuation_turns: Math.max(0, this.turnsCount - 1),
-      cancellation_requested: this.cancellationRequested,
-      forced_kill: this.forcedKill,
-      tool_calls: this.toolCallCount,
-      stop_reason: this.stopReason,
-      ...this.terminalAt ? { terminal_reason: this.turnStatus } : {},
-      prompt_usage: this.promptUsage,
-      session_usage: this.sessionUsage
-    };
-  }
-  markTerminal(reason) {
-    this.terminalAt = Date.now();
-    this.stopReason ??= reason;
-    this.persistTelemetry();
-  }
-  /**
-   * Native dispatch-ledger row: called exactly once from the tail of
-   * completeTurn()/failTurn()/cancelTurn() — the true single choke point a
-   * run's lifetime passes through exactly once, guarded by the very same
-   * `isTerminalTurn()` check already at the top of all three (per-run state,
-   * not a module-level set): whichever of the three fires first flips
-   * `turnStatus` off "running", so any other terminal-transition call for
-   * this run (including a later one of these same three methods, should that
-   * ever happen) short-circuits before doing anything, this row included.
-   *
-   * Deliberately NOT wired from LaneManager's close()/closeRun(): this
-   * refactor's one-shot job controller calls `close()` *before* the
-   * corresponding completeTurn()/failTurn()/cancelTurn() at every one of its
-   * call sites (worktree/session teardown first, status flip second — see
-   * manager.ts), so at closeRun() time `run.turnStatus` is still "running"
-   * and `run.error` is still unset. That ordering is exercised concretely by
-   * manager-close-diagnostics.test.ts's direct `m.close(id)` calls on a still-
-   * running turn: closeRun() runs (and, per its own `sessionClosed` dedup,
-   * ends up being the ONLY invocation that ever executes) strictly before the
-   * turn's own failTurn() call discovers the mid-turn exit and sets the real
-   * error. Reading the terminal fields from here instead — after they're
-   * genuinely final — avoids depending on manager.ts's close-vs-status-flip
-   * ordering entirely. See ledger.ts for why this write exists at all
-   * (MCP-direct dispatches bypass the harness PostToolUse hook).
-   */
-  /** Absolute path of this run's terminal-judgment artifact (see RESULT_FILE). */
-  resultPath() {
-    return path6.join(this.runDir, RESULT_FILE);
-  }
-  /**
-   * Size in bytes of an already-written `result.md`, or 0 when it is missing or
-   * empty. Callers use it to answer the only question a relay seat can honestly
-   * answer about the verdict: "is there a file to read?" — never "what does it
-   * say?".
-   */
-  resultBytes() {
-    try {
-      return fs6.statSync(this.resultPath()).size;
-    } catch {
-      return 0;
-    }
-  }
-  /**
-   * Write `<runDir>/result.md` exactly once, from the same three terminal tails
-   * as writeLedgerRowOnce() and guarded by the same per-run `isTerminalTurn()`
-   * check at the top of completeTurn()/failTurn()/cancelTurn(): whichever fires
-   * first flips `turnStatus` off "running", so every later terminal transition
-   * short-circuits before reaching here.
-   *
-   * The final message is written UNTRUNCATED, unlike `finalMessage()` (capped at
-   * FINAL_MESSAGE_CHAR_BUDGET for the wire). That asymmetry is the point: the
-   * budget exists to keep a tool response small, and a verdict clipped at 20k
-   * characters is exactly the kind of loss the reader must not be handed
-   * silently. The file is the lossless artifact; the wire field is the preview.
-   *
-   * Fail-silent by design, like the ledger row: a diagnostics artifact must
-   * never fail or delay terminal handling of a real dispatch. Written via
-   * tmp+rename so a reader never observes a half-written verdict.
-   */
-  writeResultFileOnce() {
-    const target = this.resultPath();
-    const tmp = `${target}.${process.pid}.tmp`;
-    const lines = [
-      `# clanker run ${this.id}`,
-      "",
-      `- status: ${this.turnStatus}`,
-      `- lane: ${this.lane}`,
-      `- run_dir: ${this.runDir}`,
-      `- cwd: ${this.cwd}`,
-      ...this.worktreeRetained ? [`- worktree_retained: ${this.worktreeRetained}`] : [],
-      ""
-    ];
-    if (this.error) {
-      lines.push("## error", "", this.error, "");
-      if (this.failureClass) lines.push(`failure_class: ${this.failureClass}`, "");
-    }
-    if (this.contractViolations && this.contractViolations.length > 0) {
-      lines.push("## contract_violations", "");
-      for (const violation of this.contractViolations) {
-        lines.push(`- pattern \`${violation.pattern}\`:`);
-        for (const file2 of violation.files) lines.push(`  - ${file2}`);
-      }
-      lines.push("");
-    }
-    lines.push(RESULT_FINAL_MESSAGE_HEADING, "", this.lastFinalMessage, "");
-    try {
-      fs6.mkdirSync(this.runDir, { recursive: true });
-      fs6.writeFileSync(tmp, lines.join("\n"));
-      fs6.renameSync(tmp, target);
-    } catch (error40) {
-      try {
-        fs6.rmSync(tmp, { force: true });
-      } catch {
-      }
-      console.error(
-        `[clanker] result file write failed for run '${this.id}' at '${target}': ${error40 instanceof Error ? error40.message : String(error40)}`
-      );
-    }
-  }
-  /**
-   * One ledger row per DISPATCH, not per terminal transition.
-   *
-   * "Once" used to be an emergent property rather than a rule: `completeTurn`
-   * and `failTurn` both return early on an already-terminal run, so with a
-   * strictly one-shot controller they could only fire once. A correction turn
-   * (manager.promptExisting) breaks that arithmetic — it clears `terminalAt`
-   * and reaches a second terminal transition — so a supervised run would have
-   * appended two rows describing one dispatch, quietly double-counting every
-   * GLM write in the ledger's stats. The invariant now belongs to a flag that
-   * says so, instead of to a coincidence of control flow.
-   *
-   * Deliberately NOT symmetric with `writeResultFileOnce`, which has no such
-   * flag and must not have one: the verdict file has to hold the LATEST turn's
-   * result, or a corrected run would hand its reader the very output the
-   * correction was issued to replace.
-   */
-  ledgerRowWritten = false;
-  writeLedgerRowOnce() {
-    if (this.ledgerRowWritten) return;
-    this.ledgerRowWritten = true;
-    appendLedgerRow({
-      id: this.id,
-      lane: this.lane,
-      cwd: this.cwd,
-      agentProfile: this.requestOpts.profile,
-      model: this.telemetry().resolved_model ?? null,
-      initialPrompt: this.initialPrompt,
-      turnStatus: this.turnStatus,
-      error: this.error
-    });
-  }
-  persistTelemetry() {
-    const target = path6.join(this.runDir, "telemetry.json");
-    const tmp = `${target}.${process.pid}.tmp`;
-    try {
-      fs6.writeFileSync(tmp, JSON.stringify(this.telemetry(), null, 2));
-      fs6.renameSync(tmp, target);
-    } catch (error40) {
-      try {
-        fs6.rmSync(tmp, { force: true });
-      } catch {
-      }
-      console.error(`[clanker] telemetry persistence failed for run '${this.id}' at '${target}': ${error40 instanceof Error ? error40.message : String(error40)}`);
-    }
-  }
-  setFinalTouched(files) {
-    this.finalTouchedFiles = files;
-  }
-  finalTouched() {
-    return this.finalTouchedFiles;
-  }
-  /** Drain digest fragments accumulated since the last wait, advancing cursor. */
-  drainDigest() {
-    const fresh = this.digestLog.filter((d) => d.seq > this.reportedSeq);
-    this.reportedSeq = this.seq;
-    if (fresh.length === 0) return "";
-    let text = fresh.map((d) => d.text).join("\n");
-    if (text.length > DIGEST_CHAR_BUDGET) {
-      text = "\u2026\n" + text.slice(text.length - DIGEST_CHAR_BUDGET);
-    }
-    return text;
-  }
-  // ---- long-poll signaling ------------------------------------------------
-  /** Resolve after the next event/state change or after `ms`, whichever first. */
-  waitForSignal(ms) {
-    return new Promise((resolve) => {
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        resolve();
-      };
-      const timer = setTimeout(finish, ms);
-      timer.unref?.();
-      this.waiters.push(finish);
-    });
-  }
-  touch(_reason) {
-    this.lastEventAt = Date.now();
-    this.stallAcknowledged = false;
-    const w = this.waiters;
-    this.waiters = [];
-    for (const fn of w) fn();
-  }
-  // ---- persistence --------------------------------------------------------
-  pushDigest(text, significant = false) {
-    this.seq += 1;
-    this.digestLog.push({ seq: this.seq, text, significant });
-    if (this.digestLog.length > 500) this.digestLog.splice(0, this.digestLog.length - 500);
-  }
-  /**
-   * Shared append template for both forensic streams (#37 A6): once
-   * `sessionClosed`, append synchronously (no stream to keep open past
-   * teardown); otherwise lazily open a durable append stream and write
-   * through it. `streamField` names which of the two per-instance
-   * WriteStream slots (`eventsStream` / `chunksStream`) this call owns.
-   */
-  appendToStream(file2, streamField, line) {
-    if (this.sessionClosed) {
-      fs6.mkdirSync(this.runDir, { recursive: true });
-      fs6.appendFileSync(path6.join(this.runDir, file2), line);
-      return;
-    }
-    if (!this[streamField]) {
-      fs6.mkdirSync(this.runDir, { recursive: true });
-      this[streamField] = fs6.createWriteStream(path6.join(this.runDir, file2), { flags: "a" });
-    }
-    this[streamField].write(line);
-  }
-  writeEvent(obj) {
-    const line = JSON.stringify({ ts: Date.now(), ...obj }) + "\n";
-    this.appendToStream(EVENTS_FILE, "eventsStream", line);
-  }
-  logChunk(kind, text) {
-    if (!text) return;
-    const line = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${kind}: ${text}
-`;
-    this.appendToStream(CHUNKS_FILE, "chunksStream", line);
-  }
-  closeStreams() {
-    this.eventsStream?.end();
-    this.chunksStream?.end();
-    this.eventsStream = null;
-    this.chunksStream = null;
-  }
-  async closeStreamsAndWait() {
-    const eventsStream = this.eventsStream;
-    const chunksStream = this.chunksStream;
-    await Promise.all([
-      this.finishStream(eventsStream, "events"),
-      this.finishStream(chunksStream, "chunks")
-    ]);
-    if (this.eventsStream === eventsStream) this.eventsStream = null;
-    if (this.chunksStream === chunksStream) this.chunksStream = null;
-  }
-  finishStream(stream, artifact) {
-    if (!stream) return Promise.resolve();
-    return new Promise((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        stream.off("error", onError);
-        resolve();
-      };
-      const onError = (error40) => {
-        console.error(
-          `[clanker] ${artifact} stream close failed for '${this.id}': ${error40.message}`
-        );
-        finish();
-      };
-      stream.once("error", onError);
-      stream.end(finish);
-    });
-  }
-  relToCwd(p) {
-    try {
-      const rel = path6.relative(this.cwd, p);
-      return rel && !rel.startsWith("..") ? rel : p;
-    } catch {
-      return p;
-    }
-  }
-};
-function blockText(block) {
-  if (block && typeof block === "object" && "type" in block) {
-    if (block.type === "text") return block.text;
-    return `[${block.type}]`;
-  }
-  return "";
-}
-function truncate(s, max) {
-  if (s.length <= max) return s;
-  return s.slice(0, Math.max(0, max - 1)) + "\u2026";
-}
-
-// src/adopt.ts
-var IDENTITY_TOLERANCE_MS = 2e3;
-var DEATH_POLL_MS = 50;
-var KILL_SETTLE_MS = 1e3;
-function probeOwner(serverPid, self = process.pid) {
-  if (typeof serverPid !== "number" || !Number.isInteger(serverPid) || serverPid <= 0) {
-    return {
-      state: "unknown",
-      pid: null,
-      detail: "this run's telemetry names no server_pid (it predates PR #40), so whether its owner is still alive cannot be established"
-    };
-  }
-  if (serverPid === self) {
-    return { state: "alive", pid: serverPid, detail: `server_pid ${serverPid} is this very process` };
-  }
-  try {
-    process.kill(serverPid, 0);
-    return { state: "alive", pid: serverPid, detail: `server_pid ${serverPid} answers to kill(pid, 0)` };
-  } catch (error40) {
-    const code = error40.code;
-    if (code === "ESRCH") {
-      return { state: "dead", pid: serverPid, detail: `server_pid ${serverPid} no longer exists (ESRCH)` };
-    }
-    if (code === "EPERM") {
-      return {
-        state: "alive",
-        pid: serverPid,
-        detail: `server_pid ${serverPid} exists but belongs to another user (EPERM)`
-      };
-    }
-    return {
-      state: "unknown",
-      pid: serverPid,
-      detail: `probing server_pid ${serverPid} failed with ${code ?? "an unknown error"}`
-    };
-  }
-}
-function readProcessFacts(pid) {
-  if (process.platform === "win32") {
-    return { ok: false, reason: "process identity cannot be verified on win32 (no ps, no process groups)" };
-  }
-  let result;
-  try {
-    result = spawnSync("ps", ["-p", String(pid), "-o", "lstart=,comm="], {
-      encoding: "utf8",
-      env: { ...process.env, LC_ALL: "C", LANG: "C" },
-      timeout: 5e3
-    });
-  } catch (error40) {
-    return { ok: false, reason: `ps could not be run: ${error40 instanceof Error ? error40.message : String(error40)}` };
-  }
-  if (result.error) return { ok: false, reason: `ps could not be run: ${result.error.message}` };
-  if (result.status !== 0) {
-    return { ok: false, reason: `ps reports no process with pid ${pid} (exit ${result.status})` };
-  }
-  const line = (result.stdout ?? "").split("\n").find((l) => l.trim().length > 0);
-  if (!line) return { ok: false, reason: `ps returned no row for pid ${pid}` };
-  const match = /^\s*(\w{3}\s+(?:\w{3}\s+\d{1,2}|\d{1,2}\s+\w{3})\s+\d{1,2}:\d{2}:\d{2}\s+\d{4})\s*(\S.*)?$/.exec(line);
-  if (!match) return { ok: false, reason: `ps start time is not in a format this build can parse: '${line.trim()}'` };
-  const startedAt = Date.parse(match[1]);
-  if (!Number.isFinite(startedAt)) {
-    return { ok: false, reason: `ps start time '${match[1]}' did not parse as a date` };
-  }
-  return { ok: true, facts: { startedAt, comm: (match[2] ?? "").trim() } };
-}
-var LANE_COMMANDS = {
-  codex: ["node", "tachi", "codex", "codex-acp"],
-  cursor: ["node", "tachi", "cursor-agent", "cursor"],
-  gemini: ["node", "tachi", "agy", "gemini"],
-  grok: ["grok", "tachi", "node"],
-  opencode: ["opencode", "tachi", "node", "bun"]
-};
-function verifyWorkerIdentity(pid, recordedStartedAt, lane, toleranceMs = IDENTITY_TOLERANCE_MS) {
-  if (typeof recordedStartedAt !== "number" || !Number.isFinite(recordedStartedAt)) {
-    return {
-      verified: false,
-      reason: "no worker_started_at on record, so a pid-reuse check is impossible \u2014 refusing to signal a pid that cannot be shown to still be the worker"
-    };
-  }
-  const probe = readProcessFacts(pid);
-  if (!probe.ok) return { verified: false, reason: probe.reason };
-  const skew = probe.facts.startedAt - recordedStartedAt;
-  const expected = LANE_COMMANDS[lane ?? ""] ?? [];
-  const base = path7.basename(probe.facts.comm);
-  const commMatches = expected.length === 0 ? void 0 : expected.some((c) => base === c || base.startsWith(c));
-  const shared = {
-    observed_started_at: probe.facts.startedAt,
-    skew_ms: skew,
-    comm: probe.facts.comm,
-    ...commMatches === void 0 ? {} : { comm_matches_lane: commMatches }
-  };
-  if (Math.abs(skew) > toleranceMs) {
-    return {
-      ...shared,
-      verified: false,
-      reason: `pid ${pid} started ${new Date(probe.facts.startedAt).toISOString()}, but this run recorded its worker starting ${new Date(recordedStartedAt).toISOString()} (${skew}ms apart, tolerance \xB1${toleranceMs}ms) \u2014 the pid has been recycled onto a different process and must not be signalled`
-    };
-  }
-  return {
-    ...shared,
-    verified: true,
-    reason: `pid ${pid} start time matches the recorded worker within ${Math.abs(skew)}ms` + (commMatches === false ? `, though its command '${probe.facts.comm}' is not one lane '${lane}' usually spawns` : "")
-  };
-}
-function alive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error40) {
-    return error40.code === "EPERM";
-  }
-}
-var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function waitForDeath(pid, budgetMs) {
-  const deadline = Date.now() + budgetMs;
-  while (Date.now() < deadline) {
-    if (!alive(pid)) return true;
-    await sleep(Math.min(DEATH_POLL_MS, Math.max(1, deadline - Date.now())));
-  }
-  return !alive(pid);
-}
-function signalGroup(pid, signal) {
-  try {
-    process.kill(-pid, signal);
-    return { sent: `${signal}\u2192group ${pid}` };
-  } catch (error40) {
-    const code = error40.code;
-    return {
-      sent: null,
-      code,
-      reason: code === "ESRCH" ? `process group ${pid} no longer exists (ESRCH)` : `process group ${pid} could not be signalled (${code ?? "unknown error"})`
-    };
-  }
-}
-async function killAdoptedWorker(opts) {
-  const { workerPid, workerStartedAt, lane, graceMs } = opts;
-  if (typeof workerPid !== "number" || !Number.isInteger(workerPid) || workerPid <= 0) {
-    return {
-      killed: false,
-      identity_verified: false,
-      worker_gone: true,
-      signals: [],
-      note: "no worker_pid on record \u2014 the dispatch died before it ever spawned a worker; nothing to signal"
-    };
-  }
-  if (!alive(workerPid)) {
-    return {
-      killed: false,
-      identity_verified: false,
-      worker_gone: true,
-      signals: [],
-      note: `worker pid ${workerPid} is already gone; archiving the record only`
-    };
-  }
-  const identity = verifyWorkerIdentity(workerPid, workerStartedAt, lane);
-  if (!identity.verified) {
-    return {
-      killed: false,
-      identity_verified: false,
-      // Something IS alive on that pid; it is just not provably our worker.
-      worker_gone: false,
-      signals: [],
-      identity,
-      note: `no signal sent: ${identity.reason}`
-    };
-  }
-  const signals = [];
-  const term = signalGroup(workerPid, "SIGTERM");
-  if (term.sent === null) {
-    const groupGone = term.code === "ESRCH";
-    return {
-      killed: false,
-      identity_verified: true,
-      worker_gone: groupGone,
-      signals,
-      identity,
-      note: groupGone ? `no signal sent: ${term.reason} \u2014 the worker died between the identity check and the signal, so the record is archived and nothing else is signalled (a pid whose group is gone is not this run's worker)` : `no signal sent: ${term.reason}`
-    };
-  }
-  signals.push(term.sent);
-  if (await waitForDeath(workerPid, graceMs)) {
-    return {
-      killed: true,
-      identity_verified: true,
-      worker_gone: true,
-      signals,
-      identity,
-      note: `worker group ${workerPid} exited on SIGTERM`
-    };
-  }
-  const recheck = verifyWorkerIdentity(workerPid, workerStartedAt, lane);
-  if (!recheck.verified) {
-    return {
-      killed: signals.length > 0,
-      identity_verified: false,
-      worker_gone: false,
-      signals,
-      identity: recheck,
-      note: `SIGTERM was sent, but pid ${workerPid} no longer verifies as this run's worker (${recheck.reason}) \u2014 SIGKILL withheld`
-    };
-  }
-  const kill = signalGroup(workerPid, "SIGKILL");
-  if (kill.sent) signals.push(kill.sent);
-  const gone = await waitForDeath(workerPid, KILL_SETTLE_MS);
-  return {
-    killed: signals.length > 0,
-    identity_verified: true,
-    worker_gone: gone,
-    signals,
-    identity: recheck,
-    note: gone ? `worker group ${workerPid} survived SIGTERM for ${graceMs}ms and was SIGKILLed` : `worker group ${workerPid} did not exit within ${KILL_SETTLE_MS}ms of SIGKILL \u2014 it may be stuck in the kernel`
-  };
-}
-var ADOPTED_TERMINAL_REASON = "cancelled-foreign";
-function archiveAdoptedRun(input) {
-  const { runDir, id, adopterPid, ownerPid, workerPid, outcome } = input;
-  const nowIso = new Date(input.now ?? Date.now()).toISOString();
-  const problems = [];
-  const explanation = `run '${id}' was adopted and cancelled by Clanker server pid ${adopterPid} at ${nowIso}: its own server (pid ${ownerPid ?? "unknown"}) was gone, so this process took over. worker_pid ${workerPid ?? "none"}; identity_verified=${outcome.identity_verified}; signals=[${outcome.signals.join(", ") || "none"}]; ${outcome.note}`;
-  const telemetryPath = path7.join(runDir, "telemetry.json");
-  let record2 = {};
-  let recordUnreadable = false;
-  try {
-    record2 = JSON.parse(fs7.readFileSync(telemetryPath, "utf8"));
-  } catch {
-    record2 = { id };
-    recordUnreadable = true;
-  }
-  if (record2.terminal_at) {
-    return {
-      archived: false,
-      reason: `owner wrote terminal first (terminal_at=${String(record2.terminal_at)}, terminal_reason=${String(record2.terminal_reason ?? "unknown")}) \u2014 nothing in ${runDir} was modified, because a terminal record means the owner's own account of this run is already on disk`,
-      telemetry_written: false,
-      result_stub_written: false,
-      problems: []
-    };
-  }
-  if (recordUnreadable) {
-    problems.push("existing telemetry.json was unreadable; wrote a minimal terminal record over it");
-  }
-  let telemetryWritten = false;
-  try {
-    record2.terminal_at = nowIso;
-    record2.terminal_reason = ADOPTED_TERMINAL_REASON;
-    record2.error = record2.error ? `${String(record2.error)}
-${explanation}` : explanation;
-    const tmp = `${telemetryPath}.${process.pid}.tmp`;
-    fs7.writeFileSync(tmp, JSON.stringify(record2, null, 2));
-    fs7.renameSync(tmp, telemetryPath);
-    telemetryWritten = true;
-  } catch (error40) {
-    problems.push(`telemetry archival failed: ${error40 instanceof Error ? error40.message : String(error40)}`);
-  }
-  let resultStubWritten = false;
-  const resultPath = path7.join(runDir, RESULT_FILE);
-  try {
-    let size = 0;
-    try {
-      size = fs7.statSync(resultPath).size;
-    } catch {
-    }
-    if (size === 0) {
-      const lines = [
-        `# clanker run ${id}`,
-        "",
-        "- status: cancelled",
-        `- terminal_reason: ${ADOPTED_TERMINAL_REASON}`,
-        `- run_dir: ${runDir}`,
-        "",
-        "## adoption",
-        "",
-        explanation,
-        "",
-        RESULT_FINAL_MESSAGE_HEADING,
-        "",
-        "(no verdict: this run was cancelled by an adopting server process, which never held its event stream. Nothing here was produced by the worker.)",
-        ""
-      ];
-      const tmp = `${resultPath}.${process.pid}.tmp`;
-      fs7.writeFileSync(tmp, lines.join("\n"));
-      fs7.renameSync(tmp, resultPath);
-      resultStubWritten = true;
-    }
-  } catch (error40) {
-    problems.push(`result stub write failed: ${error40 instanceof Error ? error40.message : String(error40)}`);
-  }
-  return {
-    archived: telemetryWritten,
-    ...telemetryWritten ? {} : { reason: "the terminal record could not be written; the run stays on the in-flight board" },
-    telemetry_written: telemetryWritten,
-    result_stub_written: resultStubWritten,
-    problems
-  };
-}
-
-// src/foreign.ts
-import fs9 from "node:fs";
-import path9 from "node:path";
-
-// src/worktree.ts
-import { execFile } from "node:child_process";
-import fs8 from "node:fs";
-import path8 from "node:path";
-import { promisify } from "node:util";
-var exec = promisify(execFile);
-async function git(cwd, args) {
-  const { stdout } = await exec("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 });
-  return stdout;
-}
-var OWNER_MARKER = ".clanker-owner";
-var sanitize = (s) => s.replace(/[^A-Za-z0-9._-]/g, "-");
-function deriveWorktreePath(branch, runId) {
-  return path8.join(WORKTREES_ROOT, `${sanitize(branch)}-${sanitize(runId).slice(-6)}`);
-}
-function readWorktreeOwner(worktreePath) {
-  try {
-    const first = fs8.readFileSync(path8.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
-    return first || null;
-  } catch {
-    return null;
-  }
-}
-async function isGitWorkTree(cwd) {
-  try {
-    const out = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
-    return out.trim() === "true";
-  } catch {
-    return false;
-  }
-}
-async function resolveTargetRepo(cwd) {
-  try {
-    const top = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
-    if (top) return top;
-  } catch {
-  }
-  throw new Error(
-    `cwd '${cwd}' is not inside a git work tree; a write dispatch cannot be isolated into a worktree cut from a non-repo directory (refusing to silently fall back to the host checkout \u2014 see issue #12)`
-  );
-}
-async function localHeadRef(targetRepo) {
-  try {
-    const head = (await git(targetRepo, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
-    return head || null;
-  } catch {
-    return null;
-  }
-}
-async function remoteDefaultRef(targetRepo) {
-  try {
-    const head = (await git(targetRepo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).trim();
-    if (head) return head;
-  } catch {
-  }
-  for (const ref of ["refs/remotes/origin/main", "refs/remotes/origin/master"]) {
-    try {
-      await git(targetRepo, ["rev-parse", "--verify", "--quiet", ref]);
-      return ref.replace("refs/remotes/", "");
-    } catch {
-    }
-  }
-  return null;
-}
-async function resolveBaseRef(targetRepo) {
-  const head = await localHeadRef(targetRepo);
-  if (head) return head;
-  const remote = await remoteDefaultRef(targetRepo);
-  if (remote) return remote;
-  throw new Error(
-    `target repo '${targetRepo}' has no local HEAD commit, origin/HEAD, origin/main, or origin/master to cut a worktree from (a repo with zero commits cannot be worktree'd)`
-  );
-}
-async function resolveBaseCommit(targetRepo, base) {
-  try {
-    const sha = (await git(targetRepo, ["rev-parse", "--verify", `${base}^{commit}`])).trim();
-    if (sha) return sha;
-  } catch {
-  }
-  throw new Error(
-    `dispatch base '${base}' does not resolve to a commit in target repo '${targetRepo}'; refusing to fall back to the repo's default base (the worktree would be cut from a commit the dispatcher did not name)`
-  );
-}
-async function headSha(cwd) {
-  return (await git(cwd, ["rev-parse", "--verify", "HEAD"])).trim();
-}
-async function createWorktree(branch, runId, targetRepo = BASE_REPO, base) {
-  const wtPath = deriveWorktreePath(branch, runId);
-  if (fs8.existsSync(wtPath)) {
-    throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
-  }
-  const baseRef = base ?? await resolveBaseRef(targetRepo);
-  fs8.mkdirSync(WORKTREES_ROOT, { recursive: true });
-  await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
-  fs8.writeFileSync(path8.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
-`);
-  return wtPath;
-}
-function parsePorcelainZ(out) {
-  const entries = out.split("\0");
-  if (entries.length > 0 && entries[entries.length - 1] === "") entries.pop();
-  const files = [];
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    if (entry.length < 3) continue;
-    const status = entry.slice(0, 2);
-    const destPath = entry.slice(3);
-    const isRename = status[0] === "R" || status[1] === "R";
-    const isCopy = status[0] === "C" || status[1] === "C";
-    if (isRename || isCopy) {
-      const srcPath = entries[++i];
-      files.push(destPath);
-      if (isRename && srcPath !== void 0) files.push(srcPath);
-    } else {
-      files.push(destPath);
-    }
-  }
-  return files;
-}
-function isGovernanceFile(file2) {
-  return file2 === OWNER_MARKER;
-}
-async function changedFiles(cwd) {
-  const out = await git(cwd, ["status", "--porcelain=v1", "-z"]);
-  return parsePorcelainZ(out).filter((file2) => !isGovernanceFile(file2));
-}
-async function holdsUnmergedWork(worktreePath, targetRepo, baseSha) {
-  if (!baseSha) return true;
-  try {
-    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseSha}..HEAD`])).trim();
-    return ahead !== "0";
-  } catch {
-    return true;
-  }
-}
-function realpathBestEffort(p) {
-  let cur = path8.resolve(p);
-  const tail = [];
-  for (; ; ) {
-    try {
-      const real = fs8.realpathSync(cur);
-      return tail.length ? path8.join(real, ...tail) : real;
-    } catch {
-      const parent = path8.dirname(cur);
-      if (parent === cur) return path8.resolve(p);
-      tail.unshift(path8.basename(cur));
-      cur = parent;
-    }
-  }
-}
-function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
-  const wt = realpathBestEffort(worktreePath);
-  const repo = realpathBestEffort(targetRepo);
-  if (wt === repo || wt.startsWith(repo + path8.sep) || repo.startsWith(wt + path8.sep)) {
-    throw new Error(
-      `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT outside the repo)`
-    );
-  }
-}
-async function changedFilesSince(worktreePath, base) {
-  const out = await git(worktreePath, ["diff", "--name-only", base, "HEAD"]);
-  const committed = out.split("\n").filter((line) => line.trim().length > 0);
-  const uncommitted = await changedFiles(worktreePath);
-  return [.../* @__PURE__ */ new Set([...committed, ...uncommitted])];
-}
-function matchDoNotTouch(patterns, files) {
-  const violations = [];
-  for (const pattern of patterns) {
-    const dir = pattern.replace(/\/+$/, "");
-    if (!dir) continue;
-    const matched = files.filter((file2) => file2 === dir || file2.startsWith(dir + "/"));
-    if (matched.length > 0) violations.push({ pattern, files: matched });
-  }
-  return violations;
-}
-async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runId) {
-  if (fs8.existsSync(worktreePath)) {
-    const owner = readWorktreeOwner(worktreePath);
-    if (!runId || owner !== runId) {
-      console.error(
-        `[clanker] refusing to remove worktree '${worktreePath}': it is owned by ${owner === null ? `no readable ${OWNER_MARKER} marker` : `run '${owner}'`}, and the caller claims ${runId === void 0 ? "no run id at all" : `run '${runId}'`} (a worktree is only ever reclaimed by the run it was created for \u2014 issue #3)`
-      );
-      return false;
-    }
-  }
-  const changes = await changedFiles(worktreePath);
-  if (changes.length > 0) return false;
-  try {
-    const ahead = (await git(worktreePath, ["rev-list", "--count", "@{upstream}..HEAD"])).trim();
-    if (ahead !== "0") return false;
-  } catch {
-    if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return false;
-  }
-  const markerPath = path8.join(worktreePath, OWNER_MARKER);
-  const marker = (() => {
-    try {
-      return fs8.readFileSync(markerPath, "utf8");
-    } catch {
-      return null;
-    }
-  })();
-  try {
-    fs8.rmSync(markerPath, { force: true });
-  } catch {
-  }
-  try {
-    try {
-      await git(targetRepo, ["worktree", "remove", worktreePath]);
-    } catch {
-      await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
-    }
-  } catch (err) {
-    if (marker !== null && fs8.existsSync(worktreePath)) {
-      try {
-        fs8.writeFileSync(markerPath, marker);
-      } catch {
-      }
-    }
-    throw err;
-  }
-  return true;
-}
-
-// src/foreign.ts
-var RUN_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)+$/;
-function isValidRunId(id) {
-  return typeof id === "string" && id.length <= 128 && RUN_ID_PATTERN.test(id);
-}
-function containedRunDir(runsRoot, id) {
-  const root = realpathBestEffort(path9.resolve(runsRoot));
-  const runDir = realpathBestEffort(path9.resolve(path9.resolve(runsRoot), id));
-  if (runDir === root || !runDir.startsWith(root + path9.sep)) return null;
-  return runDir;
-}
-function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
-  if (!isValidRunId(id)) return null;
-  const runDir = containedRunDir(runsRoot, id);
-  if (runDir === null) return null;
-  let telemetry;
-  try {
-    telemetry = JSON.parse(fs9.readFileSync(path9.join(runDir, "telemetry.json"), "utf8"));
-  } catch {
-    return null;
-  }
-  let newestMtimeMs = 0;
-  try {
-    for (const entry of fs9.readdirSync(runDir)) {
-      try {
-        newestMtimeMs = Math.max(newestMtimeMs, fs9.statSync(path9.join(runDir, entry)).mtimeMs);
-      } catch {
-      }
-    }
-  } catch {
-  }
-  let resultPath;
-  try {
-    if (fs9.statSync(path9.join(runDir, RESULT_FILE)).size > 0) resultPath = path9.join(runDir, RESULT_FILE);
-  } catch {
-  }
-  return {
-    id,
-    lane: telemetry.lane ?? null,
-    host: telemetry.host ?? null,
-    created_at: telemetry.created_at ?? null,
-    terminal_at: telemetry.terminal_at ?? null,
-    terminal_reason: telemetry.terminal_reason ?? null,
-    observed_model: telemetry.observed_model ?? null,
-    read_only: telemetry.read_only ?? null,
-    turns: telemetry.turns ?? null,
-    server_pid: typeof telemetry.server_pid === "number" ? telemetry.server_pid : null,
-    worker_pid: typeof telemetry.worker_pid === "number" ? telemetry.worker_pid : null,
-    worker_started_at: typeof telemetry.worker_started_at === "number" ? telemetry.worker_started_at : null,
-    run_dir: runDir,
-    ...resultPath ? { result_path: resultPath } : {},
-    last_activity_ms: newestMtimeMs > 0 ? Math.max(0, now - newestMtimeMs) : -1
-  };
-}
-function foreignRunStatus(run) {
-  if (!run.terminal_at) return "running";
-  switch (run.terminal_reason) {
-    case "done":
-      return "done";
-    case "error":
-      return "error";
-    default:
-      return "cancelled";
-  }
-}
-function scanForeignRuns(options = {}) {
-  const runsRoot = options.runsRoot ?? RUNS_ROOT;
-  const exclude = options.exclude ?? /* @__PURE__ */ new Set();
-  const inFlightOnly = options.inFlightOnly ?? true;
-  const now = options.now ?? Date.now();
-  let ids;
-  try {
-    ids = fs9.readdirSync(runsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
-  } catch {
-    return [];
-  }
-  const found = [];
-  for (const id of ids) {
-    if (exclude.has(id)) continue;
-    const run = readForeignRun(id, runsRoot, now);
-    if (!run) continue;
-    if (inFlightOnly && run.terminal_at) continue;
-    found.push(run);
-  }
-  const activityRank = (ms) => ms < 0 ? Infinity : ms;
-  found.sort((a, b) => activityRank(a.last_activity_ms) - activityRank(b.last_activity_ms));
-  return found;
-}
-function foreignControlRefusal(id, run, owner) {
-  const state = run.terminal_at ? `already terminal (${run.terminal_reason ?? "unknown"})` : "still in flight";
-  const ownerClause = owner?.state === "alive" ? ` The owner session is still alive (${owner.detail}) \u2014 cancel or wait for this run from THAT session; control transfers only once the owning server is provably dead.` : owner?.state === "unknown" ? ` Ownership could not be established (${owner.detail}), so this process will not take it over: adoption requires proof the owning server is dead, and an unproven owner is treated as a live one.` : "";
-  return `run '${id}' belongs to a different Clanker server process and is ${state}. Each session spawns its own server, and control (wait/cancel/prompt) needs the process that holds the worker's stdio \u2014 it cannot be recovered from disk. You can read its record at ${run.run_dir}${run.result_path ? ` and its verdict at ${run.result_path}` : ""}. Do NOT re-dispatch on the assumption that it never started.${ownerClause}`;
 }
 
 // src/failure-classifier.ts
@@ -33481,280 +33779,6 @@ function classifyBackendFailure(message) {
   return void 0;
 }
 
-// src/types.ts
-var LANE_NAMES = ["codex", "opencode", "grok", "gemini", "cursor"];
-
-// src/profiles.ts
-var GEMINI_TURN_TIMEOUT_MS = 66e4;
-var CURSOR_REVIEW_TURN_TIMEOUT_MS = 9e5;
-var CURSOR_ROUTING_NOTE = "Routing: the default Composer 2.5 is a bounded single-layer-scaffolding tier (composer-2.5 lane card, #1368) \u2014 provenance and identity-critical cores still require a cross-vendor screen, so do not route those here. Model is a free parameter: the same Cursor subscription also serves cursor-grok-4.5-high (alias `grok`) and gpt-5.3-codex-high (alias `codex53`).";
-var DISPATCH_PROFILES = [
-  {
-    id: "codex-review",
-    title: "Codex cold review (read-only, in place)",
-    description: "Read-only Codex review. lane, read_only=true and sandbox=read-only are welded server-side: the sandbox is welded because a Codex dispatch with read_only=true but a write-capable native sandbox can still write the workspace, so leaving sandbox callable would be a way around the read-only gate. Runs in place by default; an optional worktree branch runs the review inside an isolated tree instead.",
-    lane: "codex",
-    model: { kind: "lane-default" },
-    readOnly: true,
-    sandbox: { kind: "welded", mode: "read-only" },
-    isolation: "optional",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "reviewer",
-    status: "active"
-  },
-  {
-    id: "codex-write",
-    title: "Codex implementation (isolated worktree)",
-    description: "Write-capable Codex worker. read_only=false is welded and a managed worktree branch is mandatory, so writes are boxed to the worktree. Sandbox strictness stays caller-selectable across all three Codex tiers and defaults to workspace-write. Model omitted on purpose: Codex runs its configured default.",
-    lane: "codex",
-    model: { kind: "lane-default" },
-    readOnly: false,
-    sandbox: { kind: "caller", defaultMode: "workspace-write" },
-    isolation: "required",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "implementer",
-    status: "active"
-  },
-  {
-    id: "oc-review",
-    title: "OpenCode cold review (read-only, in place)",
-    description: "Read-only OpenCode review on the fixed clanker-worker permission profile. read_only=true is welded; an optional worktree branch runs the review inside an isolated tree. An explicit model is required: omitting it lets OpenCode's own interactive config pick the provider (possibly GLM) outside the vault-exec credential wrap.",
-    lane: "opencode",
-    model: { kind: "caller-required" },
-    readOnly: true,
-    isolation: "optional",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "reviewer",
-    ocProfile: "worker",
-    status: "active"
-  },
-  {
-    id: "oc-write",
-    title: "OpenCode implementation (isolated worktree)",
-    description: "Write-capable OpenCode worker on the fixed clanker-worker permission profile. read_only=false is welded and a managed worktree branch is mandatory. An explicit non-GLM model is required; GLM writes are rejected here and belong to the supervised oc-glm-write profile.",
-    lane: "opencode",
-    model: { kind: "caller-required" },
-    readOnly: false,
-    isolation: "required",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "implementer",
-    ocProfile: "worker",
-    status: "active"
-  },
-  {
-    id: "oc-glm-write",
-    title: "Supervised GLM implementation (isolated worktree)",
-    description: "The only supervised GLM write shape. lane=opencode, model=glm and read_only=false are welded, a managed worktree branch is mandatory, ZHIPUAI_API_KEY is materialized from the OS keychain through `tachi vault exec` at spawn time, and the profile requires a Sonnet supervisor seat that can correct or cancel the worker.",
-    lane: "opencode",
-    model: { kind: "welded", id: "glm" },
-    readOnly: false,
-    isolation: "required",
-    secrets: ["ZHIPUAI_API_KEY"],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "sonnet",
-    roleClass: "implementer",
-    ocProfile: "worker",
-    status: "active"
-  },
-  {
-    id: "oc-kimi-crew",
-    title: "Kimi Crew (OpenCode-owned multi-agent profile)",
-    description: "Runs the installed OpenCode `kimi-crew` profile, which owns its own child agents, prompts and permissions. lane=opencode, model=kimi and read_only=false are welded and a managed worktree branch is mandatory. Not a GLM lane and not externally supervised.",
-    lane: "opencode",
-    model: { kind: "welded", id: "kimi" },
-    readOnly: false,
-    isolation: "required",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "implementer",
-    ocProfile: "kimi-crew",
-    status: "active"
-  },
-  {
-    id: "gemini-recon",
-    title: "Gemini reconnaissance (read-only, in place)",
-    description: "Read-only Gemini survey. The lane is reconnaissance-only server-side and rejects both write mode and worktrees (the only profile whose isolation is forbidden rather than optional \u2014 it is the lane's own rule, not a registry preference); the model defaults to the sidecar's configured Gemini model.",
-    lane: "gemini",
-    model: { kind: "lane-default" },
-    readOnly: true,
-    isolation: "forbidden",
-    secrets: [],
-    turnTimeoutMs: GEMINI_TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "scout",
-    status: "active"
-  },
-  {
-    id: "gemini-research",
-    title: "Gemini online research (read-only, in place)",
-    description: "Read-only Gemini web research entry \u2014 the online-research counterpart to gemini-recon's quick survey. Every conclusion must carry its source URL and anything unsourced is reported as unverified. Same lane rules as gemini-recon: reconnaissance-only server-side, write mode and worktrees rejected; the model defaults to the sidecar's configured Gemini model.",
-    lane: "gemini",
-    model: { kind: "lane-default" },
-    readOnly: true,
-    isolation: "forbidden",
-    secrets: [],
-    turnTimeoutMs: GEMINI_TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "scout",
-    status: "active"
-  },
-  {
-    id: "cursor-review",
-    title: "Cursor cold review (read-only, in place)",
-    description: "Read-only Cursor review through the cursor-agent headless stream. read_only=true is welded and the lane runs cursor's own read-only execution mode plus its sandbox on top of it; an optional worktree branch runs the review inside an isolated tree instead of the working checkout. " + CURSOR_ROUTING_NOTE,
-    lane: "cursor",
-    model: { kind: "caller-optional", defaultId: "composer-2.5" },
-    readOnly: true,
-    isolation: "optional",
-    secrets: [],
-    turnTimeoutMs: CURSOR_REVIEW_TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "reviewer",
-    status: "active"
-  },
-  {
-    id: "cursor-write",
-    title: "Cursor implementation (isolated worktree)",
-    description: "Write-capable Cursor worker. read_only=false is welded and a managed worktree branch is mandatory, so writes are boxed to the worktree rather than to cursor's own `--worktree`, which Clanker does not use. " + CURSOR_ROUTING_NOTE,
-    lane: "cursor",
-    model: { kind: "caller-optional", defaultId: "composer-2.5" },
-    readOnly: false,
-    isolation: "required",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "implementer",
-    status: "active"
-  },
-  {
-    id: "grok-review",
-    title: "Grok cold review (read-only, in place)",
-    description: "Read-only Grok review with Clanker's own native containment flags. read_only=true is welded; an optional worktree branch runs the review inside an isolated tree. Model may be omitted \u2014 the grok lane has its own configured default. Currently dormant: the account returns HTTP 402 (out of credit).",
-    lane: "grok",
-    model: { kind: "lane-default" },
-    readOnly: true,
-    isolation: "optional",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "reviewer",
-    status: "dormant",
-    dormantReason: "grok account is out of credit (HTTP 402)"
-  },
-  {
-    id: "grok-write",
-    title: "Grok implementation (isolated worktree)",
-    description: "Write-capable Grok worker with a native workspace sandbox. read_only=false is welded and a managed worktree branch is mandatory; an explicit model is required. Currently dormant: the account returns HTTP 402 (out of credit).",
-    lane: "grok",
-    model: { kind: "caller-required" },
-    readOnly: false,
-    isolation: "required",
-    secrets: [],
-    turnTimeoutMs: TURN_TIMEOUT_MS,
-    supervision: "none",
-    roleClass: "implementer",
-    status: "dormant",
-    dormantReason: "grok account is out of credit (HTTP 402)"
-  }
-];
-var PROFILE_IDS = DISPATCH_PROFILES.map((p) => p.id);
-var BY_ID = new Map(DISPATCH_PROFILES.map((p) => [p.id, p]));
-function getProfile(id) {
-  const profile = BY_ID.get(id);
-  if (!profile) throw new Error(`unknown profile '${id}'; expected one of ${PROFILE_IDS.join(", ")}`);
-  return profile;
-}
-var ENV_PREFIX = "CLANKER_TURN_TIMEOUT_MS_";
-function profileTurnTimeoutMs(profile, env = process.env) {
-  const raw = env[ENV_PREFIX + profile.id.replace(/-/g, "_").toUpperCase()];
-  if (raw === void 0) return profile.turnTimeoutMs;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : profile.turnTimeoutMs;
-}
-function resolveProfileDispatch(input, env = process.env) {
-  const profile = getProfile(input.profile);
-  if (profile.isolation === "forbidden" && input.worktree !== void 0) {
-    throw new Error(`profile '${profile.id}' runs in place and does not take a worktree`);
-  }
-  if (profile.isolation === "forbidden" && input.base !== void 0) {
-    throw new Error(`profile '${profile.id}' cuts no worktree and therefore takes no base`);
-  }
-  if (profile.isolation === "forbidden" && input.doNotTouch !== void 0) {
-    throw new Error(`profile '${profile.id}' cuts no worktree and therefore takes no doNotTouch`);
-  }
-  if (profile.isolation === "required" && !input.worktree?.trim()) {
-    throw new Error(`profile '${profile.id}' is write-capable and requires a managed worktree branch name`);
-  }
-  let sandbox;
-  if (profile.sandbox === void 0) {
-    if (input.sandbox !== void 0) {
-      throw new Error(`profile '${profile.id}' runs on a lane with no native sandbox tier; it takes no sandbox argument`);
-    }
-  } else if (profile.sandbox.kind === "welded") {
-    if (input.sandbox !== void 0 && input.sandbox !== profile.sandbox.mode) {
-      throw new Error(`profile '${profile.id}' welds sandbox='${profile.sandbox.mode}'; it cannot be overridden`);
-    }
-    sandbox = profile.sandbox.mode;
-  } else {
-    sandbox = input.sandbox ?? profile.sandbox.defaultMode;
-  }
-  let model;
-  switch (profile.model.kind) {
-    case "welded":
-      if (input.model !== void 0 && input.model.trim() !== profile.model.id) {
-        throw new Error(`profile '${profile.id}' welds model='${profile.model.id}'; it cannot be overridden`);
-      }
-      model = profile.model.id;
-      break;
-    case "lane-default":
-      if (input.model !== void 0) {
-        throw new Error(`profile '${profile.id}' uses the lane's configured default model; it takes no model argument`);
-      }
-      model = void 0;
-      break;
-    case "caller-optional":
-      model = input.model?.trim() || void 0;
-      break;
-    case "caller-required":
-      if (!input.model?.trim()) {
-        throw new Error(`profile '${profile.id}' requires an explicit model id`);
-      }
-      model = input.model.trim();
-      if (!profile.readOnly && profile.supervision !== "sonnet" && isGlmModel(model)) {
-        throw new Error(
-          `profile '${profile.id}' cannot run a GLM write; GLM writes are supervised and belong to profile 'oc-glm-write'`
-        );
-      }
-      break;
-  }
-  return {
-    lane: profile.lane,
-    prompt: input.prompt,
-    cwd: input.cwd,
-    worktree: input.worktree,
-    base: input.base,
-    doNotTouch: input.doNotTouch,
-    model,
-    effort: input.effort,
-    readOnly: profile.readOnly,
-    sandbox,
-    profile: profile.ocProfile,
-    secrets: profile.secrets,
-    supervision: profile.supervision,
-    turnTimeoutMs: profileTurnTimeoutMs(profile, env),
-    profileId: profile.id
-  };
-}
-
 // src/resume.ts
 import fs10 from "node:fs";
 function laneCanResume(lane) {
@@ -33801,30 +33825,6 @@ function planResumeTurn(run, model) {
   };
 }
 
-// src/host.ts
-var HOSTS = ["claude", "codex", "standalone"];
-var CODEX_LANES = LANE_NAMES.filter((lane) => lane !== "codex");
-function parseHostArgs(args) {
-  let host;
-  for (let i = 0; i < args.length; i += 1) {
-    const arg = args[i];
-    if (arg !== "--host" && !arg.startsWith("--host=")) continue;
-    if (host !== void 0) throw new Error("duplicate --host option");
-    const value = arg === "--host" ? args[++i] : arg.slice("--host=".length);
-    if (!value || !HOSTS.includes(value)) {
-      throw new Error(`invalid --host '${value ?? ""}'; expected one of ${HOSTS.join(", ")}`);
-    }
-    host = value;
-  }
-  return host ?? "standalone";
-}
-function hostLaneBlockedReason(host, lane) {
-  if (host === "codex" && lane === "codex") {
-    return "host=codex cannot dispatch the codex ACP lane (self-dispatch is prohibited)";
-  }
-  return void 0;
-}
-
 // src/util.ts
 function errMessage(e) {
   return e instanceof Error ? e.message : String(e);
@@ -33867,6 +33867,381 @@ function stderrSuffix(stderr) {
   const cleaned = redact(stderr).trim();
   return cleaned ? `; stderr: ${cleaned.slice(-400)}` : "";
 }
+
+// src/turn-driver.ts
+var TurnDriver = class {
+  constructor(host) {
+    this.host = host;
+  }
+  turnDrives = /* @__PURE__ */ new Map();
+  pendingConnects = /* @__PURE__ */ new Map();
+  async driveNewSession(run, spec, prompt) {
+    await this.attemptInitialTurn(run, spec, prompt, 1);
+  }
+  async driveContinuation(run, conn, prompt, correction) {
+    const outcome = await this.runTurn(run, conn, prompt, correction);
+    if (run.cancellationRequested) {
+      await this.host.close(run.id);
+      run.cancelTurn();
+      return;
+    }
+    if (run.isTerminalTurn()) return;
+    if (outcome.ok) return;
+    await this.host.computeTouched(run);
+    await this.host.close(run.id);
+    run.failTurn(
+      outcome.message,
+      classifyTurnFailure({ message: outcome.message, turnsCount: run.turnsCount, toolCalls: run.toolCalls() }) ?? classifyBackendFailure(outcome.message)
+    );
+  }
+  /**
+   * Shared teardown for the three "cancellation/shutdown raced setup" spots in
+   * `attemptInitialTurn` below (#37 A3) — before connect, after connect throws,
+   * and after connect succeeds. Only the third has a live `conn` to close;
+   * the first two race in before one exists. Behavior is byte-for-byte what
+   * all three call sites did inline before this extraction.
+   */
+  async abortDuringSetup(run, conn) {
+    if (!run.cancellationRequested) run.requestCancellation();
+    if (conn) {
+      try {
+        await conn.closeAndWait();
+      } catch (err) {
+        console.error(`[clanker] subprocess shutdown failed for '${run.id}': ${errMessage(err)}`);
+      }
+    }
+    await this.host.computeTouched(run);
+    await this.host.close(run.id);
+    run.cancelTurn();
+  }
+  /**
+   * Drive the first turn of a fresh dispatch, with one automatic retry when
+   * the failure looks like a transient backend-capacity condition (see
+   * failure-classifier.ts isCapacityTransient). CLANKER-INFRA-FAILURE never
+   * retries here — retrying an identical request against a backend that just
+   * rejected its shape wastes a turn and hides the real signal (2026-07-13
+   * incident: exactly that class was hand-retried 3 times before anyone
+   * noticed). Retry scope is intentionally limited to the job's first turn.
+   *
+   * Also drives a backend-resume correction turn (#43), which is a fresh spawn
+   * of the lane in every respect that matters here — hence `correction`, the
+   * one thing that differs: it reaches `runTurn` so the turn is counted as a
+   * correction rather than as another dispatch's first turn.
+   */
+  async attemptInitialTurn(run, spec, prompt, attempt, correction = false) {
+    if (run.cancellationRequested || this.host.shuttingDown) {
+      await this.abortDuringSetup(run);
+      return;
+    }
+    let conn;
+    const controller = new AbortController();
+    this.pendingConnects.set(run.id, controller);
+    try {
+      conn = await LaneConnection.connect({
+        spec,
+        cwd: run.cwd,
+        readOnly: run.readOnly,
+        onFileWritten: (p) => run.recordFileWritten(p),
+        handshakeTimeoutMs: this.host.handshakeTimeoutMs,
+        terminateGraceMs: this.host.processTerminateGraceMs,
+        signal: controller.signal,
+        // #32: persist the worker's identity at spawn time, not after the
+        // handshake — the durable record has to name a process that may still
+        // be alive when this server is not.
+        onSpawn: ({ pid, startedAt }) => run.noteWorkerSpawned(pid, startedAt)
+      });
+    } catch (e) {
+      if (run.cancellationRequested || this.host.shuttingDown) {
+        await this.abortDuringSetup(run);
+        return;
+      }
+      const message = errMessage(e);
+      if (attempt === 1 && isCapacityTransient(message)) {
+        await this.retryAfterBackoff(run, message, attempt + 1);
+        return this.attemptInitialTurn(run, spec, prompt, attempt + 1, correction);
+      }
+      await this.host.computeTouched(run);
+      await this.host.close(run.id);
+      run.failTurn(message, classifyBackendFailure(message));
+      return;
+    } finally {
+      if (this.pendingConnects.get(run.id) === controller) this.pendingConnects.delete(run.id);
+    }
+    if (run.cancellationRequested || this.host.shuttingDown) {
+      await this.abortDuringSetup(run, conn);
+      return;
+    }
+    this.host.setConnection(run.id, conn);
+    run.sessionId = conn.sessionId;
+    run.observeConfigOptions(conn.session.newSessionResponse.configOptions);
+    const outcome = await this.runTurn(run, conn, prompt, correction);
+    if (run.cancellationRequested) {
+      await this.host.close(run.id);
+      run.cancelTurn();
+      return;
+    }
+    if (run.isTerminalTurn()) return;
+    if (outcome.ok) return;
+    const failureClass = classifyTurnFailure({
+      message: outcome.message,
+      turnsCount: run.turnsCount,
+      toolCalls: run.toolCalls()
+    }) ?? classifyBackendFailure(outcome.message);
+    if (attempt === 1 && failureClass === void 0 && isCapacityTransient(outcome.message)) {
+      await this.killConnection(run.id);
+      await this.retryAfterBackoff(run, outcome.message, attempt + 1);
+      return this.attemptInitialTurn(run, spec, prompt, attempt + 1, correction);
+    }
+    await this.host.computeTouched(run);
+    await this.host.close(run.id);
+    run.failTurn(outcome.message, failureClass);
+  }
+  async retryAfterBackoff(run, message, nextAttempt) {
+    run.recordTransientRetry(message, this.host.capacityRetryBackoffMs, nextAttempt);
+    const deadline = Date.now() + this.host.capacityRetryBackoffMs;
+    while (!run.cancellationRequested && !this.host.shuttingDown) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      await run.waitForSignal(remaining);
+    }
+  }
+  /**
+   * Drive one prompt turn to completion, projecting events into run state.
+   * Returns the outcome instead of failing the run itself — callers decide
+   * terminal-fail vs (for a fresh dispatch's first turn only) retry.
+   *
+   * CP1: every wait races three outcomes — the next ACP update, subprocess exit,
+   * and a hard per-turn timeout — so a turn always reaches a terminal state.
+   * suspected_stall stays a warning; this loop is the guaranteed terminal path.
+   */
+  async runTurn(run, conn, prompt, correction = false) {
+    run.beginTurn(prompt, correction);
+    const promptPromise = conn.session.prompt(prompt);
+    promptPromise.catch(() => {
+    });
+    const turnTimeoutMs = this.host.turnTimeoutOverrideMs ?? run.turnTimeoutMs ?? this.host.turnTimeoutMs;
+    const turnTimer = createTimeout(turnTimeoutMs);
+    try {
+      for (; ; ) {
+        const nextP = conn.session.nextUpdate();
+        const outcome = await Promise.race([
+          // The onRejected handler both handles a losing update's late rejection
+          // and turns a closed stream into a `closed` outcome (no unhandled reject).
+          nextP.then(
+            (m) => ({ kind: "msg", m }),
+            (err) => ({ kind: "closed", err })
+          ),
+          conn.exited.then((info) => ({ kind: "exit", info })),
+          turnTimer.promise.then(() => ({ kind: "timeout" }))
+        ]);
+        if (outcome.kind === "timeout") {
+          throw new Error(
+            `turn exceeded CLANKER_TURN_TIMEOUT_MS (${turnTimeoutMs}ms) with no completion; killing the Clanker` + stderrSuffix(conn.stderr())
+          );
+        }
+        if (outcome.kind === "exit" || outcome.kind === "closed") {
+          const grokDetail = run.lane === "grok" && run.turnStartedAtMs !== void 0 ? grokFailureDetail(run.turnStartedAtMs) : null;
+          const grokDetailSuffix = grokDetail ? `
+${grokDetail}` : "";
+          const info = outcome.kind === "exit" ? outcome.info : await Promise.race([conn.exited, createTimeout(500).promise.then(() => null)]);
+          if (info) {
+            const { code, signal, stderr } = info;
+            throw new Error(
+              `lane process exited mid-turn (code=${code} signal=${signal})${grokDetailSuffix}${stderrSuffix(stderr)}`
+            );
+          }
+          throw new Error(
+            `ACP connection closed mid-turn: ${outcome.kind === "closed" ? errMessage(outcome.err) : "process exited"}${grokDetailSuffix}${stderrSuffix(conn.stderr())}`
+          );
+        }
+        if (outcome.m.kind === "stop") {
+          const response = await promptPromise;
+          run.recordStop(response);
+          await this.finalizeTurn(run, response.stopReason);
+          return { ok: true };
+        }
+        run.onUpdate(outcome.m.update);
+      }
+    } catch (e) {
+      return { ok: false, message: errMessage(e) };
+    } finally {
+      turnTimer.cancel();
+    }
+  }
+  /** Kill a run's live connection/process without touching worktree state (used by the capacity-retry respawn path; run.close() is the terminal, worktree-reaping teardown). */
+  async killConnection(runId) {
+    const conn = this.host.getConnection(runId);
+    if (conn) {
+      try {
+        await conn.closeAndWait();
+      } catch (err) {
+        console.error(
+          `[clanker] subprocess shutdown failed for '${runId}': ${errMessage(err)}`
+        );
+      } finally {
+        this.host.dropConnection(runId, conn);
+      }
+    }
+  }
+  async finalizeTurn(run, stopReason) {
+    if (run.isTerminalTurn()) return;
+    let gitTouched = [];
+    try {
+      if (run.lane !== "gemini" && await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
+    } catch {
+    }
+    const touched = dedupe([...gitTouched, ...run.toolTouchedFiles()]);
+    run.setFinalTouched(touched);
+    if (!run.supervised || stopReason === "cancelled") {
+      await this.host.close(run.id);
+    } else if (run.worktreePath) {
+      await this.host.computeContractViolations(run);
+    }
+    if (stopReason === "cancelled") {
+      run.cancelTurn();
+    } else {
+      run.completeTurn();
+    }
+  }
+  /**
+   * Track an in-flight drive so cancel/reap/shutdown can see it, and untrack it
+   * however it settles. Public because a fresh dispatch's drive is started by
+   * the manager (`driveNewSession`) and must be tracked the same way.
+   */
+  trackDrive(id, drive) {
+    this.turnDrives.set(id, drive);
+    void drive.then(
+      () => {
+        if (this.turnDrives.get(id) === drive) this.turnDrives.delete(id);
+      },
+      () => {
+        if (this.turnDrives.get(id) === drive) this.turnDrives.delete(id);
+      }
+    );
+  }
+  /**
+   * Run another turn on a job that already came back — the correction ("严父")
+   * flow, in whichever of its two shapes this run's lane supports.
+   *
+   * Both shapes are turn-by-turn supervision, NOT mid-flight steering: ACP has
+   * no way to redirect a prompt already in progress, so a correction is a new
+   * turn issued after the previous one came back.
+   *
+   *  1. LIVE SESSION (the original, supervised-only). The ACP session outlived
+   *     its terminal turn and the worker still holds its context in memory, so
+   *     the correction is one more prompt on that session. The window is
+   *     bounded by the idle-TTL reaper, which closes a finished session after
+   *     `sessionTtlMs` — miss it and the only honest answer is that the session
+   *     is gone, not a silently respawned worker with no memory of what it was
+   *     corrected about. The capability is checked against the REGISTRY ROW
+   *     that minted the run (`run.supervised`), not against which tool the
+   *     caller holds: holding `clanker_prompt` is necessary but not sufficient,
+   *     so the narrow-tool property survives a seat file that drifts.
+   *  2. BACKEND RESUME (#43, lanes in LANES_WITH_RESUME). The context lives on
+   *     the lane's own side, keyed by the session ref it reported, so the
+   *     correction is a fresh spawn carrying that ref — and may run a different
+   *     `model` than the turn before it. Supervision does not gate this shape,
+   *     because the property supervision protects is not the one at stake: a
+   *     GLM write's danger is an unsupervised WRITE, which is already gated at
+   *     dispatch and is not widened here (the respawn inherits the run's own
+   *     readOnly and worktree, see resume.ts). What it does need is a ref and a
+   *     directory that still exists; without either it refuses.
+   *
+   * The lane's shape is decided by the capability table, never by which one
+   * happens to be reachable: a resume-capable lane always takes path 2, because
+   * path 1 on a lane whose worker is a one-shot CLI would prompt a process that
+   * has no memory of the previous turn at all.
+   */
+  async promptExisting(id, prompt, correction = false, model) {
+    const run = this.host.getRun(id);
+    if (!run) this.host.throwUnknownRun(id);
+    if (this.host.shuttingDown) {
+      throw new Error(`Clanker manager is shutting down; refusing a correction turn for '${id}'`);
+    }
+    if (this.host.isClosing(id)) {
+      throw new Error(
+        `session for '${id}' is closing right now \u2014 the correction window has already passed. The worker cannot be corrected mid-teardown; report the blocker instead of retrying.`
+      );
+    }
+    if (run.turnStatus === "running" || this.turnDrives.has(id)) {
+      throw new Error(`a turn is already running for '${id}'; wait for it to reach a terminal state first`);
+    }
+    const turnPrompt = run.readOnly ? prompt : `${WRITE_DISCIPLINE_PREFIX}
+
+${prompt}`;
+    if (laneCanResume(run.lane)) return this.startResumeTurn(run, turnPrompt, correction, model);
+    if (model !== void 0) {
+      throw new Error(
+        `run '${id}' is on lane '${run.lane}', whose correction turn continues a LIVE session \u2014 the model was fixed when that session was spawned and cannot be swapped mid-session. Only a lane that resumes from a backend session ref can hand the next turn to another model.`
+      );
+    }
+    if (!run.supervised) {
+      throw new Error(
+        `run '${id}' was not started from a supervised profile, so it takes no correction turn (only the supervised shape accepts one \u2014 see profiles.ts supervision)`
+      );
+    }
+    if (run.sessionClosed) throw new Error(`session for '${id}' is already closed`);
+    const conn = this.host.getConnection(id);
+    if (!conn) {
+      throw new Error(
+        `session for '${id}' is gone \u2014 a finished session is closed by the idle-TTL reaper after ${this.host.sessionTtlMs}ms (CLANKER_SESSION_TTL_MS). The worker cannot be corrected; report the blocker instead of starting a fresh dispatch on your own.`
+      );
+    }
+    const drive = this.driveContinuation(run, conn, turnPrompt, correction);
+    this.trackDrive(id, drive);
+    return { id, status: run.turnStatus };
+  }
+  /**
+   * The backend-resume correction turn (#43): plan it, build the respawn, and
+   * drive it as this run's next turn.
+   *
+   * The plan is computed and the spec resolved BEFORE anything on the run is
+   * touched, so a refusal (no ref, worktree already reclaimed, a lane gate
+   * inside resolveSpec) leaves the run exactly as terminal as it was — the
+   * caller gets an error and not a job that says "running" forever.
+   *
+   * The drive itself is `attemptInitialTurn`, unchanged: a resume turn IS a
+   * fresh spawn of the lane, so connect/handshake/first-turn/capacity-retry are
+   * the same code path a dispatch takes. Only the accounting differs, which is
+   * the `correction` flag it now forwards to runTurn.
+   */
+  startResumeTurn(run, turnPrompt, correction, model) {
+    const plan = planResumeTurn(run, model);
+    const spec = this.host.resolveSpec(run.lane, plan.requestOpts, run.runDir);
+    if (spec.warnings.length > 0) {
+      this.host.setWarnings(run.id, dedupe([...this.host.getWarnings(run.id) ?? [], ...spec.warnings]));
+    }
+    if (plan.model) run.adoptResumeModel(plan.model);
+    run.reopenForResume();
+    this.trackDrive(run.id, this.attemptInitialTurn(run, spec, turnPrompt, 1, correction));
+    return { id: run.id, status: run.turnStatus };
+  }
+  // ---- observation windows for the manager --------------------------------
+  /** The drive in flight for `id`, if any — awaited by cancel's abort path. */
+  driveFor(id) {
+    return this.turnDrives.get(id);
+  }
+  /** Is a turn being driven for `id`? The reaper skips those (#37 A2). */
+  hasDrive(id) {
+    return this.turnDrives.has(id);
+  }
+  /** Wait for every tracked drive to settle, however it settles (shutdown). */
+  // `Promise<void>`, not the allSettled array: shutdown discards the value and
+  // always has. Widening the type would let a future caller depend on a result
+  // this method never meant to publish (round-2 review codex-2b437) — the point
+  // is "every drive has settled", not what they settled to.
+  settleAllDrives() {
+    return Promise.allSettled([...this.turnDrives.values()]);
+  }
+  /** The in-flight handshake for `id`, if this run is still connecting (cancel). */
+  pendingConnect(id) {
+    return this.pendingConnects.get(id);
+  }
+  /** Abort every in-flight handshake (shutdown). */
+  abortPendingConnects() {
+    for (const controller of this.pendingConnects.values()) controller.abort();
+  }
+};
 
 // src/manager.ts
 var NO_CAPABILITIES = { supervision: "none" };
@@ -33944,9 +34319,9 @@ var LaneManager = class {
   cancelGraceMs;
   processTerminateGraceMs;
   warningsById = /* @__PURE__ */ new Map();
-  pendingConnects = /* @__PURE__ */ new Map();
-  turnDrives = /* @__PURE__ */ new Map();
   closing = /* @__PURE__ */ new Map();
+  /** The turn engine (turn-driver.ts); every per-turn method below forwards to it. */
+  turnDriver;
   shuttingDown = false;
   /** CP6: at most one active clanker_wait per id (single-consumer contract). */
   activeWaits = /* @__PURE__ */ new Set();
@@ -33965,11 +34340,54 @@ var LaneManager = class {
     this.capacityRetryBackoffMs = opts.capacityRetryBackoffMs ?? CAPACITY_RETRY_BACKOFF_MS;
     this.cancelGraceMs = opts.cancelGraceMs ?? CANCEL_GRACE_MS;
     this.processTerminateGraceMs = opts.processTerminateGraceMs;
+    this.turnDriver = new TurnDriver(this.turnHost());
     if (!opts.disableReaper) {
       const period = Math.max(5e3, Math.floor(this.sessionTtlMs / 10));
       this.reaperTimer = setInterval(() => void this.reap(), period);
       this.reaperTimer.unref?.();
     }
+  }
+  /**
+   * The manager's side of the TurnDriver split: the exact set of manager
+   * capabilities the turn engine is allowed to reach, and nothing else.
+   *
+   * Every function member delegates through an arrow so the receiver stays the
+   * MANAGER — `resolveSpec` in particular is caller-injected and must keep
+   * being invoked exactly as `this.resolveSpec(...)` was. The scalars are read
+   * once here because each is `readonly` and assigned in the constructor above;
+   * `shuttingDown` is the one mutable flag, so it is a getter and stays live.
+   */
+  turnHost() {
+    const manager = this;
+    return {
+      turnTimeoutMs: this.turnTimeoutMs,
+      turnTimeoutOverrideMs: this.turnTimeoutOverrideMs,
+      handshakeTimeoutMs: this.handshakeTimeoutMs,
+      processTerminateGraceMs: this.processTerminateGraceMs,
+      capacityRetryBackoffMs: this.capacityRetryBackoffMs,
+      sessionTtlMs: this.sessionTtlMs,
+      get shuttingDown() {
+        return manager.shuttingDown;
+      },
+      resolveSpec: (lane, opts, runDir) => this.resolveSpec(lane, opts, runDir),
+      getRun: (id) => this.runs.get(id),
+      throwUnknownRun: (id) => this.throwUnknownRun(id),
+      isClosing: (id) => this.closing.has(id),
+      getConnection: (id) => this.connections.get(id),
+      setConnection: (id, conn) => {
+        this.connections.set(id, conn);
+      },
+      dropConnection: (id, expected) => {
+        if (this.connections.get(id) === expected) this.connections.delete(id);
+      },
+      close: (id) => this.close(id),
+      computeTouched: (run) => this.computeTouched(run),
+      computeContractViolations: (run) => this.computeContractViolations(run),
+      getWarnings: (id) => this.warningsById.get(id),
+      setWarnings: (id, warnings) => {
+        this.warningsById.set(id, warnings);
+      }
+    };
   }
   // ---- dispatch -----------------------------------------------------------
   /**
@@ -34130,345 +34548,19 @@ ${params.prompt}`;
       supervised: minted.supervision === "sonnet"
     });
     this.runs.set(id, run);
-    const drive = this.driveNewSession(run, spec, lanePrompt);
-    this.trackDrive(id, drive);
+    const drive = this.turnDriver.driveNewSession(run, spec, lanePrompt);
+    this.turnDriver.trackDrive(id, drive);
     return { id, warnings };
   }
-  trackDrive(id, drive) {
-    this.turnDrives.set(id, drive);
-    void drive.then(
-      () => {
-        if (this.turnDrives.get(id) === drive) this.turnDrives.delete(id);
-      },
-      () => {
-        if (this.turnDrives.get(id) === drive) this.turnDrives.delete(id);
-      }
-    );
-  }
-  async driveNewSession(run, spec, prompt) {
-    await this.attemptInitialTurn(run, spec, prompt, 1);
-  }
+  // ---- turns --------------------------------------------------------------
   /**
    * Run another turn on a job that already came back — the correction ("严父")
-   * flow, in whichever of its two shapes this run's lane supports.
-   *
-   * Both shapes are turn-by-turn supervision, NOT mid-flight steering: ACP has
-   * no way to redirect a prompt already in progress, so a correction is a new
-   * turn issued after the previous one came back.
-   *
-   *  1. LIVE SESSION (the original, supervised-only). The ACP session outlived
-   *     its terminal turn and the worker still holds its context in memory, so
-   *     the correction is one more prompt on that session. The window is
-   *     bounded by the idle-TTL reaper, which closes a finished session after
-   *     `sessionTtlMs` — miss it and the only honest answer is that the session
-   *     is gone, not a silently respawned worker with no memory of what it was
-   *     corrected about. The capability is checked against the REGISTRY ROW
-   *     that minted the run (`run.supervised`), not against which tool the
-   *     caller holds: holding `clanker_prompt` is necessary but not sufficient,
-   *     so the narrow-tool property survives a seat file that drifts.
-   *  2. BACKEND RESUME (#43, lanes in LANES_WITH_RESUME). The context lives on
-   *     the lane's own side, keyed by the session ref it reported, so the
-   *     correction is a fresh spawn carrying that ref — and may run a different
-   *     `model` than the turn before it. Supervision does not gate this shape,
-   *     because the property supervision protects is not the one at stake: a
-   *     GLM write's danger is an unsupervised WRITE, which is already gated at
-   *     dispatch and is not widened here (the respawn inherits the run's own
-   *     readOnly and worktree, see resume.ts). What it does need is a ref and a
-   *     directory that still exists; without either it refuses.
-   *
-   * The lane's shape is decided by the capability table, never by which one
-   * happens to be reachable: a resume-capable lane always takes path 2, because
-   * path 1 on a lane whose worker is a one-shot CLI would prompt a process that
-   * has no memory of the previous turn at all.
+   * flow. This is a public server entrance (`clanker_prompt`, tools.ts), so it
+   * keeps its address on the manager; the turn itself — both of its shapes,
+   * and every refusal that guards them — lives in turn-driver.ts.
    */
-  async promptExisting(id, prompt, correction = false, model) {
-    const run = this.runs.get(id);
-    if (!run) this.throwUnknownRun(id);
-    if (this.shuttingDown) {
-      throw new Error(`Clanker manager is shutting down; refusing a correction turn for '${id}'`);
-    }
-    if (this.closing.has(id)) {
-      throw new Error(
-        `session for '${id}' is closing right now \u2014 the correction window has already passed. The worker cannot be corrected mid-teardown; report the blocker instead of retrying.`
-      );
-    }
-    if (run.turnStatus === "running" || this.turnDrives.has(id)) {
-      throw new Error(`a turn is already running for '${id}'; wait for it to reach a terminal state first`);
-    }
-    const turnPrompt = run.readOnly ? prompt : `${WRITE_DISCIPLINE_PREFIX}
-
-${prompt}`;
-    if (laneCanResume(run.lane)) return this.startResumeTurn(run, turnPrompt, correction, model);
-    if (model !== void 0) {
-      throw new Error(
-        `run '${id}' is on lane '${run.lane}', whose correction turn continues a LIVE session \u2014 the model was fixed when that session was spawned and cannot be swapped mid-session. Only a lane that resumes from a backend session ref can hand the next turn to another model.`
-      );
-    }
-    if (!run.supervised) {
-      throw new Error(
-        `run '${id}' was not started from a supervised profile, so it takes no correction turn (only the supervised shape accepts one \u2014 see profiles.ts supervision)`
-      );
-    }
-    if (run.sessionClosed) throw new Error(`session for '${id}' is already closed`);
-    const conn = this.connections.get(id);
-    if (!conn) {
-      throw new Error(
-        `session for '${id}' is gone \u2014 a finished session is closed by the idle-TTL reaper after ${this.sessionTtlMs}ms (CLANKER_SESSION_TTL_MS). The worker cannot be corrected; report the blocker instead of starting a fresh dispatch on your own.`
-      );
-    }
-    const drive = this.driveContinuation(run, conn, turnPrompt, correction);
-    this.trackDrive(id, drive);
-    return { id, status: run.turnStatus };
-  }
-  /**
-   * The backend-resume correction turn (#43): plan it, build the respawn, and
-   * drive it as this run's next turn.
-   *
-   * The plan is computed and the spec resolved BEFORE anything on the run is
-   * touched, so a refusal (no ref, worktree already reclaimed, a lane gate
-   * inside resolveSpec) leaves the run exactly as terminal as it was — the
-   * caller gets an error and not a job that says "running" forever.
-   *
-   * The drive itself is `attemptInitialTurn`, unchanged: a resume turn IS a
-   * fresh spawn of the lane, so connect/handshake/first-turn/capacity-retry are
-   * the same code path a dispatch takes. Only the accounting differs, which is
-   * the `correction` flag it now forwards to runTurn.
-   */
-  startResumeTurn(run, turnPrompt, correction, model) {
-    const plan = planResumeTurn(run, model);
-    const spec = this.resolveSpec(run.lane, plan.requestOpts, run.runDir);
-    if (spec.warnings.length > 0) {
-      this.warningsById.set(run.id, dedupe([...this.warningsById.get(run.id) ?? [], ...spec.warnings]));
-    }
-    if (plan.model) run.adoptResumeModel(plan.model);
-    run.reopenForResume();
-    this.trackDrive(run.id, this.attemptInitialTurn(run, spec, turnPrompt, 1, correction));
-    return { id: run.id, status: run.turnStatus };
-  }
-  async driveContinuation(run, conn, prompt, correction) {
-    const outcome = await this.runTurn(run, conn, prompt, correction);
-    if (run.cancellationRequested) {
-      await this.close(run.id);
-      run.cancelTurn();
-      return;
-    }
-    if (run.isTerminalTurn()) return;
-    if (outcome.ok) return;
-    await this.computeTouched(run);
-    await this.close(run.id);
-    run.failTurn(
-      outcome.message,
-      classifyTurnFailure({ message: outcome.message, turnsCount: run.turnsCount, toolCalls: run.toolCalls() }) ?? classifyBackendFailure(outcome.message)
-    );
-  }
-  /**
-   * Shared teardown for the three "cancellation/shutdown raced setup" spots in
-   * `attemptInitialTurn` below (#37 A3) — before connect, after connect throws,
-   * and after connect succeeds. Only the third has a live `conn` to close;
-   * the first two race in before one exists. Behavior is byte-for-byte what
-   * all three call sites did inline before this extraction.
-   */
-  async abortDuringSetup(run, conn) {
-    if (!run.cancellationRequested) run.requestCancellation();
-    if (conn) {
-      try {
-        await conn.closeAndWait();
-      } catch (err) {
-        console.error(`[clanker] subprocess shutdown failed for '${run.id}': ${errMessage(err)}`);
-      }
-    }
-    await this.computeTouched(run);
-    await this.close(run.id);
-    run.cancelTurn();
-  }
-  /**
-   * Drive the first turn of a fresh dispatch, with one automatic retry when
-   * the failure looks like a transient backend-capacity condition (see
-   * failure-classifier.ts isCapacityTransient). CLANKER-INFRA-FAILURE never
-   * retries here — retrying an identical request against a backend that just
-   * rejected its shape wastes a turn and hides the real signal (2026-07-13
-   * incident: exactly that class was hand-retried 3 times before anyone
-   * noticed). Retry scope is intentionally limited to the job's first turn.
-   *
-   * Also drives a backend-resume correction turn (#43), which is a fresh spawn
-   * of the lane in every respect that matters here — hence `correction`, the
-   * one thing that differs: it reaches `runTurn` so the turn is counted as a
-   * correction rather than as another dispatch's first turn.
-   */
-  async attemptInitialTurn(run, spec, prompt, attempt, correction = false) {
-    if (run.cancellationRequested || this.shuttingDown) {
-      await this.abortDuringSetup(run);
-      return;
-    }
-    let conn;
-    const controller = new AbortController();
-    this.pendingConnects.set(run.id, controller);
-    try {
-      conn = await LaneConnection.connect({
-        spec,
-        cwd: run.cwd,
-        readOnly: run.readOnly,
-        onFileWritten: (p) => run.recordFileWritten(p),
-        handshakeTimeoutMs: this.handshakeTimeoutMs,
-        terminateGraceMs: this.processTerminateGraceMs,
-        signal: controller.signal,
-        // #32: persist the worker's identity at spawn time, not after the
-        // handshake — the durable record has to name a process that may still
-        // be alive when this server is not.
-        onSpawn: ({ pid, startedAt }) => run.noteWorkerSpawned(pid, startedAt)
-      });
-    } catch (e) {
-      if (run.cancellationRequested || this.shuttingDown) {
-        await this.abortDuringSetup(run);
-        return;
-      }
-      const message = errMessage(e);
-      if (attempt === 1 && isCapacityTransient(message)) {
-        await this.retryAfterBackoff(run, message, attempt + 1);
-        return this.attemptInitialTurn(run, spec, prompt, attempt + 1, correction);
-      }
-      await this.computeTouched(run);
-      await this.close(run.id);
-      run.failTurn(message, classifyBackendFailure(message));
-      return;
-    } finally {
-      if (this.pendingConnects.get(run.id) === controller) this.pendingConnects.delete(run.id);
-    }
-    if (run.cancellationRequested || this.shuttingDown) {
-      await this.abortDuringSetup(run, conn);
-      return;
-    }
-    this.connections.set(run.id, conn);
-    run.sessionId = conn.sessionId;
-    run.observeConfigOptions(conn.session.newSessionResponse.configOptions);
-    const outcome = await this.runTurn(run, conn, prompt, correction);
-    if (run.cancellationRequested) {
-      await this.close(run.id);
-      run.cancelTurn();
-      return;
-    }
-    if (run.isTerminalTurn()) return;
-    if (outcome.ok) return;
-    const failureClass = classifyTurnFailure({
-      message: outcome.message,
-      turnsCount: run.turnsCount,
-      toolCalls: run.toolCalls()
-    }) ?? classifyBackendFailure(outcome.message);
-    if (attempt === 1 && failureClass === void 0 && isCapacityTransient(outcome.message)) {
-      await this.killConnection(run.id);
-      await this.retryAfterBackoff(run, outcome.message, attempt + 1);
-      return this.attemptInitialTurn(run, spec, prompt, attempt + 1, correction);
-    }
-    await this.computeTouched(run);
-    await this.close(run.id);
-    run.failTurn(outcome.message, failureClass);
-  }
-  async retryAfterBackoff(run, message, nextAttempt) {
-    run.recordTransientRetry(message, this.capacityRetryBackoffMs, nextAttempt);
-    const deadline = Date.now() + this.capacityRetryBackoffMs;
-    while (!run.cancellationRequested && !this.shuttingDown) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) return;
-      await run.waitForSignal(remaining);
-    }
-  }
-  /**
-   * Drive one prompt turn to completion, projecting events into run state.
-   * Returns the outcome instead of failing the run itself — callers decide
-   * terminal-fail vs (for a fresh dispatch's first turn only) retry.
-   *
-   * CP1: every wait races three outcomes — the next ACP update, subprocess exit,
-   * and a hard per-turn timeout — so a turn always reaches a terminal state.
-   * suspected_stall stays a warning; this loop is the guaranteed terminal path.
-   */
-  async runTurn(run, conn, prompt, correction = false) {
-    run.beginTurn(prompt, correction);
-    const promptPromise = conn.session.prompt(prompt);
-    promptPromise.catch(() => {
-    });
-    const turnTimeoutMs = this.turnTimeoutOverrideMs ?? run.turnTimeoutMs ?? this.turnTimeoutMs;
-    const turnTimer = createTimeout(turnTimeoutMs);
-    try {
-      for (; ; ) {
-        const nextP = conn.session.nextUpdate();
-        const outcome = await Promise.race([
-          // The onRejected handler both handles a losing update's late rejection
-          // and turns a closed stream into a `closed` outcome (no unhandled reject).
-          nextP.then(
-            (m) => ({ kind: "msg", m }),
-            (err) => ({ kind: "closed", err })
-          ),
-          conn.exited.then((info) => ({ kind: "exit", info })),
-          turnTimer.promise.then(() => ({ kind: "timeout" }))
-        ]);
-        if (outcome.kind === "timeout") {
-          throw new Error(
-            `turn exceeded CLANKER_TURN_TIMEOUT_MS (${turnTimeoutMs}ms) with no completion; killing the Clanker` + stderrSuffix(conn.stderr())
-          );
-        }
-        if (outcome.kind === "exit" || outcome.kind === "closed") {
-          const grokDetail = run.lane === "grok" && run.turnStartedAtMs !== void 0 ? grokFailureDetail(run.turnStartedAtMs) : null;
-          const grokDetailSuffix = grokDetail ? `
-${grokDetail}` : "";
-          const info = outcome.kind === "exit" ? outcome.info : await Promise.race([conn.exited, createTimeout(500).promise.then(() => null)]);
-          if (info) {
-            const { code, signal, stderr } = info;
-            throw new Error(
-              `lane process exited mid-turn (code=${code} signal=${signal})${grokDetailSuffix}${stderrSuffix(stderr)}`
-            );
-          }
-          throw new Error(
-            `ACP connection closed mid-turn: ${outcome.kind === "closed" ? errMessage(outcome.err) : "process exited"}${grokDetailSuffix}${stderrSuffix(conn.stderr())}`
-          );
-        }
-        if (outcome.m.kind === "stop") {
-          const response = await promptPromise;
-          run.recordStop(response);
-          await this.finalizeTurn(run, response.stopReason);
-          return { ok: true };
-        }
-        run.onUpdate(outcome.m.update);
-      }
-    } catch (e) {
-      return { ok: false, message: errMessage(e) };
-    } finally {
-      turnTimer.cancel();
-    }
-  }
-  /** Kill a run's live connection/process without touching worktree state (used by the capacity-retry respawn path; run.close() is the terminal, worktree-reaping teardown). */
-  async killConnection(runId) {
-    const conn = this.connections.get(runId);
-    if (conn) {
-      try {
-        await conn.closeAndWait();
-      } catch (err) {
-        console.error(
-          `[clanker] subprocess shutdown failed for '${runId}': ${errMessage(err)}`
-        );
-      } finally {
-        if (this.connections.get(runId) === conn) this.connections.delete(runId);
-      }
-    }
-  }
-  async finalizeTurn(run, stopReason) {
-    if (run.isTerminalTurn()) return;
-    let gitTouched = [];
-    try {
-      if (run.lane !== "gemini" && await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
-    } catch {
-    }
-    const touched = dedupe([...gitTouched, ...run.toolTouchedFiles()]);
-    run.setFinalTouched(touched);
-    if (!run.supervised || stopReason === "cancelled") {
-      await this.close(run.id);
-    } else if (run.worktreePath) {
-      await this.computeContractViolations(run);
-    }
-    if (stopReason === "cancelled") {
-      run.cancelTurn();
-    } else {
-      run.completeTurn();
-    }
+  promptExisting(id, prompt, correction = false, model) {
+    return this.turnDriver.promptExisting(id, prompt, correction, model);
   }
   // ---- long-poll ----------------------------------------------------------
   /**
@@ -34709,10 +34801,10 @@ ${grokDetail}` : "";
       return { id, status: run.turnStatus };
     }
     run.requestCancellation();
-    const pending = this.pendingConnects.get(id);
+    const pending = this.turnDriver.pendingConnect(id);
     if (pending) {
       pending.abort();
-      await this.turnDrives.get(id);
+      await this.turnDriver.driveFor(id);
       return { id, status: run.turnStatus };
     }
     const conn = this.connections.get(id);
@@ -34928,7 +35020,7 @@ ${grokDetail}` : "";
     const reaped = [];
     for (const run of [...this.runs.values()]) {
       if (run.sessionClosed) continue;
-      if (this.turnDrives.has(run.id)) continue;
+      if (this.turnDriver.hasDrive(run.id)) continue;
       if (run.turnStatus !== "running" && run.idleMs() > this.sessionTtlMs) {
         await this.close(run.id);
         reaped.push(run.id);
@@ -34944,9 +35036,9 @@ ${grokDetail}` : "";
     for (const run of this.runs.values()) {
       if (run.turnStatus === "running") run.requestCancellation();
     }
-    for (const controller of this.pendingConnects.values()) controller.abort();
-    await Promise.all([...this.connections.keys()].map((id) => this.killConnection(id)));
-    await Promise.allSettled([...this.turnDrives.values()]);
+    this.turnDriver.abortPendingConnects();
+    await Promise.all([...this.connections.keys()].map((id) => this.turnDriver.killConnection(id)));
+    await this.turnDriver.settleAllDrives();
     for (const id of [...this.runs.keys()]) {
       await this.close(id);
     }
