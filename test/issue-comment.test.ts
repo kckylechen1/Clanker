@@ -305,6 +305,29 @@ test("#27: an auth header is redacted by its STRUCTURE, whatever the scheme is c
     assert.ok(!out.includes(secret), `auth-param credential survived:\n${out}`);
     assert.ok(!out.includes("alice") || !out.includes("realm"), `the auth-param list must not be left behind:\n${out}`);
   }
+  // A header logged INSIDE a JSON string — the shape a fourth cold review
+  // walked through untouched. What pairs an opener with its closer is equal
+  // ESCAPING DEPTH, not "raw quote": here the opener is `\"` and so is the
+  // closer, and the previous fix ("an escaped quote is never the wrapper")
+  // is precisely what would have kept this broken. Counting backslashes
+  // handles JSON-inside-JSON with no further branch.
+  for (const [line, secret] of [
+    [`{\\"Authorization\\": \\"Basic ${basic}\\"}`, basic],
+    [`log: {\\"authorization\\":\\"Bearer abc123short\\"}`, "abc123short"],
+    [`{\\\\"Authorization\\\\": \\\\"Basic ${basic}\\\\"}`, basic],
+    [`sh -c 'curl -H \\'Authorization: Basic ${basic}\\''`, basic],
+  ] as const) {
+    const out = redactForPublic(line);
+    assert.ok(!out.includes(secret), `escaped-quote header survived:\n${out}`);
+    assert.ok(out.includes("[REDACTED]"), out);
+  }
+  // …and the escaping is handed back exactly as it was written, so the log
+  // line still parses as the JSON it came from.
+  assert.equal(
+    redactForPublic(`{\\"Authorization\\": \\"Basic ${basic}\\", \\"Accept\\": \\"application/json\\"}`),
+    `{\\"Authorization\\": \\"Basic [REDACTED]\\", \\"Accept\\": \\"application/json\\"}`,
+  );
+
   // …while a WRAPPED header stops at its wrapper, because everything after it
   // is the caller's command line, which is evidence rather than credential.
   const wrapped: [string, string, string][] = [
@@ -1222,6 +1245,31 @@ test("mutation: a constant park token lets worker text be overwritten by a heade
     !out.startsWith("literal [[clanker-hdr:0]] plus"),
     `the mutant rewrites the worker's own text into a header it never wrote: ${out}`,
   );
+});
+
+test("mutation: 'an escaped quote is never the wrapper' republishes a header logged inside JSON", async () => {
+  // The previous round's rule, restored: it treated any escaped quote as
+  // never-the-closer, which is right when the opener is raw and wrong when the
+  // opener is itself escaped — the JSON-log shape, where both are `\"`.
+  const mutant = await loadMutantModule<typeof import("../src/util.js")>(
+    "util-escape-blind-wrapper",
+    [{
+      file: "util.ts",
+      find:
+        "  const escapes = wrapper.length - 1;\n" +
+        "  const quote = wrapper[wrapper.length - 1]!;",
+      replace:
+        "  const escapes = 0;\n" +
+        "  const quote = wrapper[wrapper.length - 1]!;",
+    }],
+    "util.ts",
+  );
+  const basic = Buffer.from("user:hunter2").toString("base64");
+  const out = mutant.redactForPublic(`{\\"Authorization\\": \\"Basic ${basic}\\", \\"Accept\\": \\"json\\"}`);
+  // With `escapes` pinned to 0 the closer is never found at the right depth, so
+  // the credentials run past the end of the JSON value and eat the rest of the
+  // object — the header is mangled rather than redacted in place.
+  assert.ok(!out.includes('\\"Accept\\"'), `the mutant ate the rest of the log line: ${out}`);
 });
 
 test("mutation: credentials that stop at the first quote republish the auth-param they were meant to eat", async () => {

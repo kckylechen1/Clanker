@@ -331,7 +331,7 @@ function looksRandom(span: string, requireDigitOrNoWord: boolean): boolean {
  * call is written where the rule is.
  */
 const AUTH_HEADER =
-  /(["'`]?)\b((?:proxy-)?authorization)(["']?[ \t]*[:=][ \t]*["']?)([A-Za-z][A-Za-z0-9._-]*)([ \t]+)([^\r\n]+)/gi;
+  /((?:\\*["'`])?)\b((?:proxy-)?authorization)((?:\\*["'])?[ \t]*[:=][ \t]*(?:\\*["'])?)([A-Za-z][A-Za-z0-9._-]*)([ \t]+)([^\r\n]+)/gi;
 /**
  * Where the credentials end, which is the one thing about this header that
  * cannot be read off the header alone — it depends on what the header is
@@ -353,14 +353,27 @@ const AUTH_HEADER =
  * name, and only when that same character reappears later on the line — i.e.
  * the header really is wrapped in a pair. Otherwise the credentials own the
  * rest of the line.
+ *
+ * ESCAPING DEPTH, not "is it escaped": a fourth cold review found
+ * `{\"Authorization\": \"Basic …\"}` — a header logged inside a JSON string —
+ * passing through untouched, and the previous fix here ("an escaped quote is
+ * never the wrapper") is exactly what would have kept it broken. In that shape
+ * the OPENING wrapper is `\"` too, so the closer that matches it is also `\"`;
+ * a rule that skips all escaped quotes skips the real closer. What pairs a
+ * wrapper with its closer is that they carry the SAME number of backslashes,
+ * which also handles `\\\"` (JSON inside JSON) without another branch — this
+ * function counts, rather than testing for one spelling.
  */
 function authCredentialEnd(rest: string, wrapper: string): number {
   if (wrapper === "") return rest.length;
-  // An ESCAPED wrapper is not the wrapper: `curl -H "Authorization: Digest
-  // response=\"…\""` puts the same character inside the credentials, and
-  // stopping at the first one republishes the digest.
-  for (let i = rest.indexOf(wrapper); i !== -1; i = rest.indexOf(wrapper, i + 1)) {
-    if (i === 0 || rest[i - 1] !== "\\") return i;
+  const escapes = wrapper.length - 1;
+  const quote = wrapper[wrapper.length - 1]!;
+  for (let i = rest.indexOf(quote); i !== -1; i = rest.indexOf(quote, i + 1)) {
+    let depth = 0;
+    while (i - 1 - depth >= 0 && rest[i - 1 - depth] === "\\") depth += 1;
+    // Same depth = the closer that pairs with this opener. The credentials stop
+    // BEFORE its backslashes, so the escape survives into the output intact.
+    if (depth === escapes) return i - depth;
   }
   return rest.length;
 }
