@@ -126,6 +126,30 @@ async function runPrompt(id, sessionId, promptText) {
     return;
   }
 
+  // `OBSERVE_MODEL <id>`: report exactly one model back through ACP's
+  // configOptions, chosen by the caller. TELEMETRY below reports a FIXED
+  // `observed/model`, which cannot express "the backend ran something other
+  // than what it was asked for" — the #54 alarm needs the observed value and
+  // the dispatched value to be independently settable in one run.
+  // Matched against the RAW prompt, not the upper-cased `p`: the captured token
+  // is a model id that has to survive verbatim (`openai/gpt-5.6-sol`, not
+  // `OPENAI/GPT-5.6-SOL`), and case is exactly what the #54 comparison folds —
+  // a test whose fixture arrived pre-folded would prove nothing about it.
+  const observeMatch = /\bOBSERVE_MODEL\s+(\S+)/i.exec(promptText);
+  if (observeMatch) {
+    update(sessionId, { sessionUpdate: "config_option_update", configOptions: [
+      { id: "model", name: "Model", type: "select", category: "model", currentValue: observeMatch[1], options: [] },
+    ] });
+    // Falls THROUGH when the prompt also names a stall, so a test can observe
+    // the reported model on a run that is still live rather than only on a
+    // terminal one.
+    if (!p.includes("STALL")) {
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock("observed") });
+      respond(id, { stopReason: "end_turn" });
+      return;
+    }
+  }
+
   if (p.includes("TELEMETRY")) {
     update(sessionId, { sessionUpdate: "config_option_update", configOptions: [
       { id: "model", name: "Model", type: "select", category: "model", currentValue: "observed/model", options: [] },
