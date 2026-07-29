@@ -27783,7 +27783,7 @@ var RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 864e5;
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.4.6";
+var SERVER_VERSION = "0.4.7";
 var DEFAULT_CODEX_MODEL = "gpt-5.5";
 var DEFAULT_CODEX_EFFORT = "xhigh";
 var WRITE_DISCIPLINE_PREFIX = `Workspace discipline, enforced by the dispatching contract \u2014 these override any
@@ -27824,6 +27824,23 @@ var DEFAULT_CURSOR_MODEL = "composer-2.5";
 function resolveCursorModel(model) {
   if (!model) return model;
   return CURSOR_MODEL_ALIASES[model.trim()] ?? model.trim();
+}
+function modelFamilyTokens(id) {
+  const withoutProvider = id.slice(id.lastIndexOf("/") + 1);
+  return withoutProvider.toLowerCase().replace(/[\s_]+/g, "-").split("-").filter((t) => t.length > 0);
+}
+function sameModelFamily(a, b) {
+  const [ta, tb] = [modelFamilyTokens(a), modelFamilyTokens(b)];
+  if (ta.length === 0 || tb.length === 0) return false;
+  const [shorter, longer] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
+  return shorter.every((token, i) => token === longer[i]);
+}
+function modelSwapWarning(resolvedModel, observedModel) {
+  const resolved = resolvedModel?.trim();
+  const observed = observedModel?.trim();
+  if (!resolved || !observed) return null;
+  if (sameModelFamily(resolved, observed)) return null;
+  return `model swap: this run was dispatched to '${resolved}' (resolved_model) but the backend reports it actually ran '${observed}' (observed_model). Attribute this run's output \u2014 and any judgement about model quality drawn from it \u2014 to '${observed}', NOT to '${resolved}'.`;
 }
 var LANES_WITH_PINNED_WRITE_MODEL = /* @__PURE__ */ new Set(["codex", "cursor"]);
 var LANES_WITH_RESUME = /* @__PURE__ */ new Set(["cursor"]);
@@ -28168,6 +28185,11 @@ function buildSpawnSpec(lane, opts, runDir) {
       }
       const args = ["acp"];
       const model = resolveOcModel(opts.model);
+      if (model && !model.includes("/")) {
+        throw new Error(
+          `opencode lane: model '${model}' names no provider, and OpenCode has no bare model ids \u2014 it would silently fall back to another model rather than fail. Use 'provider/${model}' (e.g. 'openai/${model}'); \`opencode models\` lists what this machine can reach.`
+        );
+      }
       const profile = opts.profile === "kimi-crew" ? "kimi-crew" : "clanker-worker";
       const config2 = {
         $schema: "https://opencode.ai/config.json",
@@ -30367,6 +30389,7 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
     terminal_at: telemetry.terminal_at ?? null,
     terminal_reason: telemetry.terminal_reason ?? null,
     observed_model: telemetry.observed_model ?? null,
+    resolved_model: telemetry.resolved_model ?? null,
     read_only: telemetry.read_only ?? null,
     turns: telemetry.turns ?? null,
     server_pid: typeof telemetry.server_pid === "number" ? telemetry.server_pid : null,
@@ -35187,6 +35210,7 @@ ${params.prompt}`;
     return this.buildForeignWaitResult(foreign, owner.detail);
   }
   buildForeignWaitResult(foreign, ownerDetail) {
+    const swap = modelSwapWarning(foreign.resolved_model, foreign.observed_model);
     const result = {
       id: foreign.id,
       lane: foreign.lane ?? "unknown",
@@ -35199,8 +35223,12 @@ ${params.prompt}`;
       suspected_stall: foreign.last_activity_ms >= 0 && foreign.last_activity_ms > this.stallThresholdMs,
       run_dir: foreign.run_dir,
       degraded: "disk-poll",
-      degraded_note: `${ownerDetail}, so this wait polled ${foreign.run_dir} instead of an event stream. There is NO digest, no plan and no final_message for this run: those live in the process that spawned it and are not on disk. status/terminal state, the verdict file, observed_model and the issue-comment account below come straight from telemetry.json; nothing here is inferred.`,
+      degraded_note: `${ownerDetail}, so this wait polled ${foreign.run_dir} instead of an event stream. There is NO digest, no plan and no final_message for this run: those live in the process that spawned it and are not on disk. status/terminal state, the verdict file, observed_model and the issue-comment account below come straight from telemetry.json; nothing here is inferred. The one exception is \`warnings\`, which is COMPUTED here by comparing two of those telemetry fields (resolved_model against observed_model) \u2014 stated so a reader knows it is this server's reading of the record, not something the dead owner wrote.`,
       observed_model: foreign.observed_model,
+      // Same derivation as the live path (#54), off the same two telemetry
+      // fields — a swap does not become less wrong because the process that
+      // committed it has died.
+      ...swap ? { warnings: [swap] } : {},
       // The #27 account survives its owner because it lives in telemetry.json.
       // `issue_comment_pending` on a run whose owner is dead means the post
       // will never resolve — the honest reading is "go look at the ticket",
@@ -35220,6 +35248,7 @@ ${params.prompt}`;
   }
   buildWaitResult(run) {
     const status = run.turnStatus;
+    const telemetry = run.telemetry();
     const result = {
       id: run.id,
       lane: run.lane,
@@ -35230,8 +35259,9 @@ ${params.prompt}`;
       suspected_stall: run.suspectedStall(this.stallThresholdMs),
       run_dir: run.runDir
     };
-    const warnings = this.warningsById.get(run.id);
-    if (warnings && warnings.length) result.warnings = warnings;
+    const swap = modelSwapWarning(telemetry.resolved_model, telemetry.observed_model);
+    const warnings = dedupe([...this.warningsById.get(run.id) ?? [], ...swap ? [swap] : []]);
+    if (warnings.length) result.warnings = warnings;
     if (run.isTerminalTurn()) {
       const resultBytes = run.resultBytes();
       if (resultBytes > 0) {
@@ -35247,7 +35277,7 @@ ${params.prompt}`;
       if (run.error) result.error = annotatedError(run.error, run.failureClass);
       if (run.failureClass) result.failure_class = run.failureClass;
       if (run.worktreeRetained) result.worktree_retained = run.worktreeRetained;
-      result.telemetry = run.telemetry();
+      result.telemetry = telemetry;
     }
     return result;
   }
