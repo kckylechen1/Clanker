@@ -58,7 +58,7 @@ test("close kills the worker's whole process group, grandchildren included", asy
   try {
     conn.close();
     await conn.exited;
-    await until(() => !alive(grandchildPid), 4000);
+    await until(() => !alive(grandchildPid));
   } finally {
     if (alive(grandchildPid)) process.kill(grandchildPid, "SIGKILL");
   }

@@ -107,7 +107,7 @@ test("list() reports foreign runs as foreign, and never claims to know they are 
   const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir(), runsRoot: root });
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "mine", cwd: os.tmpdir(), readOnly: true });
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
 
     const entries = m.list();
     const foreign = entries.find((e) => e.id === "opencode-elsewhere");
@@ -138,7 +138,7 @@ test("an in-flight run this process owns appears ONCE, as its own", async () => 
   const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir(), runsRoot: root });
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "CANCELME", cwd: os.tmpdir(), readOnly: true }); // never completes on its own
-    await until(() => fs.existsSync(path.join(root, id, "telemetry.json")), 6_000);
+    await until(() => fs.existsSync(path.join(root, id, "telemetry.json")));
 
     const rows = m.list().filter((e) => e.id === id);
     assert.equal(rows.length, 1, `own run must not be listed twice (got ${JSON.stringify(rows)})`);
@@ -369,7 +369,7 @@ test("one run directory, one name — the owning process and the foreign read ag
   const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir(), runsRoot: linked });
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "one name", cwd: os.tmpdir(), readOnly: true });
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
     const owned = m.status(id).run_dir;
     const seen = readForeignRun(id, linked, NOW)?.run_dir;
     assert.ok(seen, "the record is readable through the foreign path");

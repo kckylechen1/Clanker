@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { LaneManager } from "../src/manager.js";
-import { fakeResolver } from "./helpers.js";
+import { OS_WAIT_BUDGET_MS, fakeResolver } from "./helpers.js";
 
 const LEDGER_13_KEYS = [
   "ts",
@@ -52,7 +52,10 @@ test("a real ledger row has exactly the 13 keys the frozen contract names, no mo
       cwd: os.tmpdir(),
       readOnly: true,
     });
-    const deadline = Date.now() + 6_000;
+    // OS-bound: the row is appended by the worker process reaching a terminal
+    // turn, then has to become visible on disk (helpers.ts OS_WAIT_BUDGET_MS,
+    // #29). Upper bound — the loop exits the moment the row shows up.
+    const deadline = Date.now() + OS_WAIT_BUDGET_MS;
     let rows: Record<string, unknown>[] = [];
     while (rows.length === 0 && Date.now() < deadline) {
       rows = ledgerRowsFor(id);

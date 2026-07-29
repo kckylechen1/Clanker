@@ -330,7 +330,7 @@ test("a cursor write may omit the model — the manager's pinned-default exempti
     assert.equal(seen?.model, undefined, "no model was named, and none was invented before the backend");
     // telemetry still names one, because the lane pinned it.
     assert.equal(m.status(id).telemetry?.resolved_model, DEFAULT_CURSOR_MODEL);
-    await until(() => m.status(id).status !== "running", 8_000);
+    await until(() => m.status(id).status !== "running");
   } finally {
     await m.shutdown();
     fs.rmSync(repo, { recursive: true, force: true });
@@ -649,7 +649,7 @@ test("cancelling a cursor turn kills cursor-agent, settles as cancelled, and lea
   try {
     const turn = conn.session.prompt("long review");
     turn.catch(() => {});
-    await until(() => fs.existsSync(pidFile), 15_000);
+    await until(() => fs.existsSync(pidFile));
     childPid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
     helperPid = Number.parseInt(fs.readFileSync(path.join(dir, "helper"), "utf8").trim(), 10);
     // The structural claim: cursor-agent runs in the SIDECAR's process group,
@@ -662,7 +662,7 @@ test("cancelling a cursor turn kills cursor-agent, settles as cancelled, and lea
       if (update.kind === "stop") break;
     }
     assert.equal((await turn).stopReason, "cancelled");
-    await until(() => !alive(childPid), 15_000);
+    await until(() => !alive(childPid));
     assert.equal(alive(sidecarPid), true, "the sidecar must survive a cancel — it signals a pid, never its own group");
     assert.doesNotMatch(conn.stderr(), /ESRCH|EPERM|Uncaught|UnhandledPromiseRejection/);
   } finally {

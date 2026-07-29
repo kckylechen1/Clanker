@@ -14,7 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LaneManager } from "../src/manager.js";
-import { fakeResolver, until } from "./helpers.js";
+import { OS_WAIT_BUDGET_MS, fakeResolver, until } from "./helpers.js";
 
 const LEDGER_13_KEYS = [
   "ts",
@@ -47,11 +47,14 @@ test("D1: a cancelled run's ledger row carries error_class 'cancelled', still ex
   const m = new LaneManager({ resolveSpec: fakeResolver, disableReaper: true, baseRepo: os.tmpdir() });
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "CANCELME", cwd: os.tmpdir(), readOnly: true });
-    await until(() => m.status(id).tool_calls > 0, 4_000);
+    await until(() => m.status(id).tool_calls > 0);
     const cancelled = await m.cancel(id);
     assert.equal(cancelled.status, "cancelled");
 
-    const deadline = Date.now() + 5_000;
+    // OS-bound: the row is appended after the worker process is actually
+    // cancelled, then has to become visible on disk (helpers.ts
+    // OS_WAIT_BUDGET_MS, #29). Upper bound, not a sleep.
+    const deadline = Date.now() + OS_WAIT_BUDGET_MS;
     let rows: Record<string, unknown>[] = [];
     while (rows.length === 0 && Date.now() < deadline) {
       rows = ledgerRowsFor(id);

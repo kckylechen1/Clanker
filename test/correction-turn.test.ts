@@ -55,7 +55,7 @@ async function startSupervised(m: LaneManager, tag: string): Promise<string> {
     prompt: "implement the frozen spec",
     worktree: `clanker/correction-${tag}-${Math.random().toString(36).slice(2, 8)}`,
   });
-  await until(() => m.status(id).status !== "running", 6_000);
+  await until(() => m.status(id).status !== "running");
   return id;
 }
 
@@ -79,7 +79,7 @@ test("a supervised run takes a correction turn and ends on the corrected verdict
     assert.equal(m.status(id).telemetry?.corrections, 0, "no corrections before one is sent");
 
     await m.promptExisting(id, "you drifted: only touch src/", true);
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
 
     const telemetry = m.status(id).telemetry!;
     assert.equal(telemetry.corrections, 1, "the correction is counted as a correction");
@@ -114,7 +114,7 @@ test("a corrected run still writes exactly ONE ledger row", async () => {
     assert.equal(ledgerRowsFor(id).length, 1, "the first terminal transition writes the row");
 
     await m.promptExisting(id, "correct yourself", true);
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
 
     assert.equal(m.status(id).telemetry?.turns, 2, "the correction really ran a second turn");
     assert.equal(ledgerRowsFor(id).length, 1, "a second terminal transition must NOT append a second row");
@@ -132,7 +132,7 @@ test("an unsupervised profile refuses a correction turn, server-side", async () 
   const m = makeManager(repo.base);
   try {
     const { id } = await m.dispatchProfile({ profile: "codex-review", prompt: "review", cwd: repo.base });
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
     await assert.rejects(
       () => m.promptExisting(id, "steer this read-only run", true),
       /not started from a supervised profile/,
@@ -156,7 +156,7 @@ test("a correction is refused while a turn is still running, and on an unknown i
     // seat that fires one at a working agent must get a refusal rather than a
     // second concurrent turn on one session.
     await assert.rejects(() => m.promptExisting(id, "too early", true), /already running/);
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
 
     await assert.rejects(() => m.promptExisting("codex-nope", "no such run", true), /not found/);
   } finally {

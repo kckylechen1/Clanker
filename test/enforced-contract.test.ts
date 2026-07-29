@@ -15,7 +15,7 @@ import path from "node:path";
 import { LaneManager, type WaitResult } from "../src/manager.js";
 import { changedFiles, changedFilesSince, parsePorcelainZ } from "../src/worktree.js";
 import { RUNS_ROOT, WRITE_DISCIPLINE_PREFIX } from "../src/constants.js";
-import { fakeResolver, until, worktreesForBranch } from "./helpers.js";
+import { OS_WAIT_BUDGET_MS, fakeResolver, until, worktreesForBranch } from "./helpers.js";
 
 /**
  * A real (origin + clone) repo with TWO commits on main, so an explicit `base`
@@ -70,8 +70,9 @@ function makeManager(baseRepo: string): LaneManager {
 // 15s, not 5s (#29 pattern): these cases run real git against a worktree under
 // suite-wide parallel load — an A/B on cb6e849 measured 8/12 red at 5s on a
 // busy machine, base and branch alike. The budget is an upper bound, not a
-// sleep; a healthy machine pays nothing.
-async function waitTerminal(m: LaneManager, id: string, timeoutMs = 15_000): Promise<WaitResult> {
+// sleep; a healthy machine pays nothing. This measurement is where the suite's
+// shared OS_WAIT_BUDGET_MS (helpers.ts) got its value.
+async function waitTerminal(m: LaneManager, id: string, timeoutMs = OS_WAIT_BUDGET_MS): Promise<WaitResult> {
   const deadline = Date.now() + timeoutMs;
   let last!: WaitResult;
   while (Date.now() < deadline) {
@@ -363,7 +364,7 @@ test("doNotTouch: a SUPERVISED success reports contract_violations at the FIRST 
     // see "a turn is already running". `until()` polling on `status()` (as
     // correction-turn.test.ts does) gives that bookkeeping a real macrotask to
     // settle before the correction is sent.
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
     const r = m.status(id);
     assert.equal(r.status, "done", "a violation never flips the run's status, supervised or not");
     const w = await m.wait(id, 200);
@@ -375,7 +376,7 @@ test("doNotTouch: a SUPERVISED success reports contract_violations at the FIRST 
     // And the session is still open for exactly the reason supervision
     // exists: the supervisor can still send a correction turn.
     await m.promptExisting(id, "you touched src/; move it back and finish", true);
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
     assert.equal(m.status(id).status, "done", "the correction turn ran on a still-open session");
   } finally {
     await m.shutdown();
@@ -395,7 +396,7 @@ test("doNotTouch: a rename OUT of a forbidden directory still reports the SOURCE
       cwd: repo.base,
       doNotTouch: ["src/"],
     });
-    await until(() => m.status(id).tool_calls > 0, 4_000);
+    await until(() => m.status(id).tool_calls > 0);
     const wt = m.status(id).worktree;
     assert.ok(wt, "worktree path present");
     fs.mkdirSync(path.join(wt!, "allowed"), { recursive: true });
@@ -495,7 +496,7 @@ test("doNotTouch: a validation failure itself is reported, never silently swallo
       cwd: repo.base,
       doNotTouch: ["src/"],
     });
-    await until(() => m.status(id).tool_calls > 0, 4_000);
+    await until(() => m.status(id).tool_calls > 0);
     const wt = m.status(id).worktree;
     assert.ok(wt, "worktree path present");
     // Break git itself inside the worktree — "the diff could not even run",
@@ -531,7 +532,7 @@ test("doNotTouch: a recompute against a worktree that has VANISHED replaces stal
       cwd: repo.base,
       doNotTouch: ["src/"],
     });
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
     // Confirm the FIRST terminal state carries the real violation (sanity:
     // proves the stale value we're about to blow away was genuine).
     const first = await m.wait(id, 200);
@@ -602,9 +603,9 @@ test("prefix: a supervised correction turn ALSO gets the discipline prefix, not 
     // See the note in the supervised doNotTouch test above: `until()` on
     // `status()`, not `waitTerminal`, avoids a real race with `turnDrives`
     // bookkeeping that a correction fired too early can still trip.
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
     await m.promptExisting(id, correctionText, true);
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
     const r = await m.wait(id, 200);
     assert.equal(r.status, "done");
     // The fake agent echoes the prompt it received as its final message, so

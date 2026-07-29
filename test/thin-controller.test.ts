@@ -46,7 +46,7 @@ test("a completed one-shot job closes its ACP session before publishing done", a
       cwd: os.tmpdir(),
       readOnly: true,
     });
-    await until(() => manager.status(id).status === "done", 2_000);
+    await until(() => manager.status(id).status === "done");
     assert.equal(manager.list().some((entry) => entry.id === id), false);
   } finally {
     await manager.shutdown();
@@ -116,7 +116,7 @@ test("ACP file paths remain realpath-contained", () => {
 test("hard timeout and cancel escalation force terminal states", async () => {
   const timed = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir(), turnTimeoutMs: 80 });
   const { id: timedId } = await timed.dispatchStart({ lane: "codex", prompt: "STALL", cwd: os.tmpdir(), readOnly: true });
-  await until(() => timed.status(timedId).status === "error", 2_000);
+  await until(() => timed.status(timedId).status === "error");
   assert.match(timed.status(timedId).error ?? "", /TURN_TIMEOUT/);
   await timed.shutdown();
 
@@ -125,7 +125,7 @@ test("hard timeout and cancel escalation force terminal states", async () => {
     baseRepo: os.tmpdir(), cancelGraceMs: 30, processTerminateGraceMs: 30,
   });
   const { id } = await cancelled.dispatchStart({ lane: "codex", prompt: "STALL_ACTIVITY", cwd: os.tmpdir(), readOnly: true });
-  await until(() => cancelled.status(id).tool_calls > 0, 2_000);
+  await until(() => cancelled.status(id).tool_calls > 0);
   assert.equal((await cancelled.cancel(id)).status, "cancelled");
   assert.equal(cancelled.status(id).telemetry?.forced_kill, true);
   await cancelled.shutdown();

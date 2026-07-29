@@ -103,7 +103,7 @@ test("#33 A1: a write dispatch from a feature branch is cut from the dispatch cw
       worktree: uniq("a1"),
       cwd: repo.base,
     });
-    await until(() => m.status(id).tool_calls > 0, 4_000);
+    await until(() => m.status(id).tool_calls > 0);
     const wt = m.status(id).worktree;
     assert.ok(wt, "a write dispatch runs in a worktree");
     assert.equal(
@@ -198,7 +198,7 @@ test("#33 A3: dispatching from a dirty checkout warns that the uncommitted work 
     );
 
     // Advisory, not a gate: the dispatch really ran.
-    await until(() => m.status(id).tool_calls > 0, 4_000);
+    await until(() => m.status(id).tool_calls > 0);
     const wt = m.status(id).worktree;
     assert.ok(wt && fs.existsSync(wt), "the dispatch was not blocked — its worktree exists");
     assert.equal(
@@ -343,7 +343,7 @@ test("#3 B1: two dispatches on ONE branch name get two different paths, and the 
       worktree: branch,
       cwd: repo.base,
     });
-    await until(() => m.status(first.id).tool_calls > 0, 4_000);
+    await until(() => m.status(first.id).tool_calls > 0);
     const liveTree = m.status(first.id).worktree;
     assert.ok(liveTree && fs.existsSync(liveTree), "the first dispatch has a live tree");
     assert.ok(
@@ -396,7 +396,7 @@ test("#3 B1 mutation: dropping the run id from the path puts the second dispatch
       worktree: branch,
       cwd: repo.base,
     });
-    await until(() => m.status(first.id).tool_calls > 0, 4_000);
+    await until(() => m.status(first.id).tool_calls > 0);
     await assert.rejects(
       () =>
         m.dispatchStart({
@@ -541,7 +541,7 @@ test("#3 B2: the ownership marker is invisible to change detection — not touch
       // touched set it would be reported as a breach the worker never made.
       doNotTouch: [OWNER_MARKER, "src/"],
     });
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
     const w = await m.wait(id, 200);
     assert.deepEqual(
       w.contract_violations,
@@ -640,7 +640,7 @@ test("#3 B3: cancelling a FINISHED supervised run hands back the session and the
       worktree: uniq("b3"),
       cwd: repo.base,
     });
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
     assert.equal(m.status(id).status, "done", "fixture: the supervised turn succeeded");
     const wt = m.status(id).worktree;
     assert.ok(wt && fs.existsSync(wt), "fixture: the success deliberately holds its tree open");
@@ -673,7 +673,7 @@ test("#3 B3: the reclaim still obeys the retention rules — a finished run that
       worktree: uniq("b3-dirty"),
       cwd: repo.base,
     });
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
     const wt = m.status(id).worktree;
     assert.ok(wt && fs.existsSync(wt));
 
@@ -715,7 +715,7 @@ test("#3 B3 mutation: the old no-op leaves the session open and the tree standin
       worktree: uniq("b3-mutant"),
       cwd: repo.base,
     });
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
     const wt = m.status(id).worktree;
     assert.ok(wt && fs.existsSync(wt));
     await m.cancel(id);
@@ -726,7 +726,7 @@ test("#3 B3 mutation: the old no-op leaves the session open and the tree standin
     // And the proof that the session was never closed: a correction turn is
     // still accepted on a run the caller believes it cancelled.
     await m.promptExisting(id, "still steerable after 'cancel'", true);
-    await until(() => m.status(id).status !== "running", 6_000);
+    await until(() => m.status(id).status !== "running");
   } finally {
     await m.shutdown();
     dropMutant(name);

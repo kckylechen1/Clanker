@@ -111,7 +111,7 @@ test("C1: a successful dispatch has a telemetry.json with created_at before the 
     // that dies before a worker exists still has to say whose session it was.
     assert.equal(immediate.server_pid, process.pid);
 
-    await until(() => m.status(id).status !== "running", 5_000);
+    await until(() => m.status(id).status !== "running");
     const final = JSON.parse(fs.readFileSync(telemetryPath, "utf8"));
     assert.ok(final.created_at, "run.persistTelemetry()'s overwrite must still carry a created_at field");
     assert.equal(final.lane, "codex");

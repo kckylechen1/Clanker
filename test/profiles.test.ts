@@ -225,7 +225,7 @@ test("#19-F2: the registry entrance still mints supervision, and it really dispa
     assert.equal(telemetry.read_only, false);
     assert.equal(telemetry.resolved_model, "zhipuai-coding-plan/glm-5.2");
     assert.deepEqual([...(capturedOpts.secrets ?? [])], ["ZHIPUAI_API_KEY"]);
-    await until(() => m.status(id).status !== "running", 4_000);
+    await until(() => m.status(id).status !== "running");
   } finally {
     await m.shutdown();
     fs.rmSync(repo.root, { recursive: true, force: true });
@@ -264,7 +264,7 @@ test("#19-F3: read-only profiles accept an optional worktree and really run insi
     assert.equal(view.telemetry?.read_only, true, "the read gate stays on");
     assert.ok(view.worktree, "a read-only dispatch that names a worktree must actually get one");
     assert.notEqual(path.resolve(view.cwd), path.resolve(repo.base), "it must not run in the primary checkout");
-    await until(() => m.status(id).status !== "running", 4_000);
+    await until(() => m.status(id).status !== "running");
   } finally {
     await m.shutdown();
     fs.rmSync(repo.root, { recursive: true, force: true });
@@ -277,7 +277,7 @@ test("#19-F3: omitting the worktree still runs a read in place, and gemini still
   try {
     const { id } = await m.dispatchProfile({ profile: "codex-review", prompt: "review in place" });
     assert.equal(m.status(id).worktree, undefined);
-    await until(() => m.status(id).status !== "running", 4_000);
+    await until(() => m.status(id).status !== "running");
     await assert.rejects(
       () => m.dispatchProfile({ profile: "gemini-recon", prompt: "survey", worktree: "clanker/nope" }),
       /runs in place and does not take a worktree/,
@@ -595,7 +595,7 @@ async function assertRuntimeMatchesDeclaration(
       `${profile.id}: the declared turn ceiling never reached the run`,
     );
 
-    await until(() => m.status(id).status !== "running", 4_000);
+    await until(() => m.status(id).status !== "running");
     return { view, opts, spec, branch };
   } finally {
     await m.shutdown();
@@ -739,7 +739,7 @@ test("#19-F7: a write-capable gemini request is refused loudly, not silently dow
     // An omitted flag still normalizes to read-only, as before.
     const { id } = await m.dispatchStart({ lane: "gemini", prompt: "survey", cwd: os.tmpdir() });
     assert.equal(m.status(id).telemetry?.read_only, true);
-    await until(() => m.status(id).status !== "running", 4_000);
+    await until(() => m.status(id).status !== "running");
   } finally {
     await m.shutdown();
   }
@@ -779,7 +779,7 @@ test("#19-4: two profiles with different turnTimeoutMs take effect differently",
     const b = await m.dispatchProfile({ profile: "codex-review", prompt: "review", cwd: os.tmpdir() });
     assert.equal(m.status(a.id).telemetry?.turn_timeout_ms, recon.turnTimeoutMs);
     assert.equal(m.status(b.id).telemetry?.turn_timeout_ms, review.turnTimeoutMs);
-    await until(() => m.status(a.id).status !== "running" && m.status(b.id).status !== "running", 4_000);
+    await until(() => m.status(a.id).status !== "running" && m.status(b.id).status !== "running");
   } finally {
     await m.shutdown();
   }

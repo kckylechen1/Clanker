@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LaneManager } from "../src/manager.js";
-import { fakeResolver, until } from "./helpers.js";
+import { OS_WAIT_BUDGET_MS, fakeResolver, until } from "./helpers.js";
 
 function git(cwd: string, args: string[]): void {
   execFileSync("git", args, {
@@ -75,7 +75,10 @@ test("close() surfaces worktree cleanup failures to stderr and still marks workt
     // Wait until the live turn is established. One-shot completion now closes
     // immediately, so the cleanup failure must be injected while the job is
     // still running.
-    const deadline = Date.now() + 5000;
+    // OS-bound: waits for a spawned worker to establish its ACP turn
+    // (helpers.ts OS_WAIT_BUDGET_MS, #29). Upper bound — the loop exits as soon
+    // as the turn is up, and the assertions below still require it to be live.
+    const deadline = Date.now() + OS_WAIT_BUDGET_MS;
     let status = m.status(id);
     while (status.tool_calls === 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 50));
@@ -104,7 +107,7 @@ test("close() surfaces worktree cleanup failures to stderr and still marks workt
       `expected the stderr diagnostic to describe a failure, got: ${JSON.stringify(stderrLines)}`,
     );
 
-    await until(() => m.status(id).status === "error", 5_000);
+    await until(() => m.status(id).status === "error");
     const result = await m.wait(id, 100);
     assert.equal(result.status, "error", "closing the in-flight fixture terminates its turn");
     assert.equal(result.worktree_retained, worktreePath, "worktreeRetained still set despite the cleanup error");
@@ -130,12 +133,12 @@ test("concurrent close calls share one subprocess and worktree teardown", async 
       readOnly: false,
       worktree: branch,
     });
-    await until(() => m.status(id).tool_calls > 0, 5_000);
+    await until(() => m.status(id).tool_calls > 0);
     const worktreePath = m.status(id).worktree;
     assert.ok(worktreePath && fs.existsSync(worktreePath), "managed worktree must exist");
 
     await Promise.all([m.close(id), m.close(id)]);
-    await until(() => m.status(id).status === "error", 5_000);
+    await until(() => m.status(id).status === "error");
 
     const result = await m.wait(id, 100);
     assert.equal(result.worktree_retained, undefined, "clean worktree was removed, not falsely retained");

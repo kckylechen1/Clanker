@@ -27,7 +27,7 @@ test("B1: a mid-turn crash's stderr evidence reaches the terminal error", async 
   const m = makeManager();
   try {
     const { id } = await m.dispatchStart({ lane: "codex", prompt: "CRASH now", cwd: os.tmpdir(), readOnly: true });
-    await until(() => m.status(id).status !== "running", 5_000);
+    await until(() => m.status(id).status !== "running");
     const r = m.status(id);
     assert.equal(r.status, "error");
     assert.match(r.error ?? "", /exited mid-turn/);
@@ -46,7 +46,7 @@ test("B1: a secret-shaped value in stderr is redacted before it reaches the term
       cwd: os.tmpdir(),
       readOnly: true,
     });
-    await until(() => m.status(id).status !== "running", 5_000);
+    await until(() => m.status(id).status !== "running");
     const r = m.status(id);
     assert.equal(r.status, "error");
     assert.match(r.error ?? "", /\[REDACTED\]/, "the redaction marker must appear in place of the secret");

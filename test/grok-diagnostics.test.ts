@@ -12,7 +12,7 @@ import {
 } from "../src/failure-classifier.js";
 import { grokFailureDetail } from "../src/grok-diagnostics.js";
 import { LaneManager, type WaitResult } from "../src/manager.js";
-import { fakeResolver } from "./helpers.js";
+import { OS_WAIT_BUDGET_MS, fakeResolver } from "./helpers.js";
 
 // ---- (a) classifyBackendFailure -------------------------------------------
 //
@@ -85,7 +85,9 @@ function makeManager(): LaneManager {
   });
 }
 
-async function waitTerminal(m: LaneManager, id: string, timeoutMs = 5000): Promise<WaitResult> {
+// OS-bound: spawns a worker and waits for its turn to end (helpers.ts
+// OS_WAIT_BUDGET_MS, #29). Upper bound, not a sleep.
+async function waitTerminal(m: LaneManager, id: string, timeoutMs = OS_WAIT_BUDGET_MS): Promise<WaitResult> {
   const deadline = Date.now() + timeoutMs;
   let last!: WaitResult;
   while (Date.now() < deadline) {
