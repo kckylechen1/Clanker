@@ -34035,8 +34035,8 @@ ${params.prompt}`;
       );
     }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
-    const runDir = path10.join(this.runsRoot, id);
-    fs11.mkdirSync(runDir, { recursive: true });
+    fs11.mkdirSync(path10.resolve(this.runsRoot, id), { recursive: true });
+    const runDir = realpathBestEffort(path10.resolve(this.runsRoot, id));
     const stub = {
       host: this.host,
       lane: params.lane,

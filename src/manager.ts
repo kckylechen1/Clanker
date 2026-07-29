@@ -58,6 +58,7 @@ import {
   headSha,
   isGitWorkTree,
   matchDoNotTouch,
+  realpathBestEffort,
   removeIfClean,
   resolveBaseCommit,
   resolveTargetRepo,
@@ -533,8 +534,17 @@ export class LaneManager {
     }
 
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
-    const runDir = path.join(this.runsRoot, id);
-    fs.mkdirSync(runDir, { recursive: true });
+    // Resolved at the ONE place a run directory is minted, so every surface
+    // that later reports it agrees. Round-3 review (codex-ee7b9): the symlink
+    // fix made the FOREIGN read emit a realpath while the owning process kept
+    // emitting the lexical join, so one physical directory had two names
+    // depending on who was asked — and `run_dir` is documented as the absolute
+    // path a seat hands over precisely so nobody has to construct or reconcile
+    // one. A relative CLANKER_RUNS_ROOT made it worse: the local form was not
+    // even absolute. Fixing it here rather than at each reporting site is the
+    // difference between a contract and four coincidences.
+    fs.mkdirSync(path.resolve(this.runsRoot, id), { recursive: true });
+    const runDir = realpathBestEffort(path.resolve(this.runsRoot, id));
 
     // #35: write a telemetry stub the instant the run directory exists — BEFORE
     // resolveSpec's own fail-closed gates (missing model, gemini rules, sandbox

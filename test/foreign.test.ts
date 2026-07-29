@@ -352,3 +352,30 @@ test("an uppercase id is refused — the generator only ever mints lowercase", (
   assert.equal(isValidRunId("Codex-1abcd"), false);
   assert.equal(isValidRunId("codex-1abcd"), true);
 });
+
+test("one run directory, one name — the owning process and the foreign read agree", async () => {
+  // Round-3 review (codex-ee7b9). The symlink fix resolved the FOREIGN read
+  // while dispatch kept minting a lexical join, so the same physical directory
+  // had two names depending on who was asked — and `run_dir` is documented as
+  // the absolute path a seat hands over precisely so nobody has to construct or
+  // reconcile one. The runs root here is a symlink, which is what makes the two
+  // forms differ at all (and is the ordinary macOS /var shape).
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-onename-"));
+  const real = path.join(base, "real-runs");
+  const linked = path.join(base, "runs-link");
+  fs.mkdirSync(real, { recursive: true });
+  fs.symlinkSync(real, linked);
+  const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir(), runsRoot: linked });
+  try {
+    const { id } = await m.dispatchStart({ lane: "codex", prompt: "one name", cwd: os.tmpdir(), readOnly: true });
+    await until(() => m.status(id).status !== "running", 6_000);
+    const owned = m.status(id).run_dir;
+    const seen = readForeignRun(id, linked, NOW)?.run_dir;
+    assert.ok(seen, "the record is readable through the foreign path");
+    assert.equal(owned, seen, `owned ${owned} vs foreign ${seen} — one directory must have one name`);
+    assert.equal(path.isAbsolute(owned), true, "and the documented contract is an ABSOLUTE path");
+  } finally {
+    await m.shutdown();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
