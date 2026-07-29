@@ -6873,12 +6873,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs13, exportName) {
+    function addFormats(ajv, list, fs14, exportName) {
       var _a;
       var _b;
       (_a = (_b = ajv.opts.code).formats) !== null && _a !== void 0 ? _a : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs13[f]);
+        ajv.addFormat(f, fs14[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -27820,7 +27820,7 @@ function envInt(name, fallback) {
 
 // src/manager.ts
 import crypto from "node:crypto";
-import fs11 from "node:fs";
+import fs12 from "node:fs";
 import path10 from "node:path";
 
 // src/backends.ts
@@ -28185,12 +28185,281 @@ function buildSpawnSpec(lane, opts, runDir) {
 
 // src/adopt.ts
 import { spawnSync } from "node:child_process";
-import fs6 from "node:fs";
+import fs7 from "node:fs";
 import path6 from "node:path";
 
 // src/run.ts
-import fs5 from "node:fs";
+import fs6 from "node:fs";
 import path5 from "node:path";
+
+// src/issue-comment.ts
+import { execFile } from "node:child_process";
+import fs4 from "node:fs";
+
+// src/failure-classifier.ts
+var INFRA_FAILURE_TAG = "CLANKER-INFRA-FAILURE";
+var INFRA_FAILURE_ADVISORY = "infra \u5C42\u6545\u969C\uFF0C\u91CD\u8BD5\u65E0\u76CA\uFF1B\u5148\u8DD1 `npm run smoke -- <lane>` \u590D\u9A8C\u8F66\u9053\u5065\u5EB7\uFF0C\u518D\u51B3\u5B9A\u662F\u5426\u91CD\u6D3E\u3002";
+var API_SCHEMA_ERROR_PATTERNS = [
+  /invalid_request_error/i,
+  /"param"\s*:\s*"tools"/i,
+  /reserved for use by this model/i
+];
+function classifyTurnFailure(params) {
+  if (params.turnsCount !== 1 || params.toolCalls !== 0) return void 0;
+  if (API_SCHEMA_ERROR_PATTERNS.some((re) => re.test(params.message))) {
+    return INFRA_FAILURE_TAG;
+  }
+  return void 0;
+}
+var CAPACITY_TRANSIENT_PATTERNS = [
+  /model[ _-]?at[ _-]?capacity/i,
+  /\boverloaded\b/i,
+  /\bservice unavailable\b/i,
+  /\b(500|502|503|504)\b/
+];
+function isCapacityTransient(message) {
+  return CAPACITY_TRANSIENT_PATTERNS.some((re) => re.test(message));
+}
+var BACKEND_BILLING_TAG = "CLANKER-BACKEND-BILLING";
+var BACKEND_AUTH_TAG = "CLANKER-BACKEND-AUTH";
+var ENV_DRIFT_TAG = "CLANKER-ENV-DRIFT";
+var BACKEND_MODEL_TAG = "CLANKER-BACKEND-MODEL";
+var BACKEND_MODEL_PATTERNS = [
+  /cannot use this model/i,
+  /model .{0,80}(is )?(not available|unavailable|not supported|unknown model)/i,
+  /no access to model/i
+];
+var BACKEND_BILLING_PATTERNS = [
+  /\b402\b|balance|billing|payment required|usage balance exhausted|insufficient credit/i
+];
+var BACKEND_AUTH_PATTERNS = [
+  /\b40[13]\b|unauthorized|forbidden|invalid api key|authentication/i
+];
+var ENV_DRIFT_PATTERNS = [
+  // Node's own spawn error text: `spawn <command> ENOENT` (the command may
+  // itself contain spaces, hence `.+` rather than `\S+`).
+  /spawn .+ ENOENT/i
+];
+var SPAWN_FAILURE_PATTERNS = [
+  // Anchored to acp-client's EXACT wrapper (`failed to spawn '<cmd>': ...`,
+  // acp-client.ts spawn-error reject) — anchored at message start, quoted
+  // command, colon. Round-2 review (codex-749a3) proved the previous
+  // substring form was wider than its own prose: a REAL backend 402 whose
+  // text embedded a "failed to spawn helper ENOENT" diagnostic hijacked the
+  // short-circuit and misrouted billing to ENV-DRIFT. Only the wrapper shape
+  // this codebase itself produces may take the pre-billing shortcut; any
+  // spawn-ish text merely quoted inside a backend answer falls through to
+  // the billing/auth/capacity passes below.
+  /^failed to spawn '[^']+':.*\bENOENT\b/i
+];
+function classifyBackendFailure(message) {
+  if (SPAWN_FAILURE_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
+  if (BACKEND_BILLING_PATTERNS.some((re) => re.test(message))) return BACKEND_BILLING_TAG;
+  if (BACKEND_MODEL_PATTERNS.some((re) => re.test(message))) return BACKEND_MODEL_TAG;
+  if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;
+  if (ENV_DRIFT_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
+  return void 0;
+}
+
+// src/util.ts
+function errMessage(e) {
+  return e instanceof Error ? e.message : String(e);
+}
+function createTimeout(ms) {
+  let handle;
+  const promise2 = new Promise((resolve) => {
+    handle = setTimeout(resolve, ms);
+    handle.unref?.();
+  });
+  return { promise: promise2, cancel: () => clearTimeout(handle) };
+}
+function dedupe(items) {
+  return [...new Set(items)];
+}
+function clampWait(ms) {
+  if (ms === void 0) return DEFAULT_WAIT_MS;
+  if (!Number.isFinite(ms) || ms < 0) return DEFAULT_WAIT_MS;
+  return Math.min(ms, MAX_WAIT_MS);
+}
+function envInt2(name, fallback) {
+  const raw = process.env[name];
+  if (raw === void 0) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+function annotatedError(message, failureClass) {
+  if (failureClass === INFRA_FAILURE_TAG) {
+    return `${message}
+
+[${INFRA_FAILURE_TAG}] ${INFRA_FAILURE_ADVISORY}`;
+  }
+  return message;
+}
+var SECRET_PATTERN = /(api[_-]?key|token|secret|authorization|bearer)(\s*[=:]\s*)\S+/gi;
+function redact(text) {
+  return text.replace(SECRET_PATTERN, (_match, key, sep) => `${key}${sep}[REDACTED]`);
+}
+function stderrSuffix(stderr) {
+  const cleaned = redact(stderr).trim();
+  return cleaned ? `; stderr: ${cleaned.slice(-400)}` : "";
+}
+
+// src/issue-comment.ts
+var ISSUE_REF_PATTERN = /^(?:[\w.-]+\/[\w.-]+#)?\d+$/;
+var ISSUE_COMMENT_VERDICT_BUDGET = 400;
+var ISSUE_COMMENT_TIMEOUT_MS = 1e4;
+function parseIssueRef(raw) {
+  const value = raw.trim();
+  if (!ISSUE_REF_PATTERN.test(value)) {
+    throw new Error(
+      `issue '${raw}' is not a valid issue reference; expected a number ('41') or a qualified reference ('owner/repo#41'). It reaches \`gh\` as an argv token, so anything else is refused rather than guessed at.`
+    );
+  }
+  const hash = value.indexOf("#");
+  if (hash === -1) return { number: value, raw };
+  return { number: value.slice(hash + 1), repo: value.slice(0, hash), raw };
+}
+function buildIssueCommentBody(facts) {
+  const source = facts.finalMessage.trim();
+  const usingError = source === "" && !!facts.error?.trim();
+  const rawVerdict = usingError ? facts.error.trim() : source;
+  const cleaned = redact(rawVerdict);
+  const redacted = cleaned !== rawVerdict;
+  const truncated = cleaned.length > ISSUE_COMMENT_VERDICT_BUDGET;
+  const head = truncated ? cleaned.slice(0, ISSUE_COMMENT_VERDICT_BUDGET) : cleaned;
+  const metrics = [
+    facts.profileId ? `${facts.lane} / ${facts.profileId}` : facts.lane,
+    facts.observedModel ? `observed \`${facts.observedModel}\`` : "observed model unreported",
+    facts.durationMs !== void 0 ? formatDuration(facts.durationMs) : void 0,
+    `${facts.turn} turn${facts.turn === 1 ? "" : "s"}`,
+    facts.totalTokens !== void 0 ? formatTokens(facts.totalTokens) : void 0,
+    facts.retries ? `${facts.retries} retry` : void 0,
+    facts.corrections ? `${facts.corrections} correction${facts.corrections === 1 ? "" : "s"}` : void 0
+  ].filter(Boolean);
+  const lines = [
+    `\u{1F916} clanker \`${facts.runId}\` \u2014 ${facts.status} \xB7 turn ${facts.turn}`,
+    metrics.join(" \xB7 "),
+    "",
+    ...usingError ? ["error:"] : [],
+    head || "(the worker produced no final message)",
+    ""
+  ];
+  if (truncated) {
+    lines.push(
+      `_verdict truncated at ${ISSUE_COMMENT_VERDICT_BUDGET} of ${cleaned.length} characters \u2014 full text in \`result.md\`._`
+    );
+  }
+  if (redacted) {
+    lines.push("_secret-shaped values were redacted before posting; `result.md` holds the unredacted text._");
+  }
+  lines.push(`run_dir \`${facts.runDir}\` (verdict: \`result.md\`)`);
+  return { body: lines.join("\n"), truncated, redacted };
+}
+function issueCommentArgs(ref, body) {
+  const args = ["issue", "comment", ref.number];
+  if (ref.repo) args.push("--repo", ref.repo);
+  args.push("--body", body);
+  assertCommentOnlyArgs(args);
+  return args;
+}
+function assertCommentOnlyArgs(args) {
+  const refuse = (why) => {
+    throw new Error(`Clanker: refusing to run \`gh ${args.slice(0, 3).join(" ")}\` \u2014 ${why}`);
+  };
+  if (args[0] !== "issue" || args[1] !== "comment") {
+    refuse("only `gh issue comment` is permitted; changing an issue's state is a human's act, not a server's");
+  }
+  if (!/^\d+$/.test(args[2] ?? "")) refuse("the issue argument must be a bare number");
+  const allowed = /* @__PURE__ */ new Set(["--repo", "--body"]);
+  for (let i = 3; i < args.length; i += 2) {
+    if (!allowed.has(args[i])) refuse(`unexpected flag '${args[i]}' (allowed: ${[...allowed].join(", ")})`);
+    if (i + 1 >= args.length) refuse(`flag '${args[i]}' has no value`);
+  }
+}
+var execFileGhRunner = (args, opts) => new Promise((resolve, reject) => {
+  execFile(
+    "gh",
+    args,
+    { cwd: opts.cwd, timeout: opts.timeoutMs, maxBuffer: 1024 * 1024 },
+    (error40, stdout, stderr) => {
+      if (!error40) {
+        resolve({ code: 0, stdout, stderr });
+        return;
+      }
+      const code = error40.code;
+      if (typeof code === "number") {
+        resolve({ code, stdout, stderr });
+        return;
+      }
+      reject(error40);
+    }
+  );
+});
+var TIMED_OUT = Symbol("clanker.issue-comment.timeout");
+async function postIssueComment(input, deps = {}) {
+  const runner = deps.run ?? execFileGhRunner;
+  const logError = deps.logError ?? ((message) => console.error(message));
+  const timeoutMs = resolveTimeoutMs(deps.timeoutMs, deps.env ?? process.env);
+  const { body } = buildIssueCommentBody(input.facts);
+  const fail2 = (rawReason) => {
+    const reason = rawReason.length > 500 ? `${rawReason.slice(0, 500)}\u2026` : rawReason;
+    const message = `[clanker] issue comment for run '${input.facts.runId}' on ${describeRef(input.ref)} FAILED: ${reason}. The run itself is unaffected; its verdict is in ${input.facts.runDir}/result.md.`;
+    logError(message);
+    return { ok: false, error: reason };
+  };
+  let args;
+  try {
+    args = issueCommentArgs(input.ref, body);
+  } catch (error40) {
+    return fail2(errMessage(error40));
+  }
+  const timer = createTimeout(timeoutMs);
+  let result;
+  try {
+    result = await Promise.race([
+      runner(args, { cwd: existingDir(input.cwd), timeoutMs }),
+      timer.promise.then(() => TIMED_OUT)
+    ]);
+  } catch (error40) {
+    return fail2(errMessage(error40));
+  } finally {
+    timer.cancel();
+  }
+  if (result === TIMED_OUT) return fail2(`\`gh\` did not return within ${timeoutMs}ms`);
+  if (result.code !== 0) {
+    const detail = (result.stderr || result.stdout).trim().slice(-400) || "(no output)";
+    return fail2(`\`gh\` exited ${result.code}: ${detail}`);
+  }
+  return { ok: true, body };
+}
+function describeRef(ref) {
+  return ref.repo ? `${ref.repo}#${ref.number}` : `#${ref.number}`;
+}
+function resolveTimeoutMs(explicit, env) {
+  if (explicit !== void 0 && Number.isFinite(explicit) && explicit > 0) return explicit;
+  const raw = env.CLANKER_ISSUE_COMMENT_TIMEOUT_MS?.trim();
+  if (!raw) return ISSUE_COMMENT_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : ISSUE_COMMENT_TIMEOUT_MS;
+}
+function existingDir(dir) {
+  if (!dir) return void 0;
+  try {
+    return fs4.statSync(dir).isDirectory() ? dir : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.round(ms / 1e3));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
+}
+function formatTokens(total) {
+  if (total < 1e3) return `${total} tok`;
+  return `${(total / 1e3).toFixed(1)}k tok`;
+}
 
 // src/lane-session.ts
 var LANE_SESSION_META_KEY = "clanker.lane_session";
@@ -28203,7 +28472,7 @@ function laneSessionRefFrom(meta) {
 }
 
 // src/ledger.ts
-import fs4 from "node:fs";
+import fs5 from "node:fs";
 import os4 from "node:os";
 import path4 from "node:path";
 var rawLedgerDirEnv = process.env.CLANKER_LEDGER_DIR?.trim();
@@ -28242,17 +28511,17 @@ function buildLedgerRow(input) {
 }
 function appendLedgerRow(input) {
   try {
-    fs4.mkdirSync(LEDGER_DIR, { recursive: true });
-    fs4.appendFileSync(LEDGER_PATH, JSON.stringify(buildLedgerRow(input)) + "\n");
+    fs5.mkdirSync(LEDGER_DIR, { recursive: true });
+    fs5.appendFileSync(LEDGER_PATH, JSON.stringify(buildLedgerRow(input)) + "\n");
   } catch (error40) {
     logHookError(input.id, error40);
   }
 }
 function logHookError(runId, error40) {
   try {
-    fs4.mkdirSync(LEDGER_DIR, { recursive: true });
+    fs5.mkdirSync(LEDGER_DIR, { recursive: true });
     const message = error40 instanceof Error ? error40.stack ?? error40.message : String(error40);
-    fs4.appendFileSync(
+    fs5.appendFileSync(
       HOOK_ERRORS_PATH,
       `[${(/* @__PURE__ */ new Date()).toISOString()}] native-ledger-writer append failed for run '${runId}': ${message}
 `
@@ -28347,6 +28616,22 @@ var LaneRun = class {
    * steering an unsupervised worker.
    */
   supervised;
+  /**
+   * The ticket this dispatch is being run for (#27), already parsed and
+   * validated at dispatch time. Undefined means the dispatcher kept no account
+   * on any issue — which is a choice, not a failure, and stays completely
+   * silent: no `gh` is invoked, nothing is logged.
+   */
+  issueRef;
+  /** Dispatch-profile id (profiles.ts), for the issue comment's own byline. */
+  profileId;
+  /**
+   * Test/operator seam for the `gh` invocation, in the same spirit as
+   * LaneManager's injectable `resolveSpec`: the process-spawning capability is
+   * handed in rather than reached for, so the suite can prove what argv the
+   * server would run without a `gh` on PATH and without touching a real issue.
+   */
+  ghRunner;
   turnStatus = "running";
   turnsCount = 0;
   sessionClosed = false;
@@ -28397,6 +28682,13 @@ var LaneRun = class {
    * with a siren attached.
    */
   resumeModel;
+  /**
+   * Why nobody will find this turn's comment on the ticket (#27), surfaced as
+   * telemetry `issue_comment_error`. Set only when an issue WAS named and the
+   * post failed — so "field absent" reads as "no account was owed, or the
+   * account was kept", never as "we tried and said nothing about it".
+   */
+  issueCommentError;
   /** Live worker identity (#32): pid — which is also its pgid — and the ms epoch it was spawned. */
   workerPid;
   workerStartedAt;
@@ -28438,6 +28730,9 @@ var LaneRun = class {
     this.initialPrompt = init.initialPrompt ?? "";
     this.turnTimeoutMs = init.turnTimeoutMs;
     this.supervised = init.supervised ?? false;
+    this.issueRef = init.issueRef;
+    this.profileId = init.profileId;
+    this.ghRunner = init.ghRunner;
   }
   // ---- lifecycle ----------------------------------------------------------
   beginTurn(prompt, correction = false) {
@@ -28466,7 +28761,22 @@ var LaneRun = class {
   get turnStartedAtMs() {
     return this.turnStartedAt;
   }
-  completeTurn() {
+  /**
+   * The three terminal transitions below are `async` for exactly one reason:
+   * the #27 issue comment is a NETWORK call, and the leader's ruling is that it
+   * is awaited under a hard ceiling rather than fired and forgotten. A one-shot
+   * controller can exit moments after a run goes terminal, and a floating
+   * promise at that moment is a comment that silently never happens — the exact
+   * class of failure #27 exists to end.
+   *
+   * The status flip stays SYNCHRONOUS: everything up to the first `await` runs
+   * before the caller gets its promise back, so `clanker_wait`'s
+   * `isTerminalTurn()` and every `if (run.turnStatus === "running")` guard in
+   * the manager observe the terminal state at exactly the tick they did before.
+   * What the `await` delays is only the CALLER's resumption — i.e. the drive,
+   * which is already tracked and settled by `shutdown()`.
+   */
+  async completeTurn() {
     if (this.isTerminalTurn()) return;
     this.flushMessageDigest();
     this.turnStatus = "done";
@@ -28478,12 +28788,13 @@ var LaneRun = class {
     this.markTerminal("done");
     this.writeResultFileOnce();
     this.writeLedgerRowOnce();
+    await this.postIssueCommentForTurn();
   }
   /**
    * @param failureClass optional classification tag (e.g. CLANKER-INFRA-FAILURE)
    *   from failure-classifier.ts, surfaced verbatim to wait/status callers.
    */
-  failTurn(message, failureClass) {
+  async failTurn(message, failureClass) {
     if (this.isTerminalTurn()) return;
     this.flushMessageDigest();
     this.turnStatus = "error";
@@ -28497,6 +28808,7 @@ var LaneRun = class {
     this.markTerminal("error");
     this.writeResultFileOnce();
     this.writeLedgerRowOnce();
+    await this.postIssueCommentForTurn();
   }
   /**
    * Record a non-terminal capacity-transient retry (see failure-classifier.ts
@@ -28513,7 +28825,7 @@ var LaneRun = class {
     this.writeEvent({ t: "transient_retry", backoffMs, attempt, message });
     this.touch("transient_retry");
   }
-  cancelTurn() {
+  async cancelTurn() {
     if (this.isTerminalTurn()) return;
     this.flushMessageDigest();
     this.turnStatus = "cancelled";
@@ -28524,6 +28836,7 @@ var LaneRun = class {
     this.markTerminal("cancelled");
     this.writeResultFileOnce();
     this.writeLedgerRowOnce();
+    await this.postIssueCommentForTurn();
   }
   /**
    * Re-open a closed run for a backend-resume turn (#43).
@@ -28864,6 +29177,7 @@ var LaneRun = class {
       tool_calls: this.toolCallCount,
       stop_reason: this.stopReason,
       ...this.terminalAt ? { terminal_reason: this.turnStatus } : {},
+      ...this.issueCommentError !== void 0 ? { issue_comment_error: this.issueCommentError } : {},
       prompt_usage: this.promptUsage,
       session_usage: this.sessionUsage
     };
@@ -28910,7 +29224,7 @@ var LaneRun = class {
    */
   resultBytes() {
     try {
-      return fs5.statSync(this.resultPath()).size;
+      return fs6.statSync(this.resultPath()).size;
     } catch {
       return 0;
     }
@@ -28959,12 +29273,12 @@ var LaneRun = class {
     }
     lines.push(RESULT_FINAL_MESSAGE_HEADING, "", this.lastFinalMessage, "");
     try {
-      fs5.mkdirSync(this.runDir, { recursive: true });
-      fs5.writeFileSync(tmp, lines.join("\n"));
-      fs5.renameSync(tmp, target);
+      fs6.mkdirSync(this.runDir, { recursive: true });
+      fs6.writeFileSync(tmp, lines.join("\n"));
+      fs6.renameSync(tmp, target);
     } catch (error40) {
       try {
-        fs5.rmSync(tmp, { force: true });
+        fs6.rmSync(tmp, { force: true });
       } catch {
       }
       console.error(
@@ -28990,6 +29304,60 @@ var LaneRun = class {
    * correction was issued to replace.
    */
   ledgerRowWritten = false;
+  /**
+   * Post this terminal turn's account to the ticket the dispatcher named (#27).
+   *
+   * ONE COMMENT PER TERMINAL TURN — deliberately neither of the two dedup
+   * shapes its siblings use, and this is the ruling, not an oversight:
+   *
+   *  - `writeLedgerRowOnce` is once per DISPATCH, because the ledger is a
+   *    statistics table and a corrected run that appended two rows would
+   *    double-count one dispatch in every rate computed from it.
+   *  - `writeResultFileOnce` is once per TERMINAL TRANSITION and overwrites,
+   *    because a reader of `result.md` must get the latest verdict, never the
+   *    one a correction was issued to replace.
+   *  - This is once per terminal transition and APPENDS. An issue thread is a
+   *    narrative, and "this run was corrected once, and here is what changed"
+   *    is precisely the fact the thread exists to preserve. Editing the earlier
+   *    comment would erase the only durable evidence that a correction round
+   *    happened at all — the same information the leader today reconstructs by
+   *    hand when asked "why was this ruled that way".
+   *
+   * Never throws: bookkeeping does not get to fail a dispatch. A failure is
+   * loud on stderr (inside postIssueComment) and durable in telemetry.
+   */
+  async postIssueCommentForTurn() {
+    if (!this.issueRef) return;
+    const telemetry = this.telemetry();
+    const outcome = await postIssueComment(
+      {
+        ref: this.issueRef,
+        // The repo the worktree was cut FROM, not the dispatch cwd: a write
+        // run's cwd is its worktree, and the terminal path may already have
+        // removed it (closeRun runs before this status flip). The target repo
+        // outlives every run cut from it.
+        cwd: this.targetRepo ?? this.cwd,
+        facts: {
+          runId: this.id,
+          status: this.turnStatus,
+          turn: this.turnsCount,
+          lane: this.lane,
+          profileId: this.profileId,
+          observedModel: telemetry.observed_model,
+          durationMs: telemetry.duration_ms,
+          totalTokens: telemetry.prompt_usage?.totalTokens,
+          retries: telemetry.retries,
+          corrections: telemetry.corrections,
+          finalMessage: this.lastFinalMessage,
+          error: this.error,
+          runDir: this.runDir
+        }
+      },
+      { run: this.ghRunner }
+    );
+    this.issueCommentError = outcome.ok ? void 0 : `${describeRef(this.issueRef)}: ${outcome.error}`;
+    this.persistTelemetry();
+  }
   writeLedgerRowOnce() {
     if (this.ledgerRowWritten) return;
     this.ledgerRowWritten = true;
@@ -29008,11 +29376,11 @@ var LaneRun = class {
     const target = path5.join(this.runDir, "telemetry.json");
     const tmp = `${target}.${process.pid}.tmp`;
     try {
-      fs5.writeFileSync(tmp, JSON.stringify(this.telemetry(), null, 2));
-      fs5.renameSync(tmp, target);
+      fs6.writeFileSync(tmp, JSON.stringify(this.telemetry(), null, 2));
+      fs6.renameSync(tmp, target);
     } catch (error40) {
       try {
-        fs5.rmSync(tmp, { force: true });
+        fs6.rmSync(tmp, { force: true });
       } catch {
       }
       console.error(`[clanker] telemetry persistence failed for run '${this.id}' at '${target}': ${error40 instanceof Error ? error40.message : String(error40)}`);
@@ -29073,13 +29441,13 @@ var LaneRun = class {
    */
   appendToStream(file2, streamField, line) {
     if (this.sessionClosed) {
-      fs5.mkdirSync(this.runDir, { recursive: true });
-      fs5.appendFileSync(path5.join(this.runDir, file2), line);
+      fs6.mkdirSync(this.runDir, { recursive: true });
+      fs6.appendFileSync(path5.join(this.runDir, file2), line);
       return;
     }
     if (!this[streamField]) {
-      fs5.mkdirSync(this.runDir, { recursive: true });
-      this[streamField] = fs5.createWriteStream(path5.join(this.runDir, file2), { flags: "a" });
+      fs6.mkdirSync(this.runDir, { recursive: true });
+      this[streamField] = fs6.createWriteStream(path5.join(this.runDir, file2), { flags: "a" });
     }
     this[streamField].write(line);
   }
@@ -29373,7 +29741,7 @@ function archiveAdoptedRun(input) {
   let record2 = {};
   let recordUnreadable = false;
   try {
-    record2 = JSON.parse(fs6.readFileSync(telemetryPath, "utf8"));
+    record2 = JSON.parse(fs7.readFileSync(telemetryPath, "utf8"));
   } catch {
     record2 = { id };
     recordUnreadable = true;
@@ -29397,8 +29765,8 @@ function archiveAdoptedRun(input) {
     record2.error = record2.error ? `${String(record2.error)}
 ${explanation}` : explanation;
     const tmp = `${telemetryPath}.${process.pid}.tmp`;
-    fs6.writeFileSync(tmp, JSON.stringify(record2, null, 2));
-    fs6.renameSync(tmp, telemetryPath);
+    fs7.writeFileSync(tmp, JSON.stringify(record2, null, 2));
+    fs7.renameSync(tmp, telemetryPath);
     telemetryWritten = true;
   } catch (error40) {
     problems.push(`telemetry archival failed: ${error40 instanceof Error ? error40.message : String(error40)}`);
@@ -29408,7 +29776,7 @@ ${explanation}` : explanation;
   try {
     let size = 0;
     try {
-      size = fs6.statSync(resultPath).size;
+      size = fs7.statSync(resultPath).size;
     } catch {
     }
     if (size === 0) {
@@ -29429,8 +29797,8 @@ ${explanation}` : explanation;
         ""
       ];
       const tmp = `${resultPath}.${process.pid}.tmp`;
-      fs6.writeFileSync(tmp, lines.join("\n"));
-      fs6.renameSync(tmp, resultPath);
+      fs7.writeFileSync(tmp, lines.join("\n"));
+      fs7.renameSync(tmp, resultPath);
       resultStubWritten = true;
     }
   } catch (error40) {
@@ -29446,15 +29814,15 @@ ${explanation}` : explanation;
 }
 
 // src/foreign.ts
-import fs8 from "node:fs";
+import fs9 from "node:fs";
 import path8 from "node:path";
 
 // src/worktree.ts
-import { execFile } from "node:child_process";
-import fs7 from "node:fs";
+import { execFile as execFile2 } from "node:child_process";
+import fs8 from "node:fs";
 import path7 from "node:path";
 import { promisify } from "node:util";
-var exec = promisify(execFile);
+var exec = promisify(execFile2);
 async function git(cwd, args) {
   const { stdout } = await exec("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 });
   return stdout;
@@ -29466,7 +29834,7 @@ function deriveWorktreePath(branch, runId) {
 }
 function readWorktreeOwner(worktreePath) {
   try {
-    const first = fs7.readFileSync(path7.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
+    const first = fs8.readFileSync(path7.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
     return first || null;
   } catch {
     return null;
@@ -29537,13 +29905,13 @@ async function headSha(cwd) {
 }
 async function createWorktree(branch, runId, targetRepo = BASE_REPO, base) {
   const wtPath = deriveWorktreePath(branch, runId);
-  if (fs7.existsSync(wtPath)) {
+  if (fs8.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
   const baseRef = base ?? await resolveBaseRef(targetRepo);
-  fs7.mkdirSync(WORKTREES_ROOT, { recursive: true });
+  fs8.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
-  fs7.writeFileSync(path7.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
+  fs8.writeFileSync(path7.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
 `);
   return wtPath;
 }
@@ -29589,7 +29957,7 @@ function realpathBestEffort(p) {
   const tail = [];
   for (; ; ) {
     try {
-      const real = fs7.realpathSync(cur);
+      const real = fs8.realpathSync(cur);
       return tail.length ? path7.join(real, ...tail) : real;
     } catch {
       const parent = path7.dirname(cur);
@@ -29625,7 +29993,7 @@ function matchDoNotTouch(patterns, files) {
   return violations;
 }
 async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runId) {
-  if (fs7.existsSync(worktreePath)) {
+  if (fs8.existsSync(worktreePath)) {
     const owner = readWorktreeOwner(worktreePath);
     if (!runId || owner !== runId) {
       console.error(
@@ -29645,13 +30013,13 @@ async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runI
   const markerPath = path7.join(worktreePath, OWNER_MARKER);
   const marker = (() => {
     try {
-      return fs7.readFileSync(markerPath, "utf8");
+      return fs8.readFileSync(markerPath, "utf8");
     } catch {
       return null;
     }
   })();
   try {
-    fs7.rmSync(markerPath, { force: true });
+    fs8.rmSync(markerPath, { force: true });
   } catch {
   }
   try {
@@ -29661,9 +30029,9 @@ async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runI
       await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
     }
   } catch (err) {
-    if (marker !== null && fs7.existsSync(worktreePath)) {
+    if (marker !== null && fs8.existsSync(worktreePath)) {
       try {
-        fs7.writeFileSync(markerPath, marker);
+        fs8.writeFileSync(markerPath, marker);
       } catch {
       }
     }
@@ -29689,15 +30057,15 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
   if (runDir === null) return null;
   let telemetry;
   try {
-    telemetry = JSON.parse(fs8.readFileSync(path8.join(runDir, "telemetry.json"), "utf8"));
+    telemetry = JSON.parse(fs9.readFileSync(path8.join(runDir, "telemetry.json"), "utf8"));
   } catch {
     return null;
   }
   let newestMtimeMs = 0;
   try {
-    for (const entry of fs8.readdirSync(runDir)) {
+    for (const entry of fs9.readdirSync(runDir)) {
       try {
-        newestMtimeMs = Math.max(newestMtimeMs, fs8.statSync(path8.join(runDir, entry)).mtimeMs);
+        newestMtimeMs = Math.max(newestMtimeMs, fs9.statSync(path8.join(runDir, entry)).mtimeMs);
       } catch {
       }
     }
@@ -29705,7 +30073,7 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
   }
   let resultPath;
   try {
-    if (fs8.statSync(path8.join(runDir, RESULT_FILE)).size > 0) resultPath = path8.join(runDir, RESULT_FILE);
+    if (fs9.statSync(path8.join(runDir, RESULT_FILE)).size > 0) resultPath = path8.join(runDir, RESULT_FILE);
   } catch {
   }
   return {
@@ -29744,7 +30112,7 @@ function scanForeignRuns(options = {}) {
   const now = options.now ?? Date.now();
   let ids;
   try {
-    ids = fs8.readdirSync(runsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+    ids = fs9.readdirSync(runsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
   } catch {
     return [];
   }
@@ -30030,6 +30398,7 @@ function resolveProfileDispatch(input, env = process.env) {
     doNotTouch: input.doNotTouch,
     model,
     effort: input.effort,
+    issue: input.issue,
     readOnly: profile.readOnly,
     sandbox,
     profile: profile.ocProfile,
@@ -30066,7 +30435,7 @@ function hostLaneBlockedReason(host, lane) {
 
 // src/acp-client.ts
 import { spawn } from "node:child_process";
-import fs9 from "node:fs";
+import fs10 from "node:fs";
 import path9 from "node:path";
 import { Readable, Writable } from "node:stream";
 
@@ -33537,7 +33906,7 @@ var LaneConnection = class _LaneConnection {
   static async connect(options) {
     const { spec, cwd, readOnly, onFileWritten } = options;
     const handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
-    if (cwd && !fs9.existsSync(cwd)) {
+    if (cwd && !fs10.existsSync(cwd)) {
       throw new Error(
         `lane cwd does not exist: ${cwd} (worktree reaped or path typo?) \u2014 refusing to spawn`
       );
@@ -33620,11 +33989,11 @@ var LaneConnection = class _LaneConnection {
     const output = Readable.toWeb(child.stdout);
     const stream = ndJsonStream(input, output);
     const handlePermission = (params) => choosePermissionOption(params.options ?? [], readOnly);
-    const root = fs9.realpathSync(cwd);
+    const root = fs10.realpathSync(cwd);
     const handleReadTextFile = (params) => {
       try {
         const target = resolveContainedReadPath(root, params.path);
-        const content = fs9.readFileSync(target, "utf8");
+        const content = fs10.readFileSync(target, "utf8");
         return { content };
       } catch (e) {
         throw new Error(`read_text_file failed for ${params.path}: ${e instanceof Error ? e.message : String(e)}`);
@@ -33678,109 +34047,44 @@ function assertContained(root, target, requested) {
   return target;
 }
 function resolveContainedReadPath(root, requested) {
-  const canonicalRoot = fs9.realpathSync(root);
+  const canonicalRoot = fs10.realpathSync(root);
   const lexical = path9.resolve(canonicalRoot, requested);
   if (!path9.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
-  return assertContained(canonicalRoot, fs9.realpathSync(lexical), requested);
+  return assertContained(canonicalRoot, fs10.realpathSync(lexical), requested);
 }
 function resolveContainedWritePath(root, requested) {
-  const canonicalRoot = fs9.realpathSync(root);
+  const canonicalRoot = fs10.realpathSync(root);
   const lexical = path9.resolve(canonicalRoot, requested);
   if (!path9.isAbsolute(requested)) assertContained(canonicalRoot, lexical, requested);
   try {
-    if (fs9.lstatSync(lexical).isSymbolicLink()) {
+    if (fs10.lstatSync(lexical).isSymbolicLink()) {
       throw new Error(`filesystem boundary rejection: final write target is a symlink (${requested})`);
     }
   } catch (e) {
     if (e.code !== "ENOENT") throw e;
   }
-  const parent = assertContained(canonicalRoot, fs9.realpathSync(path9.dirname(lexical)), requested);
+  const parent = assertContained(canonicalRoot, fs10.realpathSync(path9.dirname(lexical)), requested);
   return assertContained(canonicalRoot, path9.join(parent, path9.basename(lexical)), requested);
 }
 function writeContainedTextFile(target, requested, content) {
-  const flags = fs9.constants.O_WRONLY | fs9.constants.O_CREAT | (fs9.constants.O_NOFOLLOW ?? 0);
-  const fd = fs9.openSync(target, flags, 438);
+  const flags = fs10.constants.O_WRONLY | fs10.constants.O_CREAT | (fs10.constants.O_NOFOLLOW ?? 0);
+  const fd = fs10.openSync(target, flags, 438);
   try {
-    const stat = fs9.fstatSync(fd);
+    const stat = fs10.fstatSync(fd);
     if (stat.nlink > 1) {
       throw new Error(
         `filesystem boundary rejection: write target has ${stat.nlink} hardlinks (${requested})`
       );
     }
-    fs9.ftruncateSync(fd, 0);
-    fs9.writeFileSync(fd, content);
+    fs10.ftruncateSync(fd, 0);
+    fs10.writeFileSync(fd, content);
   } finally {
-    fs9.closeSync(fd);
+    fs10.closeSync(fd);
   }
-}
-
-// src/failure-classifier.ts
-var INFRA_FAILURE_TAG = "CLANKER-INFRA-FAILURE";
-var INFRA_FAILURE_ADVISORY = "infra \u5C42\u6545\u969C\uFF0C\u91CD\u8BD5\u65E0\u76CA\uFF1B\u5148\u8DD1 `npm run smoke -- <lane>` \u590D\u9A8C\u8F66\u9053\u5065\u5EB7\uFF0C\u518D\u51B3\u5B9A\u662F\u5426\u91CD\u6D3E\u3002";
-var API_SCHEMA_ERROR_PATTERNS = [
-  /invalid_request_error/i,
-  /"param"\s*:\s*"tools"/i,
-  /reserved for use by this model/i
-];
-function classifyTurnFailure(params) {
-  if (params.turnsCount !== 1 || params.toolCalls !== 0) return void 0;
-  if (API_SCHEMA_ERROR_PATTERNS.some((re) => re.test(params.message))) {
-    return INFRA_FAILURE_TAG;
-  }
-  return void 0;
-}
-var CAPACITY_TRANSIENT_PATTERNS = [
-  /model[ _-]?at[ _-]?capacity/i,
-  /\boverloaded\b/i,
-  /\bservice unavailable\b/i,
-  /\b(500|502|503|504)\b/
-];
-function isCapacityTransient(message) {
-  return CAPACITY_TRANSIENT_PATTERNS.some((re) => re.test(message));
-}
-var BACKEND_BILLING_TAG = "CLANKER-BACKEND-BILLING";
-var BACKEND_AUTH_TAG = "CLANKER-BACKEND-AUTH";
-var ENV_DRIFT_TAG = "CLANKER-ENV-DRIFT";
-var BACKEND_MODEL_TAG = "CLANKER-BACKEND-MODEL";
-var BACKEND_MODEL_PATTERNS = [
-  /cannot use this model/i,
-  /model .{0,80}(is )?(not available|unavailable|not supported|unknown model)/i,
-  /no access to model/i
-];
-var BACKEND_BILLING_PATTERNS = [
-  /\b402\b|balance|billing|payment required|usage balance exhausted|insufficient credit/i
-];
-var BACKEND_AUTH_PATTERNS = [
-  /\b40[13]\b|unauthorized|forbidden|invalid api key|authentication/i
-];
-var ENV_DRIFT_PATTERNS = [
-  // Node's own spawn error text: `spawn <command> ENOENT` (the command may
-  // itself contain spaces, hence `.+` rather than `\S+`).
-  /spawn .+ ENOENT/i
-];
-var SPAWN_FAILURE_PATTERNS = [
-  // Anchored to acp-client's EXACT wrapper (`failed to spawn '<cmd>': ...`,
-  // acp-client.ts spawn-error reject) — anchored at message start, quoted
-  // command, colon. Round-2 review (codex-749a3) proved the previous
-  // substring form was wider than its own prose: a REAL backend 402 whose
-  // text embedded a "failed to spawn helper ENOENT" diagnostic hijacked the
-  // short-circuit and misrouted billing to ENV-DRIFT. Only the wrapper shape
-  // this codebase itself produces may take the pre-billing shortcut; any
-  // spawn-ish text merely quoted inside a backend answer falls through to
-  // the billing/auth/capacity passes below.
-  /^failed to spawn '[^']+':.*\bENOENT\b/i
-];
-function classifyBackendFailure(message) {
-  if (SPAWN_FAILURE_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
-  if (BACKEND_BILLING_PATTERNS.some((re) => re.test(message))) return BACKEND_BILLING_TAG;
-  if (BACKEND_MODEL_PATTERNS.some((re) => re.test(message))) return BACKEND_MODEL_TAG;
-  if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;
-  if (ENV_DRIFT_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
-  return void 0;
 }
 
 // src/resume.ts
-import fs10 from "node:fs";
+import fs11 from "node:fs";
 function laneCanResume(lane) {
   return LANES_WITH_RESUME.has(lane);
 }
@@ -33801,7 +34105,7 @@ function planResumeTurn(run, model) {
       `run '${run.id}' recorded a backend session ref '${ref}' that starts with '-'; it would reach the backend as a flag rather than as the value of --resume, so this run cannot be resumed`
     );
   }
-  if (!fs10.existsSync(run.cwd)) {
+  if (!fs11.existsSync(run.cwd)) {
     throw new Error(
       `run '${run.id}' cannot take a resume turn: its working directory '${run.cwd}' no longer exists (a worktree with no changes is reclaimed when the run closes). Dispatch a fresh run instead.`
     );
@@ -33825,49 +34129,6 @@ function planResumeTurn(run, model) {
   };
 }
 
-// src/util.ts
-function errMessage(e) {
-  return e instanceof Error ? e.message : String(e);
-}
-function createTimeout(ms) {
-  let handle;
-  const promise2 = new Promise((resolve) => {
-    handle = setTimeout(resolve, ms);
-    handle.unref?.();
-  });
-  return { promise: promise2, cancel: () => clearTimeout(handle) };
-}
-function dedupe(items) {
-  return [...new Set(items)];
-}
-function clampWait(ms) {
-  if (ms === void 0) return DEFAULT_WAIT_MS;
-  if (!Number.isFinite(ms) || ms < 0) return DEFAULT_WAIT_MS;
-  return Math.min(ms, MAX_WAIT_MS);
-}
-function envInt2(name, fallback) {
-  const raw = process.env[name];
-  if (raw === void 0) return fallback;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
-function annotatedError(message, failureClass) {
-  if (failureClass === INFRA_FAILURE_TAG) {
-    return `${message}
-
-[${INFRA_FAILURE_TAG}] ${INFRA_FAILURE_ADVISORY}`;
-  }
-  return message;
-}
-var SECRET_PATTERN = /(api[_-]?key|token|secret|authorization|bearer)(\s*[=:]\s*)\S+/gi;
-function redact(text) {
-  return text.replace(SECRET_PATTERN, (_match, key, sep) => `${key}${sep}[REDACTED]`);
-}
-function stderrSuffix(stderr) {
-  const cleaned = redact(stderr).trim();
-  return cleaned ? `; stderr: ${cleaned.slice(-400)}` : "";
-}
-
 // src/turn-driver.ts
 var TurnDriver = class {
   constructor(host) {
@@ -33882,14 +34143,14 @@ var TurnDriver = class {
     const outcome = await this.runTurn(run, conn, prompt, correction);
     if (run.cancellationRequested) {
       await this.host.close(run.id);
-      run.cancelTurn();
+      await run.cancelTurn();
       return;
     }
     if (run.isTerminalTurn()) return;
     if (outcome.ok) return;
     await this.host.computeTouched(run);
     await this.host.close(run.id);
-    run.failTurn(
+    await run.failTurn(
       outcome.message,
       classifyTurnFailure({ message: outcome.message, turnsCount: run.turnsCount, toolCalls: run.toolCalls() }) ?? classifyBackendFailure(outcome.message)
     );
@@ -33912,7 +34173,7 @@ var TurnDriver = class {
     }
     await this.host.computeTouched(run);
     await this.host.close(run.id);
-    run.cancelTurn();
+    await run.cancelTurn();
   }
   /**
    * Drive the first turn of a fresh dispatch, with one automatic retry when
@@ -33962,7 +34223,7 @@ var TurnDriver = class {
       }
       await this.host.computeTouched(run);
       await this.host.close(run.id);
-      run.failTurn(message, classifyBackendFailure(message));
+      await run.failTurn(message, classifyBackendFailure(message));
       return;
     } finally {
       if (this.pendingConnects.get(run.id) === controller) this.pendingConnects.delete(run.id);
@@ -33977,7 +34238,7 @@ var TurnDriver = class {
     const outcome = await this.runTurn(run, conn, prompt, correction);
     if (run.cancellationRequested) {
       await this.host.close(run.id);
-      run.cancelTurn();
+      await run.cancelTurn();
       return;
     }
     if (run.isTerminalTurn()) return;
@@ -33994,7 +34255,7 @@ var TurnDriver = class {
     }
     await this.host.computeTouched(run);
     await this.host.close(run.id);
-    run.failTurn(outcome.message, failureClass);
+    await run.failTurn(outcome.message, failureClass);
   }
   async retryAfterBackoff(run, message, nextAttempt) {
     run.recordTransientRetry(message, this.host.capacityRetryBackoffMs, nextAttempt);
@@ -34098,9 +34359,9 @@ ${grokDetail}` : "";
       await this.host.computeContractViolations(run);
     }
     if (stopReason === "cancelled") {
-      run.cancelTurn();
+      await run.cancelTurn();
     } else {
-      run.completeTurn();
+      await run.completeTurn();
     }
   }
   /**
@@ -34249,6 +34510,7 @@ function validateDispatchParams(params, minted, host) {
   if (!LANE_NAMES.includes(params.lane)) {
     throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
   }
+  const issueRef = params.issue?.trim() ? parseIssueRef(params.issue) : void 0;
   const profile = params.profile ?? "worker";
   if (profile !== "worker" && profile !== "kimi-crew") throw new Error(`unsupported profile '${profile}'`);
   if (params.lane === "gemini" && profile !== "worker") throw new Error("Clanker: Gemini rejects profile");
@@ -34280,17 +34542,17 @@ function validateDispatchParams(params, minted, host) {
       "write-capable dispatch must run in an isolated worktree: pass `worktree` (a branch name). Strict reads may run in-place."
     );
   }
-  return { params, profile, readOnly, requiresIsolation };
+  return { params, profile, readOnly, requiresIsolation, issueRef };
 }
 function writeTelemetryStub(runDir, stub) {
   const target = path10.join(runDir, "telemetry.json");
   const tmp = `${target}.${process.pid}.tmp`;
   try {
-    fs11.writeFileSync(tmp, JSON.stringify(stub, null, 2));
-    fs11.renameSync(tmp, target);
+    fs12.writeFileSync(tmp, JSON.stringify(stub, null, 2));
+    fs12.renameSync(tmp, target);
   } catch (error40) {
     try {
-      fs11.rmSync(tmp, { force: true });
+      fs12.rmSync(tmp, { force: true });
     } catch {
     }
     console.error(`[clanker] telemetry stub write failed for run dir '${runDir}': ${errMessage(error40)}`);
@@ -34318,6 +34580,8 @@ var LaneManager = class {
   capacityRetryBackoffMs;
   cancelGraceMs;
   processTerminateGraceMs;
+  /** Injected `gh` executor for #27 issue comments; undefined runs the real one. */
+  ghRunner;
   warningsById = /* @__PURE__ */ new Map();
   closing = /* @__PURE__ */ new Map();
   /** The turn engine (turn-driver.ts); every per-turn method below forwards to it. */
@@ -34340,6 +34604,7 @@ var LaneManager = class {
     this.capacityRetryBackoffMs = opts.capacityRetryBackoffMs ?? CAPACITY_RETRY_BACKOFF_MS;
     this.cancelGraceMs = opts.cancelGraceMs ?? CANCEL_GRACE_MS;
     this.processTerminateGraceMs = opts.processTerminateGraceMs;
+    this.ghRunner = opts.ghRunner;
     this.turnDriver = new TurnDriver(this.turnHost());
     if (!opts.disableReaper) {
       const period = Math.max(5e3, Math.floor(this.sessionTtlMs / 10));
@@ -34422,6 +34687,7 @@ var LaneManager = class {
         doNotTouch: resolved.doNotTouch,
         model: resolved.model,
         effort: resolved.effort,
+        issue: resolved.issue,
         readOnly: resolved.readOnly,
         sandbox: resolved.sandbox,
         profile: resolved.profile
@@ -34438,7 +34704,7 @@ var LaneManager = class {
     if (this.shuttingDown) throw new Error("Clanker manager is shutting down; refusing a new dispatch");
     const validated = validateDispatchParams(params, minted, this.host);
     params = validated.params;
-    const { profile, readOnly } = validated;
+    const { profile, readOnly, issueRef } = validated;
     const lanePrompt = readOnly ? params.prompt : `${WRITE_DISCIPLINE_PREFIX}
 
 ${params.prompt}`;
@@ -34453,7 +34719,7 @@ ${params.prompt}`;
       );
     }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
-    fs11.mkdirSync(path10.resolve(this.runsRoot, id), { recursive: true });
+    fs12.mkdirSync(path10.resolve(this.runsRoot, id), { recursive: true });
     const runDir = realpathBestEffort(path10.resolve(this.runsRoot, id));
     const stub = {
       host: this.host,
@@ -34545,7 +34811,15 @@ ${params.prompt}`;
       requestOpts,
       initialPrompt: lanePrompt,
       turnTimeoutMs: minted.turnTimeoutMs,
-      supervised: minted.supervision === "sonnet"
+      supervised: minted.supervision === "sonnet",
+      issueRef,
+      ghRunner: this.ghRunner,
+      // The DISPATCH PROFILE id (`codex-review`), not the OpenCode agent
+      // profile in `requestOpts.profile` — the issue comment names which seat
+      // shape produced the verdict, and "worker" answers nothing. Only the
+      // profile entrance mints one, so a direct dispatchStart run simply names
+      // its lane.
+      profileId: minted.profileId
     });
     this.runs.set(id, run);
     const drive = this.turnDriver.driveNewSession(run, spec, lanePrompt);
@@ -34639,7 +34913,7 @@ ${params.prompt}`;
     if (foreign.result_path) {
       result.result_path = foreign.result_path;
       try {
-        result.result_bytes = fs11.statSync(foreign.result_path).size;
+        result.result_bytes = fs12.statSync(foreign.result_path).size;
       } catch {
       }
     }
@@ -34821,13 +35095,13 @@ ${params.prompt}`;
         run.markForcedKill();
         await this.computeTouched(run);
         await this.close(id);
-        run.cancelTurn();
+        await run.cancelTurn();
       }
     }
     if (run.turnStatus === "running") {
       await this.computeTouched(run);
       await this.close(id);
-      run.cancelTurn();
+      await run.cancelTurn();
     }
     return { id, status: run.turnStatus };
   }
@@ -34943,7 +35217,7 @@ ${params.prompt}`;
       ];
       return;
     }
-    if (!fs11.existsSync(run.worktreePath)) {
+    if (!fs12.existsSync(run.worktreePath)) {
       run.contractViolations = [
         { pattern: "(validation-failed)", files: [`worktree path '${run.worktreePath}' no longer exists`] }
       ];
@@ -35050,6 +35324,9 @@ var laneEnum = external_exports.enum(LANE_NAMES);
 var promptField = external_exports.string().trim().min(1).describe("The task/prompt to send to the worker");
 var cwdField = external_exports.string().optional().describe("Absolute working directory (default: server base repo)");
 var effortField = external_exports.string().trim().min(1).optional().describe("Reasoning effort override (codex/gemini/grok only; warned and ignored elsewhere)");
+var issueField = external_exports.string().trim().min(1).optional().describe(
+  `Optional ticket this dispatch is being run for \u2014 "41" or "owner/repo#41". When set, the server posts ONE comment per terminal turn on that issue: run id, lane/profile, observed model, duration, turns, tokens, the head of the verdict VERBATIM, and the run_dir. It never changes the issue's state \u2014 closing a ticket stays a human act. Omit it and nothing is recorded on any issue; the server never guesses a ticket from the prompt or a branch name.`
+);
 var sandboxEnum = external_exports.enum(["read-only", "workspace-write", "danger-full-access"]);
 function narrowShape(profile) {
   const shape = { prompt: promptField, cwd: cwdField };
@@ -35079,6 +35356,7 @@ function narrowShape(profile) {
     );
   }
   shape.effort = effortField;
+  shape.issue = issueField;
   return shape;
 }
 function ok(payload) {
@@ -35150,7 +35428,8 @@ function registerTools(server, manager) {
           doNotTouch: args.doNotTouch,
           model: args.model,
           sandbox: args.sandbox,
-          effort: args.effort
+          effort: args.effort,
+          issue: args.issue
         }));
       } catch (error40) {
         return fail(error40);
@@ -35220,7 +35499,7 @@ function registerTools(server, manager) {
 }
 
 // src/retention.ts
-import fs12 from "node:fs";
+import fs13 from "node:fs";
 import path11 from "node:path";
 function sweepRunStreams(options = {}) {
   const runsRoot = options.runsRoot ?? RUNS_ROOT;
@@ -35230,7 +35509,7 @@ function sweepRunStreams(options = {}) {
   if (!(ttlMs > 0)) return report;
   let entries;
   try {
-    entries = fs12.readdirSync(runsRoot, { withFileTypes: true });
+    entries = fs13.readdirSync(runsRoot, { withFileTypes: true });
   } catch {
     return report;
   }
@@ -35244,7 +35523,7 @@ function sweepRunStreams(options = {}) {
       const file2 = path11.join(runDir, name);
       let stat;
       try {
-        stat = fs12.statSync(file2);
+        stat = fs13.statSync(file2);
       } catch {
         continue;
       }
@@ -35257,7 +35536,7 @@ function sweepRunStreams(options = {}) {
     let swept = 0;
     for (const stream of streams) {
       try {
-        fs12.rmSync(stream.file);
+        fs13.rmSync(stream.file);
         report.sweptFiles++;
         report.bytesFreed += stream.size;
         swept++;
@@ -35274,14 +35553,14 @@ function sweepRunStreams(options = {}) {
 }
 function isEmptyDir(dir) {
   try {
-    return fs12.readdirSync(dir).length === 0;
+    return fs13.readdirSync(dir).length === 0;
   } catch {
     return false;
   }
 }
 function removeDir(dir) {
   try {
-    fs12.rmdirSync(dir);
+    fs13.rmdirSync(dir);
     return true;
   } catch {
     return false;
