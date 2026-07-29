@@ -28301,7 +28301,25 @@ var SECRET_PATTERN = /(api[_-]?key|token|secret|authorization|bearer)(\s*[=:]\s*
 function redact(text) {
   return text.replace(SECRET_PATTERN, (_match, key, sep) => `${key}${sep}[REDACTED]`);
 }
+var PUBLIC_KEY_NAMES = "auth|credentials?|creds?|session|cookie|signature|sig|passwords?|passwd|pwd|passphrase|private[_-]?key";
 var PUBLIC_SECRET_RULES = [
+  {
+    re: new RegExp(
+      // key position: line start, or after a character a key can follow —
+      // including the quote of a JSON key (`{"credentials": …`).
+      String.raw`(^|[\s,{(\["'])` + // an optional vendor-ish prefix (`X-`, `HTTP_`) so `X-Auth` counts as `auth`
+      String.raw`((?:[A-Za-z][\w.-]*[_.-])?(?:${PUBLIC_KEY_NAMES}))` + // The separator that makes it a key at all. `:=` is excluded because it
+      // is Go's assignment, not a key separator: the corpus quotes Go, and
+      // `sig := portfolio.AgentSignal{` is a line of evidence, not a secret.
+      String.raw`(["']?\s*(?::(?!=)|=)\s*["']?)` + // …and the value: to end of line, or to the quote that closes it, but
+      // never THROUGH a `[[` — that is where a parked auth header is standing
+      // (see freshParkTag), and a value that ate one would delete the header
+      // this function had already redacted and set aside.
+      String.raw`((?:(?!\[\[)[^\r\n'"\`])+)`,
+      "gi"
+    ),
+    replace: "$1$2$3[REDACTED]"
+  },
   // Known credential prefixes, matched on shape alone: GitHub (`ghp_`/`gho_`/
   // `ghu_`/`ghs_`/`ghr_`), OpenAI-style (`sk-`, which also covers `sk-ant-`,
   // `sk-live-`, `sk-proj-`), Slack, GitLab, npm, AWS access-key ids, Google.
@@ -28352,20 +28370,37 @@ function looksRandom(span, requireDigitOrNoWord) {
   if (longestSameCaseRun(span) < 6) return true;
   return requireDigitOrNoWord ? /\d/.test(span) : false;
 }
-var AUTH_HEADER = /\b((?:proxy-)?authorization)(["']?[ \t]*[:=][ \t]*["']?)([A-Za-z][A-Za-z0-9._-]*)([ \t]+)[^\r\n'"`]+/gi;
-var AUTH_PARK = /\[\[clanker-auth-(\d+)\]\]/g;
+var AUTH_HEADER = /(["'`]?)\b((?:proxy-)?authorization)(["']?[ \t]*[:=][ \t]*["']?)([A-Za-z][A-Za-z0-9._-]*)([ \t]+)([^\r\n]+)/gi;
+function authCredentialEnd(rest, wrapper) {
+  if (wrapper === "") return rest.length;
+  for (let i = rest.indexOf(wrapper); i !== -1; i = rest.indexOf(wrapper, i + 1)) {
+    if (i === 0 || rest[i - 1] !== "\\") return i;
+  }
+  return rest.length;
+}
+function freshParkTag(text) {
+  let tag = "clanker-hdr";
+  for (let n = 1; text.includes(`[[${tag}:`); n += 1) tag = `clanker-hdr-${n}`;
+  return tag;
+}
 function redactForPublic(text) {
   const parked = [];
-  let out = text.replace(AUTH_HEADER, (_m, name, sep, scheme, gap) => {
-    parked.push(`${name}${sep}${scheme}${gap}[REDACTED]`);
-    return `[[clanker-auth-${parked.length - 1}]]`;
-  });
+  const tag = freshParkTag(text);
+  let out = text.replace(
+    AUTH_HEADER,
+    (_m, wrapper, name, sep, scheme, gap, rest) => {
+      const tail = rest.slice(authCredentialEnd(rest, wrapper));
+      parked.push(`${name}${sep}${scheme}${gap}[REDACTED]`);
+      return `${wrapper}[[${tag}:${parked.length - 1}]]${tail}`;
+    }
+  );
   out = redact(out);
   for (const { re, replace } of PUBLIC_SECRET_RULES) out = out.replace(re, replace);
   out = out.replace(PUBLIC_HEX_BLOB, (m) => GIT_SHA.test(m) ? m : "[REDACTED]");
   out = out.replace(PUBLIC_LOOSE_BLOB, (m) => looksRandom(m, false) ? "[REDACTED]" : m);
   out = out.replace(PUBLIC_TIGHT_BLOB, (m) => looksRandom(m, true) ? "[REDACTED]" : m);
-  return out.replace(AUTH_PARK, (m, index) => parked[Number(index)] ?? m);
+  const park = new RegExp(`\\[\\[${tag}:(\\d+)\\]\\]`, "g");
+  return out.replace(park, (m, index) => parked[Number(index)] ?? m);
 }
 function stderrSuffix(stderr) {
   const cleaned = redact(stderr).trim();
@@ -29307,11 +29342,28 @@ var LaneRun = class {
    * async method would make that guarantee depend on nothing awaiting in
    * between — a property the next edit to any of the three terminal methods
    * could silently take away.
+   *
+   * It is ALSO where the previous turn's `issue_comment_error` is dropped, and
+   * that placement is the second half of a lesson. `beginTurn()` clears it too,
+   * which was enough for every path that goes through a new turn — and then a
+   * third cold review found one that does not: a backend resume calls
+   * `reopenForResume()` and then AWAITS the connect, so a connect failure lands
+   * in `failTurn()` having never touched `beginTurn()`, raising a new pending
+   * next to the old error and breaking the "at most one of these two fields"
+   * contract stated in types.ts. That was the SECOND entry point to leak the
+   * same invariant, which says the shape "clear it at every entrance" is wrong:
+   * an invariant about a field belongs at the one statement that can violate
+   * it, not at every door somebody might come through. Raising pending and
+   * dropping a stale error are one act, written as one act, so no path — today's
+   * or tomorrow's — can perform half of it.
    */
   markTerminal(reason) {
     this.terminalAt = Date.now();
     this.stopReason ??= reason;
-    if (this.issueRef) this.issueCommentPending = true;
+    if (this.issueRef) {
+      this.issueCommentPending = true;
+      this.issueCommentError = void 0;
+    }
     this.persistTelemetry();
   }
   /**
