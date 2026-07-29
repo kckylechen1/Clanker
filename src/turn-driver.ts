@@ -556,14 +556,23 @@ export class TurnDriver {
   }
 
   /** Wait for every tracked drive to settle, however it settles (shutdown). */
-  settleAllDrives(): Promise<unknown> {
+  // `Promise<void>`, not the allSettled array: shutdown discards the value and
+  // always has. Widening the type would let a future caller depend on a result
+  // this method never meant to publish (round-2 review codex-2b437) — the point
+  // is "every drive has settled", not what they settled to.
+  settleAllDrives(): Promise<void> {
     // NOT `async`: shutdown awaits this, and an async wrapper would push the
     // final close loop a microtask past where it ran pre-split — smallest when
     // there are no drives at all, which is exactly the common shutdown
     // (cold review codex-1c87b). Hands back the very promise the old inline
     // `await Promise.allSettled([...])` produced, rejections swallowed the same
     // way.
-    return Promise.allSettled([...this.turnDrives.values()]);
+    // The cast, not `.then(() => undefined)`: a `.then` costs the very
+    // microtask the round-1 fix removed (measured — 2 ticks becomes 3), and
+    // the timing IS the equivalence this refactor is judged on. The type says
+    // void because the value is not part of the contract; the returned promise
+    // is the untouched allSettled, exactly what the pre-split call site awaited.
+    return Promise.allSettled([...this.turnDrives.values()]) as unknown as Promise<void>;
   }
 
   /** The in-flight handshake for `id`, if this run is still connecting (cancel). */

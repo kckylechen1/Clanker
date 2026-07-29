@@ -34226,6 +34226,10 @@ ${prompt}`;
     return this.turnDrives.has(id);
   }
   /** Wait for every tracked drive to settle, however it settles (shutdown). */
+  // `Promise<void>`, not the allSettled array: shutdown discards the value and
+  // always has. Widening the type would let a future caller depend on a result
+  // this method never meant to publish (round-2 review codex-2b437) — the point
+  // is "every drive has settled", not what they settled to.
   settleAllDrives() {
     return Promise.allSettled([...this.turnDrives.values()]);
   }
