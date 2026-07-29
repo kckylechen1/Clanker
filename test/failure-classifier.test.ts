@@ -10,6 +10,7 @@ import {
   INFRA_FAILURE_TAG,
   isCapacityTransient,
 } from "../src/failure-classifier.js";
+import { dropMutant, loadMutantModule } from "./helpers.js";
 
 // ---- CLANKER-INFRA-FAILURE classification --------------------------------
 //
@@ -193,9 +194,78 @@ test("a model the backend refuses is its own class — not billing, not auth, no
     classifyBackendFailure("model x unavailable: usage balance exhausted (402)"),
     BACKEND_BILLING_TAG,
   );
+  // And it outranks AUTH, which is the fix for PR #44's cold review (run
+  // codex-aed92). Verbatim from that reviewer's probe against the shipped
+  // classifier, which answered CLANKER-BACKEND-AUTH: `\b40[13]\b` matched
+  // before the model tag could see the message, so a dispatcher was sent to
+  // audit credentials that were fine while a named model sat in the text.
+  assert.equal(
+    classifyBackendFailure(
+      "Clanker: Cursor cursor-agent failed (exit 1): 403 Forbidden: Cannot use this model: composer-2.5. " +
+        "Available models:",
+    ),
+    BACKEND_MODEL_TAG,
+  );
+  assert.equal(
+    classifyBackendFailure("401 Unauthorized: model gpt-9 is not available to this key"),
+    BACKEND_MODEL_TAG,
+    "the status code says a request was refused; the model name says WHICH refusal",
+  );
+  // The other side of the same line: a rejection with NO model signature has
+  // nothing more specific to be, so auth keeps it.
+  assert.equal(classifyBackendFailure("403 Forbidden"), BACKEND_AUTH_TAG);
+  assert.equal(classifyBackendFailure("HTTP 401: unauthorized — invalid api key"), BACKEND_AUTH_TAG);
+  assert.equal(
+    classifyBackendFailure("403 forbidden: this credential cannot use the model"),
+    BACKEND_AUTH_TAG,
+    "prose ABOUT a model is not a model-rejection signature",
+  );
+  // Billing beats both, even when all three signatures are in one message.
+  assert.equal(
+    classifyBackendFailure("403 Forbidden: Cannot use this model: composer-2.5 (usage balance exhausted)"),
+    BACKEND_BILLING_TAG,
+  );
   // And a spawn failure still short-circuits ahead of everything.
   assert.equal(
     classifyBackendFailure("failed to spawn '/x/node': spawn /x/node ENOENT — cannot use this model"),
     ENV_DRIFT_TAG,
   );
+});
+
+test("mutant: with model checked AFTER auth, the vendor's own 403 misroutes to credentials", async () => {
+  // The pre-fix order, restored line for line. It is the exact probe cold
+  // review (run codex-aed92) ran against the shipped classifier, and it is the
+  // reason the two lines are now the other way round: the dispatcher was told
+  // to go fix an account that was never asked about.
+  const name = "classifier-model-after-auth";
+  const mutated = await loadMutantModule<typeof import("../src/failure-classifier.js")>(name, [
+    {
+      file: "failure-classifier.ts",
+      find:
+        "  if (BACKEND_MODEL_PATTERNS.some((re) => re.test(message))) return BACKEND_MODEL_TAG;\n" +
+        "  if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;",
+      replace:
+        "  if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;\n" +
+        "  if (BACKEND_MODEL_PATTERNS.some((re) => re.test(message))) return BACKEND_MODEL_TAG;",
+    },
+  ], "failure-classifier.ts");
+  try {
+    assert.equal(
+      mutated.classifyBackendFailure(
+        "Clanker: Cursor cursor-agent failed (exit 1): 403 Forbidden: Cannot use this model: composer-2.5. " +
+          "Available models:",
+      ),
+      BACKEND_AUTH_TAG,
+      "pre-fix, a named model rejection wearing a 403 is filed as a credential problem",
+    );
+    // …while the halves that must NOT move stay put under the mutant, so this
+    // proves an ordering change and not a pattern change.
+    assert.equal(mutated.classifyBackendFailure("403 Forbidden"), BACKEND_AUTH_TAG);
+    assert.equal(
+      mutated.classifyBackendFailure("Cannot use this model: composer-2.5"),
+      BACKEND_MODEL_TAG,
+    );
+  } finally {
+    dropMutant(name);
+  }
 });
