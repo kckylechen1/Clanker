@@ -18317,6 +18317,7 @@ var zToolCallUpdate = object({
   kind: defaultOnError(zToolKind.nullish(), () => void 0),
   status: defaultOnError(zToolCallStatus.nullish(), () => void 0),
   title: defaultOnError(string2().nullish(), () => void 0),
+  name: defaultOnError(string2().nullish(), () => void 0),
   content: defaultOnError(vecSkipError(zToolCallContent).nullish(), () => void 0),
   locations: defaultOnError(vecSkipError(zToolCallLocation).nullish(), () => void 0),
   rawInput: defaultOnError(unknown().optional(), () => void 0),
@@ -19082,6 +19083,7 @@ var zContentChunk = object({
 var zToolCall = object({
   toolCallId: zToolCallId,
   title: string2(),
+  name: defaultOnError(string2().nullish(), () => void 0),
   kind: defaultOnError(zToolKind.optional(), () => void 0),
   status: defaultOnError(zToolCallStatus.optional(), () => void 0),
   content: defaultOnError(vecSkipError(zToolCallContent).optional(), () => []),
@@ -19762,62 +19764,69 @@ var zCancelRequestNotification = object({
   requestId: zRequestId,
   _meta: defaultOnError(record(string2(), unknown()).nullish(), () => void 0)
 });
-function tagOf(value, key) {
-  return typeof value === "object" && value !== null ? value[key] : void 0;
-}
-var zGuardCreateElicitationRequestForm = zElicitationFormMode.and(object({ mode: literal("form") })).and(object({ message: string2() }));
-var zGuardCreateElicitationRequestUrl = zElicitationUrlMode.and(object({ mode: literal("url") })).and(object({ message: string2() }));
-var zGuardCreateElicitationRequestCustom = union([zElicitationSessionScope, zElicitationRequestScope]).and(object({ message: string2() }));
-var zGuardElicitationPropertySchemaString = zStringPropertySchema.and(object({ type: literal("string") }));
-var zGuardElicitationPropertySchemaNumber = zNumberPropertySchema.and(object({ type: literal("number") }));
-var zGuardElicitationPropertySchemaInteger = zIntegerPropertySchema.and(object({ type: literal("integer") }));
-var zGuardElicitationPropertySchemaBoolean = zBooleanPropertySchema.and(object({ type: literal("boolean") }));
-var zGuardElicitationPropertySchemaArray = zMultiSelectPropertySchema.and(object({ type: literal("array") }));
-var zGuardMultiSelectItemsString = zStringMultiSelectItems.and(object({ type: literal("string") }));
-var zGuardCreateElicitationResponseAccept = zElicitationAcceptAction.and(object({ action: literal("accept") }));
-var zGuardCreateElicitationResponseDecline = object({
-  action: literal("decline")
-});
-var zGuardCreateElicitationResponseCancel = object({
-  action: literal("cancel")
-});
-var CreateElicitationResponse = {
-  /** Narrow to the `accept` variant, validating its payload. */
-  isAccept(value) {
-    return tagOf(value, "action") === "accept" && zGuardCreateElicitationResponseAccept.safeParse(value).success;
-  },
-  /** Narrow to the `decline` variant, validating its payload. */
-  isDecline(value) {
-    return tagOf(value, "action") === "decline" && zGuardCreateElicitationResponseDecline.safeParse(value).success;
-  },
-  /** Narrow to the `cancel` variant, validating its payload. */
-  isCancel(value) {
-    return tagOf(value, "action") === "cancel" && zGuardCreateElicitationResponseCancel.safeParse(value).success;
-  },
-  /**
-   * Narrow to a custom or future variant: the `action` tag matches no known variant.
-   *
-   * TypeScript keeps the known variants in the narrowed union (they are
-   * structural subtypes of the catch-all), so read vendor payload keys
-   * via a widening cast: `(value as Record<string, unknown>).someKey`.
-   */
-  isCustom(value) {
-    const tag = tagOf(value, "action");
-    return typeof tag === "string" && !["accept", "cancel", "decline"].includes(tag);
-  }
-};
 var CANCEL_REQUEST_METHOD = "$/cancel_request";
+function isRequestMessage(value) {
+  return isJsonRpcEnvelope(value) && "id" in value && typeof value["method"] === "string" && isJsonRpcId(value["id"]);
+}
+function isResponseMessage(value) {
+  if (!isJsonRpcEnvelope(value) || "method" in value) {
+    return false;
+  }
+  if (!("id" in value) || !isJsonRpcId(value["id"])) {
+    return false;
+  }
+  const hasResult = Object.hasOwn(value, "result");
+  const hasError = Object.hasOwn(value, "error");
+  if (hasResult === hasError) {
+    return false;
+  }
+  return !hasError || isErrorResponse(value["error"]);
+}
+function isNotificationMessage(value) {
+  return isJsonRpcEnvelope(value) && !("id" in value) && typeof value["method"] === "string";
+}
 function isRecord(value) {
   return typeof value === "object" && value !== null;
 }
+function isJsonRpcEnvelope(value) {
+  return isRecord(value) && value["jsonrpc"] === "2.0";
+}
 function isJsonRpcId(value) {
   return value === null || typeof value === "string" || typeof value === "number" && Number.isFinite(value);
+}
+function isResponseShapedMessage(value) {
+  return isRecord(value) && !("method" in value) && ("id" in value || "result" in value || "error" in value);
+}
+function isResponseBatch(batch) {
+  let hasValidCall = false;
+  let hasValidResponse = false;
+  let hasCallShape = false;
+  let hasResponseShape = false;
+  for (const entry of batch) {
+    hasValidCall ||= isRequestMessage(entry) || isNotificationMessage(entry);
+    hasValidResponse ||= isResponseMessage(entry);
+    if (!isRecord(entry)) {
+      continue;
+    }
+    hasCallShape ||= "method" in entry;
+    hasResponseShape ||= "result" in entry || "error" in entry;
+  }
+  if (hasValidCall) {
+    return false;
+  }
+  if (hasValidResponse) {
+    return true;
+  }
+  return hasResponseShape && !hasCallShape;
 }
 function cancelRequestId(params) {
   if (!isRecord(params) || !isJsonRpcId(params["requestId"])) {
     return void 0;
   }
   return params["requestId"];
+}
+function isErrorResponse(value) {
+  return isRecord(value) && typeof value["code"] === "number" && Number.isInteger(value["code"]) && typeof value["message"] === "string";
 }
 var Handled = {
   /**
@@ -19979,6 +19988,12 @@ var ConnectionContext = class {
     return this.connection.sendNotification(method, params);
   }
   /**
+   * Sends a non-empty JSON-RPC batch in one transport message.
+   */
+  sendBatch(entries) {
+    return this.connection.sendBatch(entries);
+  }
+  /**
    * Sends a protocol-level request cancellation notification.
    */
   sendCancelRequest(requestId) {
@@ -20016,6 +20031,7 @@ var Connection = class {
   retryQueue = [];
   context = new ConnectionContext(this);
   receiveReader;
+  allowBatches = true;
   constructor(requestHandlerOrStream, notificationHandlerOrHandlers, streamOrOptions, options) {
     if (typeof requestHandlerOrStream === "function") {
       const requestHandler = requestHandlerOrStream;
@@ -20024,16 +20040,13 @@ var Connection = class {
       this.initialize(stream2, [
         ...options?.handlers ?? [],
         this.legacyHandler(requestHandler, notificationHandler)
-      ]);
+      ], options);
       return;
     }
     const stream = requestHandlerOrStream;
     const handlers = notificationHandlerOrHandlers;
     const connectionOptions = streamOrOptions;
-    this.initialize(stream, [
-      ...connectionOptions?.handlers ?? [],
-      ...handlers
-    ]);
+    this.initialize(stream, [...connectionOptions?.handlers ?? [], ...handlers], connectionOptions);
   }
   /**
    * Creates a builder for configuring a handler-based connection.
@@ -20107,15 +20120,89 @@ var Connection = class {
     if (this.abortController.signal.aborted) {
       return rejectedPromise(this.closedReason());
     }
+    const request = this.prepareRequest(method, params, mapResponse, options);
+    const requestSent = this.sendWireMessage(request.message);
+    void requestSent.catch(() => {
+    });
+    if (options.cancellationSignal?.aborted) {
+      request.cancel();
+    }
+    return request.response;
+  }
+  /**
+   * Sends a non-empty JSON-RPC batch in one transport message.
+   *
+   * Requests and notifications are processed independently by the peer. The
+   * returned tuple preserves the input order: request entries resolve to their
+   * mapped response, while notification entries resolve to `undefined`.
+   */
+  sendBatch(entries) {
+    if (this.abortController.signal.aborted) {
+      return rejectedPromise(this.closedReason());
+    }
+    if (!this.allowBatches) {
+      return rejectedPromise(new TypeError("JSON-RPC batches are not supported on this connection"));
+    }
+    if (entries.length === 0) {
+      return rejectedPromise(new TypeError("JSON-RPC batch must contain at least one entry"));
+    }
+    const messages = [];
+    const cancellations = [];
+    const outputs = [];
+    for (const entry of entries) {
+      if (entry.kind === "notification") {
+        messages.push({
+          jsonrpc: "2.0",
+          method: entry.method,
+          params: entry.params
+        });
+        outputs.push(Promise.resolve(void 0));
+        continue;
+      }
+      const request = this.prepareRequest(entry.method, entry.params, entry.mapResponse, entry.options);
+      messages.push(request.message);
+      outputs.push(request.response);
+      cancellations.push({
+        signal: entry.options?.cancellationSignal,
+        cancel: request.cancel
+      });
+    }
+    const batch = messages;
+    const batchSent = this.sendWireMessage(batch);
+    for (const cancellation of cancellations) {
+      if (cancellation.signal?.aborted) {
+        cancellation.cancel();
+      }
+    }
+    const response = Promise.all([batchSent, ...outputs]).then(([, ...resolved]) => resolved);
+    response.catch(() => {
+    });
+    return response;
+  }
+  /**
+   * Sends a protocol-level request cancellation notification.
+   */
+  sendCancelRequest(requestId) {
+    return this.sendNotification(CANCEL_REQUEST_METHOD, { requestId });
+  }
+  /**
+   * Sends a JSON-RPC notification.
+   */
+  sendNotification(method, params) {
+    if (this.abortController.signal.aborted) {
+      return rejectedPromise(this.closedReason());
+    }
+    return this.sendWireMessage({ jsonrpc: "2.0", method, params });
+  }
+  prepareRequest(method, params, mapResponse, options = {}) {
     const id = this.nextRequestId++;
     let cancel = () => {
     };
-    const responsePromise = new Promise((resolve, reject) => {
+    const response = new Promise((resolve, reject) => {
       const pendingResponse = {
-        resolve: (response) => {
+        resolve: (value) => {
           try {
-            const value = mapResponse ? mapResponse(response) : response;
-            resolve(value);
+            resolve(mapResponse ? mapResponse(value) : value);
           } catch (error51) {
             reject(error51);
           }
@@ -20139,35 +20226,13 @@ var Connection = class {
       };
       this.pendingResponses.set(id, pendingResponse);
     });
-    responsePromise.catch(() => {
+    response.catch(() => {
     });
-    const requestSent = this.sendMessage({
-      jsonrpc: "2.0",
-      id,
-      method,
-      params
-    });
-    void requestSent.catch(() => {
-    });
-    if (options.cancellationSignal?.aborted) {
-      cancel();
-    }
-    return responsePromise;
-  }
-  /**
-   * Sends a protocol-level request cancellation notification.
-   */
-  sendCancelRequest(requestId) {
-    return this.sendNotification(CANCEL_REQUEST_METHOD, { requestId });
-  }
-  /**
-   * Sends a JSON-RPC notification.
-   */
-  sendNotification(method, params) {
-    if (this.abortController.signal.aborted) {
-      return rejectedPromise(this.closedReason());
-    }
-    return this.sendMessage({ jsonrpc: "2.0", method, params });
+    return {
+      message: { jsonrpc: "2.0", id, method, params },
+      response,
+      cancel: () => cancel()
+    };
   }
   /**
    * Closes the connection and rejects pending requests.
@@ -20190,9 +20255,10 @@ var Connection = class {
     void this.receiveReader?.cancel(closeError).catch(() => {
     });
   }
-  initialize(stream, handlers) {
+  initialize(stream, handlers, options) {
     this.stream = stream;
     this.staticHandlers = handlers;
+    this.allowBatches = options?.allowBatches ?? true;
     this.closedPromise = new Promise((resolve) => {
       this.abortController.signal.addEventListener("abort", () => resolve());
     });
@@ -20228,7 +20294,7 @@ var Connection = class {
           if (!message) {
             continue;
           }
-          this.receiveMessage(message);
+          this.receiveWireMessage(message);
         }
       } finally {
         if (this.receiveReader === reader) {
@@ -20242,24 +20308,93 @@ var Connection = class {
       this.close(closeError);
     }
   }
-  receiveMessage(message) {
-    if (this.abortController.signal.aborted) {
+  receiveWireMessage(message) {
+    if (Array.isArray(message)) {
+      if (!this.allowBatches) {
+        this.close(new TypeError("JSON-RPC batches are not supported on this connection"));
+        return;
+      }
+      this.receiveBatch(message);
       return;
     }
     if (!isRecord(message)) {
       console.error("Invalid message", { message });
       return;
     }
+    this.receiveMessage(message);
+  }
+  receiveBatch(batch) {
+    if (batch.length === 0) {
+      void this.sendWireMessage({
+        jsonrpc: "2.0",
+        id: null,
+        error: RequestError.invalidRequest(batch).toErrorResponse()
+      }).catch(() => {
+      });
+      return;
+    }
+    const responseBatch = isResponseBatch(batch);
+    const responseCount = responseBatch ? 0 : batch.reduce((count, message) => count + (isNotificationMessage(message) ? 0 : 1), 0);
+    let remaining = responseCount;
+    let remainingNotifications = batch.reduce((count, message) => count + (isNotificationMessage(message) ? 1 : 0), 0);
+    let responseSent = false;
+    const responses = [];
+    const sendResponsesIfReady = async () => {
+      if (responseSent || remaining !== 0 || remainingNotifications !== 0 || responses.length === 0) {
+        return;
+      }
+      responseSent = true;
+      await this.sendWireMessage(responses);
+    };
+    const collectResponse = async (response) => {
+      responses.push(response);
+      remaining -= 1;
+      await sendResponsesIfReady();
+    };
+    for (const message of batch) {
+      if (responseBatch) {
+        if (isResponseShapedMessage(message)) {
+          this.receiveMessage(message);
+        }
+        continue;
+      }
+      if (!isRequestMessage(message) && !isNotificationMessage(message)) {
+        void collectResponse({
+          jsonrpc: "2.0",
+          id: null,
+          error: RequestError.invalidRequest(message).toErrorResponse()
+        }).catch(() => {
+        });
+        continue;
+      }
+      const processing = this.receiveMessage(message, isRequestMessage(message) ? collectResponse : void 0);
+      if (isNotificationMessage(message)) {
+        void processing.finally(() => {
+          remainingNotifications -= 1;
+          void sendResponsesIfReady().catch((error51) => this.close(error51));
+        });
+      }
+    }
+  }
+  receiveMessage(message, sendResponse) {
+    if (this.abortController.signal.aborted) {
+      return Promise.resolve();
+    }
+    if (!isRecord(message)) {
+      console.error("Invalid message", { message });
+      return Promise.resolve();
+    }
     if ("method" in message) {
       if (!("id" in message)) {
         this.handleProtocolNotification(message);
       }
-      void this.processIncomingMessage(this.toIncomingMessage(message)).catch((error51) => this.close(error51));
+      return this.processIncomingMessage(this.toIncomingMessage(message, sendResponse)).catch((error51) => this.close(error51));
     } else if ("id" in message) {
       this.handleResponse(message);
     } else {
       console.error("Invalid message", { message });
     }
+    return Promise.resolve();
   }
   async processIncomingMessage(message) {
     if (this.abortController.signal.aborted) {
@@ -20303,7 +20438,7 @@ var Connection = class {
       }
     }
   }
-  toIncomingMessage(message) {
+  toIncomingMessage(message, sendResponse) {
     if ("id" in message) {
       const abortController = new AbortController();
       this.incomingRequests.set(message.id, abortController);
@@ -20318,11 +20453,14 @@ var Connection = class {
         params: message.params,
         raw: message,
         signal: abortController.signal,
-        responder: new RequestResponder(message.id, (result) => this.sendMessage({
-          jsonrpc: "2.0",
-          id: message.id,
-          ...result
-        }), abortController.signal, finishRequest)
+        responder: new RequestResponder(message.id, (result) => {
+          const response = {
+            jsonrpc: "2.0",
+            id: message.id,
+            ...result
+          };
+          return sendResponse ? sendResponse(response) : this.sendWireMessage(response);
+        }, abortController.signal, finishRequest)
       };
     }
     return {
@@ -20337,13 +20475,13 @@ var Connection = class {
     if (pendingResponse) {
       this.pendingResponses.delete(response.id);
       pendingResponse.cleanup?.();
-      if ("result" in response) {
+      if (!isResponseMessage(response)) {
+        pendingResponse.reject(RequestError.invalidRequest(response));
+      } else if ("result" in response) {
         pendingResponse.resolve(response.result);
-      } else if ("error" in response && isRecord(response.error)) {
+      } else {
         const { code, message, data } = response.error;
         pendingResponse.reject(new RequestError(code, message, data));
-      } else {
-        pendingResponse.reject(RequestError.invalidRequest(response));
       }
     } else {
       console.error("Got response to unknown request", response.id);
@@ -20366,7 +20504,7 @@ var Connection = class {
   closedReason() {
     return this.abortController.signal.reason ?? new Error("ACP connection closed");
   }
-  async sendMessage(message) {
+  async sendWireMessage(message) {
     if (this.abortController.signal.aborted) {
       return rejectedPromise(this.closedReason());
     }
@@ -20608,7 +20746,7 @@ function ndJsonStream(output, input) {
         if (trimmedLine) {
           try {
             const message = JSON.parse(trimmedLine);
-            if (isRecord(message)) {
+            if (isRecord(message) || Array.isArray(message)) {
               controller.enqueue(message);
             } else {
               console.warn("Skipping JSON line that is not an object:", trimmedLine);
@@ -20680,6 +20818,53 @@ function ndJsonStream(output, input) {
     }
   });
   return { readable, writable };
+}
+function tagOf(value, key) {
+  return typeof value === "object" && value !== null ? value[key] : void 0;
+}
+var zGuardCreateElicitationRequestForm = zElicitationFormMode.and(object({ mode: literal("form") })).and(object({ message: string2() }));
+var zGuardCreateElicitationRequestUrl = zElicitationUrlMode.and(object({ mode: literal("url") })).and(object({ message: string2() }));
+var zGuardCreateElicitationRequestCustom = union([zElicitationSessionScope, zElicitationRequestScope]).and(object({ message: string2() }));
+var zGuardElicitationPropertySchemaString = zStringPropertySchema.and(object({ type: literal("string") }));
+var zGuardElicitationPropertySchemaNumber = zNumberPropertySchema.and(object({ type: literal("number") }));
+var zGuardElicitationPropertySchemaInteger = zIntegerPropertySchema.and(object({ type: literal("integer") }));
+var zGuardElicitationPropertySchemaBoolean = zBooleanPropertySchema.and(object({ type: literal("boolean") }));
+var zGuardElicitationPropertySchemaArray = zMultiSelectPropertySchema.and(object({ type: literal("array") }));
+var zGuardMultiSelectItemsString = zStringMultiSelectItems.and(object({ type: literal("string") }));
+var zGuardCreateElicitationResponseAccept = zElicitationAcceptAction.and(object({ action: literal("accept") }));
+var zGuardCreateElicitationResponseDecline = object({
+  action: literal("decline")
+});
+var zGuardCreateElicitationResponseCancel = object({
+  action: literal("cancel")
+});
+var CreateElicitationResponse = {
+  /** Narrow to the `accept` variant, validating its payload. */
+  isAccept(value) {
+    return tagOf(value, "action") === "accept" && zGuardCreateElicitationResponseAccept.safeParse(value).success;
+  },
+  /** Narrow to the `decline` variant, validating its payload. */
+  isDecline(value) {
+    return tagOf(value, "action") === "decline" && zGuardCreateElicitationResponseDecline.safeParse(value).success;
+  },
+  /** Narrow to the `cancel` variant, validating its payload. */
+  isCancel(value) {
+    return tagOf(value, "action") === "cancel" && zGuardCreateElicitationResponseCancel.safeParse(value).success;
+  },
+  /**
+   * Narrow to a custom or future variant: the `action` tag matches no known variant.
+   *
+   * TypeScript keeps the known variants in the narrowed union (they are
+   * structural subtypes of the catch-all), so read vendor payload keys
+   * via a widening cast: `(value as Record<string, unknown>).someKey`.
+   */
+  isCustom(value) {
+    const tag = tagOf(value, "action");
+    return typeof tag === "string" && !["accept", "cancel", "decline"].includes(tag);
+  }
+};
+function ndJsonStream2(output, input) {
+  return ndJsonStream(output, input);
 }
 function emptyObjectResponse(response) {
   return response ?? {};
@@ -21342,6 +21527,7 @@ function runConnectHandlers(connection, handlers) {
 var appBuilder = /* @__PURE__ */ Symbol("appBuilder");
 var runAgentConnectHandlers = /* @__PURE__ */ Symbol("runAgentConnectHandlers");
 var runClientConnectHandlers = /* @__PURE__ */ Symbol("runClientConnectHandlers");
+var stableConnectionOptions = { allowBatches: false };
 function agent(options) {
   return new AgentApp(options);
 }
@@ -21415,7 +21601,7 @@ var AgentApp = class {
       return state2;
     }
     const [thisStream, peerStream] = memoryStreamPair();
-    const peerRawConnection = target[appBuilder]().connect(peerStream);
+    const peerRawConnection = target[appBuilder]().connect(peerStream, stableConnectionOptions);
     const peerConnection = clientConnection(peerRawConnection);
     const state = this.openStreamConnection(thisStream);
     void state.rawConnection.closed.then(() => peerConnection.close());
@@ -21431,7 +21617,7 @@ var AgentApp = class {
     return state;
   }
   openStreamConnection(stream) {
-    const rawConnection = this.builder.connect(stream);
+    const rawConnection = this.builder.connect(stream, stableConnectionOptions);
     return {
       rawConnection,
       connection: agentConnection(rawConnection, this.connectHandlers)
@@ -21510,7 +21696,7 @@ var ClientApp = class {
       return state2;
     }
     const [thisStream, peerStream] = memoryStreamPair();
-    const peerRawConnection = target[appBuilder]().connect(peerStream);
+    const peerRawConnection = target[appBuilder]().connect(peerStream, stableConnectionOptions);
     const peerConnection = agentConnection(peerRawConnection);
     const state = this.openStreamConnection(thisStream);
     void state.rawConnection.closed.then(() => peerConnection.close());
@@ -21526,7 +21712,7 @@ var ClientApp = class {
     return state;
   }
   openStreamConnection(stream) {
-    const rawConnection = this.builder.connect(stream);
+    const rawConnection = this.builder.connect(stream, stableConnectionOptions);
     return {
       rawConnection,
       connection: clientConnection(rawConnection, this.connectHandlers)
@@ -21641,7 +21827,7 @@ function createJSONRPCReader(readable) {
 function createJsonStream(readable, writable) {
   const input = Writable.toWeb(writable);
   const output = Readable.toWeb(readable);
-  return ndJsonStream(input, output);
+  return ndJsonStream2(input, output);
 }
 var Logger = class {
   logFilePath;
@@ -22656,7 +22842,7 @@ function createWebSearchStartUpdate(item) {
     kind: "search",
     title: formatWebSearchTitle(item),
     status: "in_progress",
-    rawInput: item
+    rawInput: createWebSearchRawInput(item)
   };
 }
 function createWebSearchCompleteUpdate(item) {
@@ -22665,7 +22851,15 @@ function createWebSearchCompleteUpdate(item) {
     toolCallId: item.id,
     title: formatWebSearchTitle(item),
     status: "completed",
-    rawInput: item
+    rawInput: createWebSearchRawInput(item)
+  };
+}
+function createWebSearchRawInput(item) {
+  return {
+    type: item.type,
+    id: item.id,
+    query: item.query,
+    action: item.action
   };
 }
 function createCollabAgentToolCallUpdate(item) {
@@ -23158,9 +23352,10 @@ function createAgentTextThoughtChunk(text, messageId, meta3) {
   return createAgentThoughtChunk({ type: "text", text }, messageId, meta3);
 }
 var LEGACY_SET_SESSION_MODEL_METHOD = "session/set_model";
+var SESSION_STEERING_METHOD = "_session/steering";
 var GOAL_CONTROL_METHOD = "_codex/session/goal_control";
 function isExtMethodRequest(request) {
-  return request.method === "authentication/status" || request.method === "authentication/logout" || request.method === LEGACY_SET_SESSION_MODEL_METHOD || request.method === GOAL_CONTROL_METHOD;
+  return request.method === "authentication/status" || request.method === "authentication/logout" || request.method === LEGACY_SET_SESSION_MODEL_METHOD || request.method === GOAL_CONTROL_METHOD || request.method === SESSION_STEERING_METHOD;
 }
 function toThreadGoalSnapshot(goal) {
   return {
@@ -23185,6 +23380,7 @@ var CodexEventHandler = class {
   activeGuardianApprovalReviews = /* @__PURE__ */ new Set();
   activeImageGenerationItems = /* @__PURE__ */ new Set();
   emittedImageViewItems = /* @__PURE__ */ new Set();
+  planDeltaTextByItemId = /* @__PURE__ */ new Map();
   seenReasoningDeltaItemIds = /* @__PURE__ */ new Set();
   terminalCommandIds = /* @__PURE__ */ new Set();
   terminalCommandOutputIds = /* @__PURE__ */ new Set();
@@ -23208,6 +23404,8 @@ var CodexEventHandler = class {
     switch (notification.method) {
       case "item/agentMessage/delta":
         return await this.createTextEvent(notification.params);
+      case "item/plan/delta":
+        return this.createPlanDeltaEvent(notification.params);
       case "item/started":
         return await this.createItemEvent(notification.params);
       case "item/completed":
@@ -23286,6 +23484,8 @@ var CodexEventHandler = class {
         return this.createTerminalInteractionEvent(notification.params);
       // ignored events
       case "thread/deleted":
+      case "thread/environment/connected":
+      case "thread/environment/disconnected":
       case "command/exec/outputDelta":
       case "hook/started":
       case "hook/completed":
@@ -23315,8 +23515,8 @@ var CodexEventHandler = class {
       case "mcpServer/oauthLogin/completed":
       case "externalAgentConfig/import/completed":
       case "rawResponseItem/completed":
+      case "rawResponse/completed":
       case "thread/started":
-      case "item/plan/delta":
       case "remoteControl/status/changed":
       case "app/list/updated":
       case "thread/settings/updated":
@@ -23380,6 +23580,14 @@ ${event.details}` : "";
   createReasoningDeltaEvent(event) {
     this.seenReasoningDeltaItemIds.add(event.itemId);
     return this.createAgentThoughtEvent(event.delta, event.itemId);
+  }
+  createPlanDeltaEvent(event) {
+    if (event.delta.length === 0) {
+      return null;
+    }
+    const text = this.planDeltaTextByItemId.get(event.itemId) ?? "";
+    this.planDeltaTextByItemId.set(event.itemId, text + event.delta);
+    return null;
   }
   createReasoningSectionBreakEvent(event) {
     this.seenReasoningDeltaItemIds.add(event.itemId);
@@ -23474,6 +23682,11 @@ ${event.details}` : "";
       case "agentMessage":
         this.rememberAgentMessagePhase(event.item);
         return null;
+      case "plan": {
+        const deltaText = this.planDeltaTextByItemId.get(event.item.id) ?? "";
+        this.planDeltaTextByItemId.delete(event.item.id);
+        return this.createCompletedPlanEvent(event.item, deltaText);
+      }
       case "exitedReviewMode":
         return this.createExitedReviewModeEvent(event.item);
       case "contextCompaction":
@@ -23487,7 +23700,6 @@ ${event.details}` : "";
       case "userMessage":
       case "hookPrompt":
       case "enteredReviewMode":
-      case "plan":
         return null;
     }
   }
@@ -23501,6 +23713,20 @@ ${event.details}` : "";
       return null;
     }
     return this.createAgentThoughtEvent(text, item.id);
+  }
+  createCompletedPlanEvent(item, deltaText) {
+    const text = item.text.length > 0 ? item.text : deltaText;
+    if (text.length === 0) {
+      return null;
+    }
+    return this.createPlanTextEvent(text, item.id);
+  }
+  createPlanTextEvent(text, messageId) {
+    return createAgentTextMessageChunk(
+      text,
+      messageId,
+      createCodexMessagePhaseMeta("final_answer")
+    );
   }
   createExitedReviewModeEvent(item) {
     const text = item.review.trim();
@@ -25387,7 +25613,7 @@ var package_default = {
   publishConfig: {
     access: "public"
   },
-  version: "1.1.4",
+  version: "1.1.7",
   description: "",
   main: "dist/index.js",
   bin: {
@@ -25417,11 +25643,13 @@ var package_default = {
     "package:win-x64": "cd dist/bin && zip codex-acp-x64-windows.zip codex-acp-x64-windows.exe",
     "package:win-arm64": "cd dist/bin && zip codex-acp-arm64-windows.zip codex-acp-arm64-windows.exe",
     start: "node --import tsx src/index.ts",
+    "example:steering": "node --import tsx examples/steering.ts",
+    "example:steering:multistep": "node --import tsx examples/steering.ts",
     "generate-types": "./node_modules/.bin/codex app-server generate-ts --out src/app-server",
     test: "vitest run",
     "test:e2e": "npm run build && RUN_E2E_TESTS=true vitest run src/__tests__/CodexACPAgent/e2e",
     "test:watch": "vitest",
-    typecheck: "tsc --noEmit",
+    typecheck: "tsc --noEmit && tsc --noEmit -p examples/tsconfig.json",
     "codex-test": "tsx .claude/skills/run-codex/scripts/run-codex-test.ts"
   },
   homepage: "https://github.com/agentclientprotocol/codex-acp#readme",
@@ -25440,13 +25668,13 @@ var package_default = {
     "@types/node": "^26.1.0",
     esbuild: "^0.28.1",
     "mcp-hello-world": "^1.1.2",
-    tsx: "^4.23.0",
-    typescript: "^6.0.3",
+    tsx: "^4.23.1",
+    typescript: "^7.0.2",
     vitest: "^4.1.10"
   },
   dependencies: {
-    "@agentclientprotocol/sdk": "^1.2.1",
-    "@openai/codex": "^0.144.4",
+    "@agentclientprotocol/sdk": "^1.3.0",
+    "@openai/codex": "^0.145.0",
     diff: "^9.0.0",
     open: "^11.0.0",
     "vscode-jsonrpc": "^9.0.1",
@@ -25499,6 +25727,7 @@ var CodexAcpClient = class {
   pendingAccountUpdated = null;
   sessionNotificationQueues = /* @__PURE__ */ new Map();
   skillExtraRoots = [];
+  configPath = null;
   constructor(codexClient, codexConfig, modelProvider) {
     this.codexClient = codexClient;
     this.config = codexConfig ?? {};
@@ -25511,7 +25740,7 @@ var CodexAcpClient = class {
     version: `${package_default.version}`
   };
   async initialize(request) {
-    await this.codexClient.initialize({
+    const response = await this.codexClient.initialize({
       capabilities: {
         experimentalApi: true,
         requestAttestation: false
@@ -25522,6 +25751,10 @@ var CodexAcpClient = class {
         title: request.clientInfo?.title ?? this.defaultClientInfo.title
       }
     });
+    this.configPath = response?.codexHome ?? null;
+  }
+  getHomePath() {
+    return this.configPath;
   }
   async authenticate(authRequest) {
     if (!isCodexAuthRequest(authRequest)) {
@@ -25874,11 +26107,16 @@ var CodexAcpClient = class {
   }
   async getConfigMcpServerNames(projectPath) {
     const response = await this.codexClient.configRead({ includeLayers: true, cwd: projectPath });
-    const mcpServers = response?.config?.["mcp_servers"];
-    if (!mcpServers || typeof mcpServers !== "object" || Array.isArray(mcpServers)) {
+    const effectiveMcpServers = response?.config?.["mcp_servers"];
+    const configLayers = response?.layers ?? [];
+    const layerMcpServers = configLayers.map((layer) => {
+      return isJsonObject(layer.config) ? layer.config["mcp_servers"] : void 0;
+    });
+    const configuredMcpServers = [effectiveMcpServers, ...layerMcpServers].filter(isJsonObject);
+    if (configuredMcpServers.length === 0) {
       return /* @__PURE__ */ new Set();
     }
-    return new Set(Object.keys(mcpServers));
+    return new Set(configuredMcpServers.flatMap((server) => Object.keys(server)));
   }
   getModelProvider() {
     return this.gatewayConfig?.modelProvider ?? this.modelProvider;
@@ -26122,6 +26360,13 @@ var CodexAcpClient = class {
     await this.codexClient.turnInterrupt({
       threadId: params.threadId,
       turnId: params.turnId
+    });
+  }
+  async steerTurn(params) {
+    return await this.codexClient.turnSteer({
+      threadId: params.threadId,
+      expectedTurnId: params.turnId,
+      input: buildPromptItems(params.prompt)
     });
   }
   async fetchAvailableModels() {
@@ -26795,6 +27040,45 @@ var CodexCommands = class {
       return `${(count / 1e3).toFixed(1)}K`;
     }
     return count.toString();
+  }
+};
+var SteeringQueue = class {
+  constructor(handle) {
+    this.handle = handle;
+  }
+  handle;
+  pending = [];
+  processing = false;
+  enqueue(params) {
+    return new Promise((resolve, reject) => {
+      this.pending.push({ params, resolve, reject });
+      this.startConsumer();
+    });
+  }
+  /** No request is queued and the consumer is not running. */
+  get isIdle() {
+    return !this.processing && this.pending.length === 0;
+  }
+  startConsumer() {
+    if (this.processing) {
+      return;
+    }
+    this.processing = true;
+    void this.consume();
+  }
+  async consume() {
+    try {
+      while (this.pending.length > 0) {
+        const next = this.pending.shift();
+        try {
+          next.resolve(await this.handle(next.params));
+        } catch (error51) {
+          next.reject(error51);
+        }
+      }
+    } finally {
+      this.processing = false;
+    }
   }
 };
 function historyFallbackUpdateKey(update) {
@@ -27830,6 +28114,7 @@ var CodexAcpServer = class _CodexAcpServer {
   pendingMcpStartupSessions;
   pendingTurnStarts;
   activePrompts;
+  steeringQueues;
   closingSessions;
   sessionGenerations;
   sessionOpenGenerations;
@@ -27838,6 +28123,7 @@ var CodexAcpServer = class _CodexAcpServer {
     this.pendingMcpStartupSessions = /* @__PURE__ */ new Map();
     this.pendingTurnStarts = /* @__PURE__ */ new Map();
     this.activePrompts = /* @__PURE__ */ new Map();
+    this.steeringQueues = /* @__PURE__ */ new Map();
     this.closingSessions = /* @__PURE__ */ new Map();
     this.sessionGenerations = /* @__PURE__ */ new Map();
     this.sessionOpenGenerations = /* @__PURE__ */ new Map();
@@ -27894,7 +28180,12 @@ var CodexAcpServer = class _CodexAcpServer {
           sse: false
         }
       },
-      authMethods: getCodexAuthMethods(_params.clientCapabilities)
+      authMethods: getCodexAuthMethods(_params.clientCapabilities),
+      _meta: {
+        steering: {
+          supported: true
+        }
+      }
     };
   }
   async extMethod(method, params) {
@@ -27911,6 +28202,8 @@ var CodexAcpServer = class _CodexAcpServer {
       }
       case LEGACY_SET_SESSION_MODEL_METHOD:
         return await this.unstable_setSessionModel(this.parseLegacySetSessionModelParams(methodRequest.params));
+      case SESSION_STEERING_METHOD:
+        return await this.executeOrQueueSteeringRequest(this.parseSessionSteerParams(methodRequest.params));
       case GOAL_CONTROL_METHOD: {
         const sessionState = this.sessions.get(methodRequest.params.sessionId);
         if (!sessionState) {
@@ -27964,6 +28257,12 @@ var CodexAcpServer = class _CodexAcpServer {
       throw RequestError.internalError(`${e.message}
 
 You have been logged out. Please try again.`);
+    }
+    const configPath = this.codexAcpClient.getHomePath() ?? "global";
+    if (e.message.includes("load config")) {
+      throw RequestError.internalError(`${e.message}
+
+Check ${configPath} and project .codex directories, especially their config.toml files, or any CODEX_CONFIG override.`);
     }
   }
   beginSessionOpen(sessionId) {
@@ -28211,6 +28510,7 @@ You have been logged out. Please try again.`);
         this.pendingMcpStartupSessions.delete(params.sessionId);
         this.pendingTurnStarts.delete(params.sessionId);
         this.activePrompts.delete(params.sessionId);
+        this.steeringQueues.delete(params.sessionId);
       }
       this.endSessionCloseFence(params.sessionId);
     }
@@ -28429,6 +28729,199 @@ You have been logged out. Please try again.`);
     return {
       sessionId,
       modelId
+    };
+  }
+  /**
+   * Handles one incoming steering request, serialising it against any other
+   * steer already in flight for the same session.
+   *
+   * Every session gets its own {@link SteeringQueue}: the request is enqueued
+   * and awaited, so concurrent steers for one session run strictly one at a
+   * time, in arrival order, and can never race to inject into — or start —
+   * rival turns. Steers for different sessions use different queues and run
+   * concurrently. Once the queue drains to idle it is removed from the map,
+   * so no per-session entry leaks after the session goes quiet (the identity
+   * check guards against deleting a queue a later request has since reused).
+   *
+   * @param params The target session id and the prompt to steer with.
+   * @returns Whether the prompt joined the active turn ("injected"), started a
+   *     new one ("startedNewTurn"), or could not be applied ("failed"); see
+   *     {@link performSteeringRequest}.
+   */
+  async executeOrQueueSteeringRequest(params) {
+    const queue = this.getSteeringQueue(params.sessionId);
+    try {
+      return await queue.enqueue(params);
+    } catch (error51) {
+      if (error51 instanceof RequestError) {
+        throw error51;
+      }
+      logger.error(`Steering request for session ${params.sessionId} failed`, error51);
+      return { outcome: "failed" };
+    } finally {
+      if (queue.isIdle && this.steeringQueues.get(params.sessionId) === queue) {
+        this.steeringQueues.delete(params.sessionId);
+      }
+    }
+  }
+  /**
+   * Returns the steering queue for a session, creating and registering it on
+   * first use.
+   *
+   * @param sessionId The session whose steering queue is required.
+   * @returns The session's existing queue, or a freshly created one.
+   */
+  getSteeringQueue(sessionId) {
+    let queue = this.steeringQueues.get(sessionId);
+    if (!queue) {
+      queue = new SteeringQueue((params) => this.performSteeringRequest(params));
+      this.steeringQueues.set(sessionId, queue);
+    }
+    return queue;
+  }
+  /**
+   * Delivers a steering prompt to the session: injects it into the live turn
+   * when there is one, otherwise starts a new turn.
+   *
+   * @param params The target session id and the prompt to steer with.
+   * @returns "injected" when the prompt joined an existing turn, otherwise the
+   *     outcome of starting a new turn.
+   */
+  async performSteeringRequest(params) {
+    logger.log("Steering session requested", {
+      sessionId: params.sessionId,
+      prompt: params.prompt
+    });
+    const sessionState = this.getSessionState(params.sessionId);
+    this.assertSteerInputSupported(params, sessionState);
+    const turnId = await this.getSteerableTurnId(sessionState);
+    if (turnId) {
+      const injected = await this.injectSteerIntoActiveTurn(params, turnId, sessionState);
+      if (injected) {
+        logger.log("Steering session injected", { sessionId: params.sessionId, turnId });
+        return { outcome: "injected" };
+      }
+    }
+    return await this.startNewTurnFromSteering(params);
+  }
+  /**
+   * Rejects a steering prompt whose content the active model cannot accept
+   * (currently: image blocks on a text-only model).
+   */
+  assertSteerInputSupported(params, sessionState) {
+    const hasImage = params.prompt.some((block) => block.type === "image");
+    if (hasImage && !sessionState.supportedInputModalities.includes("image")) {
+      throw RequestError.invalidRequest("The current model does not support image input");
+    }
+  }
+  /**
+   * Attempts to inject the prompt into the given running turn.
+   *
+   * A failed injection is fatal only when the turn is still the session's
+   * current turn and Codex reported something other than "no active turn to
+   * steer". Otherwise the turn has already ended underneath us and the caller
+   * should start a new turn instead.
+   *
+   * @returns true when the prompt was injected; false when the caller should
+   *     fall back to starting a new turn.
+   */
+  async injectSteerIntoActiveTurn(params, turnId, sessionState) {
+    try {
+      await this.runWithProcessCheck(() => this.codexAcpClient.steerTurn({
+        threadId: params.sessionId,
+        turnId,
+        prompt: params.prompt
+      }));
+      return true;
+    } catch (err) {
+      await this.codexAcpClient.waitForSessionNotifications(params.sessionId);
+      const turnStillActive = sessionState.currentTurnId === turnId;
+      if (turnStillActive && !this.isNoActiveTurnToSteerError(err)) {
+        throw err;
+      }
+      return false;
+    }
+  }
+  /**
+   * Starts a new turn from a steering prompt when there is no live turn to
+   * inject into, and returns as soon as that turn is running.
+   *
+   * Waits for any previous prompt to drain first, then re-checks that the
+   * session is not closing — the await above is a window during which a close
+   * request can arrive.
+   *
+   * @param params The target session id and the prompt to steer with.
+   * @returns "startedNewTurn" once the turn is running; throws if the prompt
+   *     fails or is cancelled before the turn starts.
+   */
+  async startNewTurnFromSteering(params) {
+    const previousPrompt = this.activePrompts.get(params.sessionId);
+    await previousPrompt?.completion;
+    if (this.sessionIsClosing(params.sessionId)) {
+      throw RequestError.invalidRequest(`Session ${params.sessionId} is closing`);
+    }
+    return await new Promise((resolve, reject) => {
+      let turnStarted = false;
+      const promptDone = this.prompt(params, void 0, () => {
+        turnStarted = true;
+        logger.log("Steering session started a new turn", { sessionId: params.sessionId });
+        resolve({ outcome: "startedNewTurn" });
+      });
+      promptDone.then(
+        (response) => {
+          if (!turnStarted && response.stopReason === "cancelled") {
+            reject(RequestError.invalidRequest(`Session ${params.sessionId} was cancelled before the steering turn started`));
+          } else {
+            resolve({ outcome: "startedNewTurn" });
+          }
+        },
+        (error51) => {
+          if (turnStarted) {
+            logger.error(`Steering-started prompt for session ${params.sessionId} failed`, error51);
+          } else {
+            reject(error51);
+          }
+        }
+      );
+    });
+  }
+  isNoActiveTurnToSteerError(error51) {
+    const messages = error51 instanceof Error ? [error51.message] : [];
+    if (typeof error51 === "object" && error51 !== null && "data" in error51) {
+      const data = error51.data;
+      if (typeof data === "string") {
+        messages.push(data);
+      } else if (typeof data === "object" && data !== null && "details" in data) {
+        const details = data.details;
+        if (typeof details === "string") {
+          messages.push(details);
+        }
+      }
+    }
+    return messages.some((message) => message.toLowerCase().includes("no active turn to steer"));
+  }
+  async getSteerableTurnId(sessionState) {
+    if (this.sessionIsClosing(sessionState.sessionId)) {
+      return null;
+    }
+    if (sessionState.currentTurnId) {
+      return sessionState.currentTurnId;
+    }
+    const pendingTurnStart = this.pendingTurnStarts.get(sessionState.sessionId);
+    if (!pendingTurnStart) {
+      return null;
+    }
+    return await pendingTurnStart.promise;
+  }
+  parseSessionSteerParams(params) {
+    const sessionId = params["sessionId"];
+    const prompt = params["prompt"];
+    if (typeof sessionId !== "string" || !Array.isArray(prompt)) {
+      throw RequestError.invalidParams();
+    }
+    return {
+      sessionId,
+      prompt
     };
   }
   createSessionConfigOptions(sessionState) {
@@ -28719,7 +29212,7 @@ You have been logged out. Please try again.`);
       case "contextCompaction":
         return [createCompletedContextCompactionUpdate(item)];
       case "plan":
-        return [this.createPlanUpdate(item)];
+        return [this.createPlanMessageUpdate(item)];
     }
   }
   createUserMessageUpdates(item) {
@@ -28760,15 +29253,12 @@ You have been logged out. Please try again.`);
       }
     };
   }
-  createPlanUpdate(item) {
-    return {
-      sessionUpdate: "agent_message_chunk",
-      content: {
-        type: "text",
-        text: `Plan:
-${item.text}`
-      }
-    };
+  createPlanMessageUpdate(item) {
+    return createAgentTextMessageChunk(
+      item.text,
+      item.id,
+      createCodexMessagePhaseMeta("final_answer")
+    );
   }
   userInputToContentBlocks(input) {
     switch (input.type) {
@@ -29038,7 +29528,7 @@ ${item.text}`
     }
     return turnId;
   }
-  async prompt(params, signal) {
+  async prompt(params, signal, onTurnStarted) {
     logger.log("Prompt received", {
       sessionId: params.sessionId,
       prompt: params.prompt
@@ -29090,6 +29580,7 @@ ${item.text}`
           }
           sessionState.currentTurnId = turnId;
           pendingTurnStart?.resolve(turnId);
+          onTurnStarted?.();
         },
         setConfigOption: async (configId, value) => {
           await this.applySessionConfigOption(sessionState, {
@@ -29173,6 +29664,7 @@ ${item.text}`
             }
             sessionState.currentTurnId = turnId;
             pendingTurnStart?.resolve(turnId);
+            onTurnStarted?.();
           },
           () => this.promptShouldStop(params.sessionId, activePrompt)
         )
@@ -29697,6 +30189,9 @@ var CodexAppServerClient = class {
   }
   async turnInterrupt(params) {
     return await this.sendRequest({ method: "turn/interrupt", params });
+  }
+  async turnSteer(params) {
+    return await this.sendRequest({ method: "turn/steer", params });
   }
   async reviewStart(params) {
     return await this.sendRequest({ method: "review/start", params });
@@ -30263,6 +30758,10 @@ var legacySetSessionModelParamsParser = external_exports.object({
   sessionId: external_exports.string(),
   modelId: external_exports.string()
 }).passthrough();
+var sessionSteerParamsParser = external_exports.object({
+  sessionId: external_exports.string(),
+  prompt: external_exports.array(external_exports.any())
+}).passthrough();
 var goalControlParamsParser = external_exports.object({
   sessionId: external_exports.string(),
   action: external_exports.enum(["pause", "clear"])
@@ -30339,5 +30838,5 @@ function startAcpServer() {
         codexAcpServer = null;
       }
     });
-  }).onRequest(methods.agent.initialize, (ctx) => getAgent().initialize(ctx.params)).onRequest(methods.agent.session.new, (ctx) => getAgent().newSession(ctx.params)).onRequest(methods.agent.session.load, (ctx) => getAgent().loadSession(ctx.params)).onRequest(methods.agent.session.list, (ctx) => getAgent().listSessions(ctx.params)).onRequest(methods.agent.session.delete, (ctx) => getAgent().deleteSession(ctx.params)).onRequest(methods.agent.session.resume, (ctx) => getAgent().resumeSession(ctx.params)).onRequest(methods.agent.session.close, (ctx) => getAgent().closeSession(ctx.params)).onRequest(methods.agent.session.setMode, (ctx) => getAgent().setSessionMode(ctx.params)).onRequest(methods.agent.session.setConfigOption, (ctx) => getAgent().setSessionConfigOption(ctx.params)).onRequest(methods.agent.authenticate, (ctx) => getAgent().authenticate(ctx.params)).onRequest(methods.agent.logout, (ctx) => getAgent().logout(ctx.params)).onRequest(methods.agent.providers.list, (ctx) => getAgent().listProviders(ctx.params)).onRequest(methods.agent.providers.set, (ctx) => getAgent().setProvider(ctx.params)).onRequest(methods.agent.providers.disable, (ctx) => getAgent().disableProvider(ctx.params)).onRequest(methods.agent.session.prompt, (ctx) => getAgent().prompt(ctx.params, ctx.signal)).onNotification(methods.agent.session.cancel, (ctx) => getAgent().cancel(ctx.params)).onRequest("authentication/status", emptyExtensionParamsParser, (ctx) => getAgent().extMethod("authentication/status", ctx.params)).onRequest("authentication/logout", emptyExtensionParamsParser, (ctx) => getAgent().extMethod("authentication/logout", ctx.params)).onRequest(LEGACY_SET_SESSION_MODEL_METHOD, legacySetSessionModelParamsParser, (ctx) => getAgent().extMethod(LEGACY_SET_SESSION_MODEL_METHOD, ctx.params)).onRequest(GOAL_CONTROL_METHOD, goalControlParamsParser, (ctx) => getAgent().extMethod(GOAL_CONTROL_METHOD, ctx.params)).connect(acpJsonStream);
+  }).onRequest(methods.agent.initialize, (ctx) => getAgent().initialize(ctx.params)).onRequest(methods.agent.session.new, (ctx) => getAgent().newSession(ctx.params)).onRequest(methods.agent.session.load, (ctx) => getAgent().loadSession(ctx.params)).onRequest(methods.agent.session.list, (ctx) => getAgent().listSessions(ctx.params)).onRequest(methods.agent.session.delete, (ctx) => getAgent().deleteSession(ctx.params)).onRequest(methods.agent.session.resume, (ctx) => getAgent().resumeSession(ctx.params)).onRequest(methods.agent.session.close, (ctx) => getAgent().closeSession(ctx.params)).onRequest(methods.agent.session.setMode, (ctx) => getAgent().setSessionMode(ctx.params)).onRequest(methods.agent.session.setConfigOption, (ctx) => getAgent().setSessionConfigOption(ctx.params)).onRequest(methods.agent.authenticate, (ctx) => getAgent().authenticate(ctx.params)).onRequest(methods.agent.logout, (ctx) => getAgent().logout(ctx.params)).onRequest(methods.agent.providers.list, (ctx) => getAgent().listProviders(ctx.params)).onRequest(methods.agent.providers.set, (ctx) => getAgent().setProvider(ctx.params)).onRequest(methods.agent.providers.disable, (ctx) => getAgent().disableProvider(ctx.params)).onRequest(methods.agent.session.prompt, (ctx) => getAgent().prompt(ctx.params, ctx.signal)).onNotification(methods.agent.session.cancel, (ctx) => getAgent().cancel(ctx.params)).onRequest("authentication/status", emptyExtensionParamsParser, (ctx) => getAgent().extMethod("authentication/status", ctx.params)).onRequest("authentication/logout", emptyExtensionParamsParser, (ctx) => getAgent().extMethod("authentication/logout", ctx.params)).onRequest(LEGACY_SET_SESSION_MODEL_METHOD, legacySetSessionModelParamsParser, (ctx) => getAgent().extMethod(LEGACY_SET_SESSION_MODEL_METHOD, ctx.params)).onRequest(SESSION_STEERING_METHOD, sessionSteerParamsParser, (ctx) => getAgent().extMethod(SESSION_STEERING_METHOD, ctx.params)).onRequest(GOAL_CONTROL_METHOD, goalControlParamsParser, (ctx) => getAgent().extMethod(GOAL_CONTROL_METHOD, ctx.params)).connect(acpJsonStream);
 }

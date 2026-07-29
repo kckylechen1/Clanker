@@ -184,6 +184,25 @@ function requireGeminiWorkspaceSandbox(): void {
  * which the acp-client.ts PATH-prepend comment already flags as sometimes
  * minimal. Resolving the absolute path here, in the same process that
  * builds the spawn spec, removes that indirection.
+ *
+ * Which `codex` this actually finds differs by context, and that
+ * difference is load-bearing (#39): an *installed plugin* ships only its
+ * bundled `codex-acp.mjs` sidecar, no repo `node_modules/`, so this walk
+ * lands on the operator's real PATH entry (the system-installed `codex`,
+ * kept current independently of this repo). Running from source under
+ * `npm run <script>` / `npx` is different — npm prepends the repo's own
+ * `node_modules/.bin` to PATH for the child process, and `npm install`
+ * hoists `@openai/codex` (codex-acp's pinned transitive dependency) into
+ * `node_modules/.bin/codex`, which then shadows the real system binary
+ * for exactly this search. So the pinned in-repo `@openai/codex` version
+ * (see package.json's `@agentclientprotocol/codex-acp` pin) only matters
+ * for `npm run smoke` / `npm test` and other source-tree runs, not for an
+ * installed plugin in production — verified 2026-07-29 by comparing the
+ * codex-acp app-server log's reported `codexPath` between a plain `node`
+ * probe (resolved the host PATH binary) and `npm run smoke -- codex`
+ * (resolved `<repo>/node_modules/.bin/codex` instead). A stale in-repo pin
+ * therefore fails smoke/tests while production keeps working, which is
+ * exactly the false-negative/false-positive split #39 hit.
  */
 function resolveSystemCodexPath(): string {
   const searchPath = process.env.PATH ?? "";
