@@ -32924,16 +32924,14 @@ async function waitForDeath(pid, budgetMs) {
 function signalGroup(pid, signal) {
   try {
     process.kill(-pid, signal);
-    return { sent: `${signal}\u2192group ${pid}`, groupWide: true };
+    return { sent: `${signal}\u2192group ${pid}` };
   } catch (error40) {
     const code = error40.code;
-    if (!alive(pid)) return { sent: null, reason: `group ${pid} was already gone (${code ?? "error"})` };
-    try {
-      process.kill(pid, signal);
-      return { sent: `${signal}\u2192pid ${pid} (not a group leader)`, groupWide: false };
-    } catch (inner) {
-      return { sent: null, reason: `neither group nor pid ${pid} could be signalled (${inner.code})` };
-    }
+    return {
+      sent: null,
+      code,
+      reason: code === "ESRCH" ? `process group ${pid} no longer exists (ESRCH)` : `process group ${pid} could not be signalled (${code ?? "unknown error"})`
+    };
   }
 }
 async function killAdoptedWorker(opts) {
@@ -32970,16 +32968,26 @@ async function killAdoptedWorker(opts) {
   }
   const signals = [];
   const term = signalGroup(workerPid, "SIGTERM");
-  const bareOnly = term.sent !== null && !term.groupWide;
-  if (term.sent) signals.push(term.sent);
+  if (term.sent === null) {
+    const groupGone = term.code === "ESRCH";
+    return {
+      killed: false,
+      identity_verified: true,
+      worker_gone: groupGone,
+      signals,
+      identity,
+      note: groupGone ? `no signal sent: ${term.reason} \u2014 the worker died between the identity check and the signal, so the record is archived and nothing else is signalled (a pid whose group is gone is not this run's worker)` : `no signal sent: ${term.reason}`
+    };
+  }
+  signals.push(term.sent);
   if (await waitForDeath(workerPid, graceMs)) {
     return {
-      killed: signals.length > 0,
+      killed: true,
       identity_verified: true,
       worker_gone: true,
       signals,
       identity,
-      note: signals.length ? `worker group ${workerPid} exited on SIGTERM` + (bareOnly ? " (bare pid \u2014 worker led no group, so descendants may survive)" : "") : `worker ${workerPid} vanished before any signal landed`
+      note: `worker group ${workerPid} exited on SIGTERM`
     };
   }
   const recheck = verifyWorkerIdentity(workerPid, workerStartedAt, lane);
@@ -33011,20 +33019,31 @@ function archiveAdoptedRun(input) {
   const nowIso = new Date(input.now ?? Date.now()).toISOString();
   const problems = [];
   const explanation = `run '${id}' was adopted and cancelled by Clanker server pid ${adopterPid} at ${nowIso}: its own server (pid ${ownerPid ?? "unknown"}) was gone, so this process took over. worker_pid ${workerPid ?? "none"}; identity_verified=${outcome.identity_verified}; signals=[${outcome.signals.join(", ") || "none"}]; ${outcome.note}`;
-  let telemetryWritten = false;
   const telemetryPath = path7.join(runDir, "telemetry.json");
+  let record2 = {};
+  let recordUnreadable = false;
   try {
-    let record2 = {};
-    try {
-      record2 = JSON.parse(fs7.readFileSync(telemetryPath, "utf8"));
-    } catch {
-      record2 = { id };
-      problems.push("existing telemetry.json was unreadable; wrote a minimal terminal record over it");
-    }
-    if (!record2.terminal_at) {
-      record2.terminal_at = nowIso;
-      record2.terminal_reason = ADOPTED_TERMINAL_REASON;
-    }
+    record2 = JSON.parse(fs7.readFileSync(telemetryPath, "utf8"));
+  } catch {
+    record2 = { id };
+    recordUnreadable = true;
+  }
+  if (record2.terminal_at) {
+    return {
+      archived: false,
+      reason: `owner wrote terminal first (terminal_at=${String(record2.terminal_at)}, terminal_reason=${String(record2.terminal_reason ?? "unknown")}) \u2014 nothing in ${runDir} was modified, because a terminal record means the owner's own account of this run is already on disk`,
+      telemetry_written: false,
+      result_stub_written: false,
+      problems: []
+    };
+  }
+  if (recordUnreadable) {
+    problems.push("existing telemetry.json was unreadable; wrote a minimal terminal record over it");
+  }
+  let telemetryWritten = false;
+  try {
+    record2.terminal_at = nowIso;
+    record2.terminal_reason = ADOPTED_TERMINAL_REASON;
     record2.error = record2.error ? `${String(record2.error)}
 ${explanation}` : explanation;
     const tmp = `${telemetryPath}.${process.pid}.tmp`;
@@ -33067,14 +33086,32 @@ ${explanation}` : explanation;
   } catch (error40) {
     problems.push(`result stub write failed: ${error40 instanceof Error ? error40.message : String(error40)}`);
   }
-  return { telemetry_written: telemetryWritten, result_stub_written: resultStubWritten, problems };
+  return {
+    archived: telemetryWritten,
+    ...telemetryWritten ? {} : { reason: "the terminal record could not be written; the run stays on the in-flight board" },
+    telemetry_written: telemetryWritten,
+    result_stub_written: resultStubWritten,
+    problems
+  };
 }
 
 // src/foreign.ts
 import fs8 from "node:fs";
 import path8 from "node:path";
+var RUN_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)+$/i;
+function isValidRunId(id) {
+  return typeof id === "string" && id.length <= 128 && RUN_ID_PATTERN.test(id);
+}
+function containedRunDir(runsRoot, id) {
+  const root = path8.resolve(runsRoot);
+  const runDir = path8.resolve(root, id);
+  if (runDir === root || !runDir.startsWith(root + path8.sep)) return null;
+  return runDir;
+}
 function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
-  const runDir = path8.join(runsRoot, id);
+  if (!isValidRunId(id)) return null;
+  const runDir = containedRunDir(runsRoot, id);
+  if (runDir === null) return null;
   let telemetry;
   try {
     telemetry = JSON.parse(fs8.readFileSync(path8.join(runDir, "telemetry.json"), "utf8"));
@@ -33213,8 +33250,8 @@ var SPAWN_FAILURE_PATTERNS = [
 function classifyBackendFailure(message) {
   if (SPAWN_FAILURE_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   if (BACKEND_BILLING_PATTERNS.some((re) => re.test(message))) return BACKEND_BILLING_TAG;
-  if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;
   if (BACKEND_MODEL_PATTERNS.some((re) => re.test(message))) return BACKEND_MODEL_TAG;
+  if (BACKEND_AUTH_PATTERNS.some((re) => re.test(message))) return BACKEND_AUTH_TAG;
   if (ENV_DRIFT_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   return void 0;
 }
@@ -34583,9 +34620,20 @@ ${grokDetail}` : "";
    * second case rendered as the first is how one contract ends up with two
    * live workers both opening PRs. Disk knows the difference; ask it.
    *
+   * A THIRD kind of absent joined those two with the traversal fix
+   * (foreign.ts isValidRunId): an id that could never name a run at all. It
+   * gets its own sentence, because "no record of it on disk" would be a lie of
+   * the same family — it says a lookup happened and came back empty, when in
+   * fact nothing was looked up and nothing outside the runs root was touched.
+   *
    * Never returns.
    */
   throwUnknownRun(id) {
+    if (!isValidRunId(id)) {
+      throw new Error(
+        `run id '${String(id).slice(0, 80)}' is MALFORMED \u2014 a Clanker run id is '<lane>-<suffix>' (e.g. 'codex-1a2b3c'), and this one is not, so no lookup was performed at all. Nothing was read from ${this.runsRoot}, and nothing outside it was read, written or signalled. This is not the same answer as "no such run": a run that exists cannot have this id.`
+      );
+    }
     const foreign = readForeignRun(id, this.runsRoot);
     if (foreign) throw new Error(foreignControlRefusal(id, foreign));
     throw new Error(
@@ -34708,10 +34756,14 @@ ${grokDetail}` : "";
    *     while its observed start time still matches the recorded one.
    *  3. GROUP KILL with a RE-CHECK between TERM and KILL, because the grace
    *     window is exactly when the pid becomes reusable.
-   *  4. ARCHIVE — unconditional, and the step whose absence would make the
-   *     other three counterproductive: a killed orphan whose telemetry still
-   *     reads `terminal_at: null` haunts the orphan board forever, so the
-   *     record is closed even when nothing was signalled at all.
+   *  4. ARCHIVE — the step whose absence would make the other three
+   *     counterproductive: a killed orphan whose telemetry still reads
+   *     `terminal_at: null` haunts the orphan board forever, so the record is
+   *     closed even when nothing was signalled at all. It has exactly ONE
+   *     exception, and it is not "the kill failed": a record that is ALREADY
+   *     terminal is left untouched (`archived: false`), because that record is
+   *     the owner's own account of the run and this process has nothing truer
+   *     to say about it (adopt.ts archiveAdoptedRun).
    */
   async cancelForeign(id) {
     const foreign = readForeignRun(id, this.runsRoot);
@@ -34736,7 +34788,7 @@ ${grokDetail}` : "";
     const note = [
       `${owner.detail}, so this process (pid ${process.pid}) adopted the run`,
       outcome.note,
-      archive.result_stub_written ? "wrote a result.md stub" : "left the existing result.md in place",
+      archive.archived ? archive.result_stub_written ? "wrote a result.md stub" : "left the existing result.md in place" : `record NOT archived: ${archive.reason ?? "no reason given"}`,
       ...archive.problems
     ].join("; ");
     return {
@@ -34747,6 +34799,8 @@ ${grokDetail}` : "";
       worker_pid: foreign.worker_pid,
       killed: outcome.killed,
       identity_verified: outcome.identity_verified,
+      archived: archive.archived,
+      ...archive.archived ? {} : { archive_reason: archive.reason },
       run_dir: foreign.run_dir,
       ...after.result_path ? { result_path: after.result_path } : {},
       note
