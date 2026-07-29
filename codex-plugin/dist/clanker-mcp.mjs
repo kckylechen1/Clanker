@@ -28301,6 +28301,64 @@ var SECRET_PATTERN = /(api[_-]?key|token|secret|authorization|bearer)(\s*[=:]\s*
 function redact(text) {
   return text.replace(SECRET_PATTERN, (_match, key, sep) => `${key}${sep}[REDACTED]`);
 }
+var PUBLIC_SECRET_RULES = [
+  // Known credential prefixes, matched on shape alone: GitHub (`ghp_`/`gho_`/
+  // `ghu_`/`ghs_`/`ghr_`), OpenAI-style (`sk-`, which also covers `sk-ant-`,
+  // `sk-live-`, `sk-proj-`), Slack, GitLab, npm, AWS access-key ids, Google.
+  { re: /\bgh[pousr]_[A-Za-z0-9]{20,}/g, replace: "[REDACTED]" },
+  { re: /\bsk-[A-Za-z0-9_-]{16,}/g, replace: "[REDACTED]" },
+  { re: /\bxox[abprs]-[A-Za-z0-9-]{10,}/g, replace: "[REDACTED]" },
+  { re: /\bglpat-[A-Za-z0-9_-]{16,}/g, replace: "[REDACTED]" },
+  { re: /\bnpm_[A-Za-z0-9]{20,}/g, replace: "[REDACTED]" },
+  { re: /\bAKIA[0-9A-Z]{12,}/g, replace: "[REDACTED]" },
+  { re: /\bAIza[A-Za-z0-9_-]{20,}/g, replace: "[REDACTED]" },
+  // JWTs. `eyJ` is base64 of `{"`, so this is the one URL-safe-base64 shape
+  // worth naming: the long-run rule below treats `-`/`_` as boundaries (see
+  // there for why), which is exactly the alphabet a JWT is written in.
+  { re: /\beyJ[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]+){0,2}/g, replace: "[REDACTED]" },
+  // `Authorization: Bearer <token>` / `token <token>`. `redact()` already blanks
+  // the value after a COLON, which on this header leaves the scheme word behind
+  // and the token itself untouched ("Authorization: [REDACTED] ghp_…"); this
+  // rule takes the value that follows the scheme instead. Gated on a digit and
+  // 12+ characters so ordinary prose about tokens ("the token is staged in a
+  // file") is not shredded — a real credential essentially always carries one.
+  { re: /\b(bearer|token)(\s+)(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{12,}/gi, replace: "$1$2[REDACTED]" },
+  // URL userinfo: `https://user:pass@host` and the token-as-username form
+  // `https://ghp_xxx@host`. The password half is always a credential; a lone
+  // userinfo in a machine-generated URL is one too.
+  { re: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^\s/@:]+):[^\s/@]+@/g, replace: "$1$2:[REDACTED]@" },
+  { re: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/@:]{8,}@/g, replace: "$1[REDACTED]@" }
+];
+var PUBLIC_HEX_BLOB = /\b[0-9a-fA-F]{32,}\b/g;
+var PUBLIC_TIGHT_BLOB = /[A-Za-z0-9+]{20,}={0,2}/g;
+var PUBLIC_LOOSE_BLOB = /[A-Za-z0-9+/_-]{32,}/g;
+var GIT_SHA = /^[0-9a-f]{40}$/;
+function longestSameCaseRun(text) {
+  let best = 0;
+  let current = 0;
+  let kind = "";
+  for (const ch of text) {
+    const k = ch >= "a" && ch <= "z" ? "l" : ch >= "A" && ch <= "Z" ? "u" : "";
+    if (k !== "" && k === kind) current += 1;
+    else current = k === "" ? 0 : 1;
+    kind = k;
+    if (current > best) best = current;
+  }
+  return best;
+}
+function looksRandom(span, requireDigitOrNoWord) {
+  if (GIT_SHA.test(span)) return false;
+  if (new Set(span).size < 8) return false;
+  if (longestSameCaseRun(span) < 6) return true;
+  return requireDigitOrNoWord ? /\d/.test(span) : false;
+}
+function redactForPublic(text) {
+  let out = redact(text);
+  for (const { re, replace } of PUBLIC_SECRET_RULES) out = out.replace(re, replace);
+  out = out.replace(PUBLIC_HEX_BLOB, (m) => GIT_SHA.test(m) ? m : "[REDACTED]");
+  out = out.replace(PUBLIC_LOOSE_BLOB, (m) => looksRandom(m, false) ? "[REDACTED]" : m);
+  return out.replace(PUBLIC_TIGHT_BLOB, (m) => looksRandom(m, true) ? "[REDACTED]" : m);
+}
 function stderrSuffix(stderr) {
   const cleaned = redact(stderr).trim();
   return cleaned ? `; stderr: ${cleaned.slice(-400)}` : "";
@@ -28325,7 +28383,7 @@ function buildIssueCommentBody(facts) {
   const source = facts.finalMessage.trim();
   const usingError = source === "" && !!facts.error?.trim();
   const rawVerdict = usingError ? facts.error.trim() : source;
-  const cleaned = redact(rawVerdict);
+  const cleaned = redactForPublic(rawVerdict);
   const redacted = cleaned !== rawVerdict;
   const truncated = cleaned.length > ISSUE_COMMENT_VERDICT_BUDGET;
   const head = truncated ? cleaned.slice(0, ISSUE_COMMENT_VERDICT_BUDGET) : cleaned;
@@ -28338,12 +28396,16 @@ function buildIssueCommentBody(facts) {
     facts.retries ? `${facts.retries} retry` : void 0,
     facts.corrections ? `${facts.corrections} correction${facts.corrections === 1 ? "" : "s"}` : void 0
   ].filter(Boolean);
+  const verdict = head || "(the worker produced no final message)";
+  const fence = fenceFor(verdict);
   const lines = [
     `\u{1F916} clanker \`${facts.runId}\` \u2014 ${facts.status} \xB7 turn ${facts.turn}`,
     metrics.join(" \xB7 "),
     "",
     ...usingError ? ["error:"] : [],
-    head || "(the worker produced no final message)",
+    fence,
+    verdict,
+    fence,
     ""
   ];
   if (truncated) {
@@ -28373,9 +28435,18 @@ function assertCommentOnlyArgs(args) {
   }
   if (!/^\d+$/.test(args[2] ?? "")) refuse("the issue argument must be a bare number");
   const allowed = /* @__PURE__ */ new Set(["--repo", "--body-file"]);
+  const seen = /* @__PURE__ */ new Set();
   for (let i = 3; i < args.length; i += 2) {
-    if (!allowed.has(args[i])) refuse(`unexpected flag '${args[i]}' (allowed: ${[...allowed].join(", ")})`);
-    if (i + 1 >= args.length) refuse(`flag '${args[i]}' has no value`);
+    const flag = args[i];
+    if (!allowed.has(flag)) refuse(`unexpected flag '${flag}' (allowed: ${[...allowed].join(", ")})`);
+    if (seen.has(flag)) refuse(`flag '${flag}' given twice; \`gh\` would honour the last one`);
+    seen.add(flag);
+    if (i + 1 >= args.length) refuse(`flag '${flag}' has no value`);
+    const value = args[i + 1];
+    if (value === "" || value.startsWith("-")) refuse(`flag '${flag}' has a flag-shaped value '${value}'`);
+  }
+  if (!seen.has("--body-file")) {
+    refuse("the body must travel as `--body-file <path>`; a comment with no body file is not a comment");
   }
 }
 var execFileGhRunner = (args, opts) => new Promise((resolve, reject) => {
@@ -28410,15 +28481,15 @@ async function postIssueComment(input, deps = {}) {
     return { ok: false, error: reason };
   };
   let scratch;
-  let bodyFile;
   try {
-    scratch = fs4.mkdtempSync(path4.join(os4.tmpdir(), "clanker-issue-comment-"));
-    bodyFile = path4.join(scratch, "body.md");
-    fs4.writeFileSync(bodyFile, body);
-  } catch (error40) {
-    return fail2(`could not stage the comment body: ${errMessage(error40)}`);
-  }
-  try {
+    let bodyFile;
+    try {
+      scratch = fs4.mkdtempSync(path4.join(os4.tmpdir(), "clanker-issue-comment-"));
+      bodyFile = path4.join(scratch, "body.md");
+      fs4.writeFileSync(bodyFile, body);
+    } catch (error40) {
+      return fail2(`could not stage the comment body: ${errMessage(error40)}`);
+    }
     let args;
     try {
       args = issueCommentArgs(input.ref, bodyFile);
@@ -28444,11 +28515,18 @@ async function postIssueComment(input, deps = {}) {
     }
     return { ok: true, body };
   } finally {
-    try {
-      fs4.rmSync(scratch, { recursive: true, force: true });
-    } catch {
+    if (scratch !== void 0) {
+      try {
+        fs4.rmSync(scratch, { recursive: true, force: true });
+      } catch {
+      }
     }
   }
+}
+function fenceFor(text) {
+  let longest = 0;
+  for (const run of text.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
+  return "`".repeat(Math.max(3, longest + 1));
 }
 function describeRef(ref) {
   return ref.repo ? `${ref.repo}#${ref.number}` : `#${ref.number}`;
@@ -28707,6 +28785,13 @@ var LaneRun = class {
    * account was kept", never as "we tried and said nothing about it".
    */
   issueCommentError;
+  /**
+   * This turn's comment is out with `gh` and has not answered (#27, telemetry
+   * `issue_comment_pending`). Raised at the terminal flip — SYNCHRONOUSLY, in
+   * `markTerminal`, so the first waiter to wake sees it in the same tick the
+   * status changed — and lowered when the post settles either way.
+   */
+  issueCommentPending = false;
   /** Live worker identity (#32): pid — which is also its pgid — and the ms epoch it was spawned. */
   workerPid;
   workerStartedAt;
@@ -29196,13 +29281,24 @@ var LaneRun = class {
       stop_reason: this.stopReason,
       ...this.terminalAt ? { terminal_reason: this.turnStatus } : {},
       ...this.issueCommentError !== void 0 ? { issue_comment_error: this.issueCommentError } : {},
+      ...this.issueCommentPending ? { issue_comment_pending: true } : {},
       prompt_usage: this.promptUsage,
       session_usage: this.sessionUsage
     };
   }
+  /**
+   * The terminal flip, and the one place the #27 comment's "in flight" mark is
+   * raised. It belongs HERE rather than at the top of `postIssueCommentForTurn`
+   * because this is the statement that makes `isTerminalTurn()` true: a waiter
+   * woken by that flip must find the mark already set, and putting it in the
+   * async method would make that guarantee depend on nothing awaiting in
+   * between — a property the next edit to any of the three terminal methods
+   * could silently take away.
+   */
   markTerminal(reason) {
     this.terminalAt = Date.now();
     this.stopReason ??= reason;
+    if (this.issueRef) this.issueCommentPending = true;
     this.persistTelemetry();
   }
   /**
@@ -29345,7 +29441,10 @@ var LaneRun = class {
    * loud on stderr (inside postIssueComment) and durable in telemetry.
    */
   async postIssueCommentForTurn() {
-    if (!this.issueRef) return;
+    if (!this.issueRef) {
+      this.issueCommentPending = false;
+      return;
+    }
     const telemetry = this.telemetry();
     const outcome = await postIssueComment(
       {
@@ -29374,6 +29473,7 @@ var LaneRun = class {
       { run: this.ghRunner }
     );
     this.issueCommentError = outcome.ok ? void 0 : `${describeRef(this.issueRef)}: ${outcome.error}`;
+    this.issueCommentPending = false;
     this.persistTelemetry();
   }
   writeLedgerRowOnce() {
