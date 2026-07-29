@@ -754,6 +754,46 @@ test("foreign wait, owner dead: polls the disk and says that is what it did", as
   }
 });
 
+test("#27: a degraded wait hands over the issue-comment account, not just the verdict path", async () => {
+  // Second cold review: `foreign.ts` did not project the #27 fields at all, so
+  // the disk-poll payload — the only thing a dispatcher can get once the owning
+  // server is gone — was silent about whether the account was ever kept.
+  const root = makeRunsRoot();
+  const owner = spawnIdle();
+  writeRun(root, "codex-postfailed", {
+    lane: "codex", terminal_at: new Date().toISOString(), terminal_reason: "done",
+    server_pid: owner.pid, issue_comment_error: "#27: `gh` exited 4: HTTP 403",
+  });
+  writeRun(root, "codex-diedmidpost", {
+    lane: "codex", terminal_at: new Date().toISOString(), terminal_reason: "done",
+    server_pid: owner.pid, issue_comment_pending: true,
+  });
+  writeRun(root, "codex-noticket", {
+    lane: "codex", terminal_at: new Date().toISOString(), terminal_reason: "done", server_pid: owner.pid,
+  });
+  await killAndReap(owner);
+  const m = manager(root);
+  try {
+    const failed = await m.wait("codex-postfailed", 200);
+    assert.equal(failed.degraded, "disk-poll");
+    assert.match(failed.issue_comment_error!, /`gh` exited 4/, "the failure crosses the grave");
+    assert.equal(failed.issue_comment_pending, undefined);
+    assert.match(failed.degraded_note!, /issue-comment account/, "and the note says where it came from");
+
+    // Owner died mid-post: terminal on disk, comment never settled. Nobody will
+    // ever finish it, and saying so is more use than an absent field.
+    const stuck = await m.wait("codex-diedmidpost", 200);
+    assert.equal(stuck.issue_comment_pending, true);
+    assert.equal(stuck.issue_comment_error, undefined);
+
+    const none = await m.wait("codex-noticket", 200);
+    assert.equal(none.issue_comment_pending, undefined, "no ticket named, no fields — absence stays unambiguous");
+    assert.equal(none.issue_comment_error, undefined);
+  } finally {
+    await m.shutdown();
+  }
+});
+
 test("foreign wait that times out reports the run as still running, without inventing progress", async () => {
   const root = makeRunsRoot();
   const owner = spawnIdle();

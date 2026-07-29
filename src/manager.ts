@@ -333,6 +333,16 @@ export interface WaitResult {
   degraded_note?: string;
   /** Degraded path only: the model that actually ran, straight off telemetry.json. */
   observed_model?: string | null;
+  /**
+   * Degraded path only: the #27 comment account, straight off telemetry.json.
+   *
+   * Lifted to the top level exactly as `observed_model` is, and for the same
+   * reason — a foreign record cannot be typechecked into a whole `RunTelemetry`,
+   * so the degraded reader gets the individual facts that survive on disk. A
+   * local wait carries these two inside `telemetry` instead.
+   */
+  issue_comment_error?: string;
+  issue_comment_pending?: boolean;
 }
 
 /**
@@ -914,9 +924,16 @@ export class LaneManager {
       degraded_note:
         `${ownerDetail}, so this wait polled ${foreign.run_dir} instead of an event stream. There is NO digest, ` +
         "no plan and no final_message for this run: those live in the process that spawned it and are not on " +
-        "disk. status/terminal state, the verdict file and observed_model below come straight from " +
-        "telemetry.json; nothing here is inferred.",
+        "disk. status/terminal state, the verdict file, observed_model and the issue-comment account below come " +
+        "straight from telemetry.json; nothing here is inferred.",
       observed_model: foreign.observed_model,
+      // The #27 account survives its owner because it lives in telemetry.json.
+      // `issue_comment_pending` on a run whose owner is dead means the post
+      // will never resolve — the honest reading is "go look at the ticket",
+      // which is precisely what a dispatcher needs and could not previously
+      // see from this path at all.
+      ...(foreign.issue_comment_error !== null ? { issue_comment_error: foreign.issue_comment_error } : {}),
+      ...(foreign.issue_comment_pending ? { issue_comment_pending: true } : {}),
     };
     if (foreign.result_path) {
       result.result_path = foreign.result_path;

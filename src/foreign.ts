@@ -63,6 +63,20 @@ export interface ForeignRun {
   server_pid: number | null;
   worker_pid: number | null;
   worker_started_at: number | null;
+  /**
+   * The #27 issue-comment account, as the dead owner left it on disk.
+   *
+   * Projected here for the same reason the feature exists at all: a dispatcher
+   * asks whether the verdict reached the ticket, and until now the ONE reader
+   * who cannot ask the owning process — the disk-poll reader — was also the one
+   * reader shown nothing about it. A run whose owner died between raising
+   * `issue_comment_pending` and settling it leaves a permanent `pending` on
+   * disk; that is not a gap needing more machinery but a legible state, since
+   * `terminal_at` is set and the comment never resolved, which reads as
+   * "nobody will ever finish this post — check the ticket yourself".
+   */
+  issue_comment_error: string | null;
+  issue_comment_pending: boolean;
   run_dir: string;
   /** Present only when the verdict file exists and is non-empty. */
   result_path?: string;
@@ -82,6 +96,8 @@ interface Telemetry {
   server_pid?: number;
   worker_pid?: number;
   worker_started_at?: number;
+  issue_comment_error?: string;
+  issue_comment_pending?: boolean;
 }
 
 /**
@@ -194,6 +210,8 @@ export function readForeignRun(id: string, runsRoot = RUNS_ROOT, now = Date.now(
     server_pid: typeof telemetry.server_pid === "number" ? telemetry.server_pid : null,
     worker_pid: typeof telemetry.worker_pid === "number" ? telemetry.worker_pid : null,
     worker_started_at: typeof telemetry.worker_started_at === "number" ? telemetry.worker_started_at : null,
+    issue_comment_error: typeof telemetry.issue_comment_error === "string" ? telemetry.issue_comment_error : null,
+    issue_comment_pending: telemetry.issue_comment_pending === true,
     run_dir: runDir,
     ...(resultPath ? { result_path: resultPath } : {}),
     last_activity_ms: newestMtimeMs > 0 ? Math.max(0, now - newestMtimeMs) : -1,

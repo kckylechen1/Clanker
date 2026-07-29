@@ -101,6 +101,38 @@ test("an empty result.md yields no result_path — absence must stay machine-che
   assert.equal(readForeignRun("codex-noresult", root, NOW)!.result_path, undefined);
 });
 
+test("#27: the issue-comment account survives its owner — the disk-poll reader can see it too", () => {
+  // The whole point of #27 is that a dispatcher can learn whether the verdict
+  // reached the ticket. The one reader who CANNOT ask the owning process was
+  // also, until now, the only reader shown nothing about it.
+  const root = makeRunsRoot();
+  writeRun(root, "codex-postfailed", {
+    lane: "codex", terminal_at: "y", terminal_reason: "done",
+    issue_comment_error: "#27: `gh` exited 4: HTTP 403",
+  });
+  const failed = readForeignRun("codex-postfailed", root, NOW)!;
+  assert.equal(failed.issue_comment_error, "#27: `gh` exited 4: HTTP 403");
+  assert.equal(failed.issue_comment_pending, false);
+
+  // An owner that died between raising the mark and settling it leaves a
+  // permanent `pending`. That is not a hole needing more machinery: paired with
+  // `terminal_at`, it reads as "this post will never resolve — check the
+  // ticket", which is exactly the truth and exactly what a dispatcher needs.
+  writeRun(root, "codex-diedmidpost", {
+    lane: "codex", terminal_at: "y", terminal_reason: "done", issue_comment_pending: true,
+  });
+  const stuck = readForeignRun("codex-diedmidpost", root, NOW)!;
+  assert.equal(stuck.issue_comment_pending, true);
+  assert.equal(stuck.issue_comment_error, null);
+  assert.ok(stuck.terminal_at, "terminal AND pending is the diagnosable pair");
+
+  // A run that owed no account says so by carrying neither.
+  writeRun(root, "codex-noticket", { lane: "codex", terminal_at: "y" });
+  const none = readForeignRun("codex-noticket", root, NOW)!;
+  assert.equal(none.issue_comment_error, null);
+  assert.equal(none.issue_comment_pending, false);
+});
+
 test("list() reports foreign runs as foreign, and never claims to know they are working", async () => {
   const root = makeRunsRoot();
   writeRun(root, "opencode-elsewhere", { lane: "opencode", host: "claude", terminal_at: null, turns: 3, observed_model: "glm-5.2" });
@@ -237,6 +269,27 @@ test("a traversing id reads NOTHING — the id is a path segment, not a path", (
     readForeignRun("codex-inside", root, NOW)?.run_dir,
     fs.realpathSync(path.join(root, "codex-inside")),
   );
+});
+
+test("mutant: a foreign record that drops the comment fields hides the account from the only reader left", async () => {
+  const mutant = await loadMutantModule<typeof import("../src/foreign.js")>(
+    "foreign-no-comment-projection",
+    [{
+      file: "foreign.ts",
+      find:
+        '    issue_comment_error: typeof telemetry.issue_comment_error === "string" ? telemetry.issue_comment_error : null,\n' +
+        "    issue_comment_pending: telemetry.issue_comment_pending === true,\n",
+      replace: "    issue_comment_error: null,\n    issue_comment_pending: false,\n",
+    }],
+    "foreign.ts",
+  );
+  const root = makeRunsRoot();
+  writeRun(root, "codex-postfailed", {
+    lane: "codex", terminal_at: "y", issue_comment_error: "#27: `gh` exited 4: HTTP 403", issue_comment_pending: true,
+  });
+  const run = mutant.readForeignRun("codex-postfailed", root, NOW)!;
+  assert.equal(run.issue_comment_error, null, "the mutant reads the file and throws the account away…");
+  assert.equal(run.issue_comment_pending, false, "…leaving the disk-poll reader exactly as blind as before");
 });
 
 test("isValidRunId accepts what manager.ts mints and refuses what moves the read", () => {
