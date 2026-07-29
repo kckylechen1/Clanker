@@ -37,6 +37,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { RUNS_ROOT } from "./constants.js";
+import { realpathBestEffort } from "./worktree.js";
 import { RESULT_FILE } from "./run.js";
 import type { RunStatus } from "./types.js";
 
@@ -106,7 +107,13 @@ interface Telemetry {
  * track of orphans. What is NOT tolerated is anything that can move the read:
  * a separator, a `.` segment, an empty segment, whitespace, a NUL.
  */
-const RUN_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)+$/i;
+// Lowercase only: `manager.ts` mints `${lane}-${counter36}${hex}` and every
+// lane name is lowercase, so `/i` admitted a shape the generator never
+// produces. On a case-insensitive volume that let `CODEX-1ABCD` miss the
+// in-memory map and then alias the lowercase directory on disk — two names
+// for one run, which is the ambiguity an id guard exists to remove
+// (round-2 review, codex-dcbfb).
+const RUN_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)+$/;
 
 /** True when `id` has the shape manager.ts mints. See RUN_ID_PATTERN for why the shape is a security guard. */
 export function isValidRunId(id: unknown): id is string {
@@ -124,8 +131,20 @@ export function isValidRunId(id: unknown): id is string {
  * Returns null when `id` resolves anywhere but strictly inside `runsRoot`.
  */
 function containedRunDir(runsRoot: string, id: string): string | null {
-  const root = path.resolve(runsRoot);
-  const runDir = path.resolve(root, id);
+  // realpath, not just resolve: a LEXICAL check answers "does this string sit
+  // under that string", which a symlink makes irrelevant. Planting
+  // `$runsRoot/codex-link -> ../elsewhere/codex-outside` produced an id that
+  // passed the pattern AND lexical containment, and then read an outside
+  // telemetry whose `worker_pid` drives a real signal (round-2 review
+  // codex-dcbfb; reproduced before this fix). `worktree.ts` learned the same
+  // lesson in #12 and has carried `realpathBestEffort` ever since — this is
+  // that guard, reused rather than re-derived.
+  //
+  // Both sides are resolved: a runsRoot that is ITSELF a symlink (a very
+  // ordinary macOS `/var` → `/private/var` shape) must not make every honest
+  // run look like an escape.
+  const root = realpathBestEffort(path.resolve(runsRoot));
+  const runDir = realpathBestEffort(path.resolve(path.resolve(runsRoot), id));
   // Strict containment: the runs root itself is never a run directory, and an
   // absolute `id` resolves away from the root entirely — both land here.
   if (runDir === root || !runDir.startsWith(root + path.sep)) return null;

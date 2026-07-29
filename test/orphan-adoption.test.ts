@@ -270,7 +270,10 @@ test("owner dead: the worker's whole group dies and the record is closed", async
     const stub = fs.readFileSync(path.join(runDir, "result.md"), "utf8");
     assert.match(stub, /## adoption/);
     assert.match(stub, /no verdict/i, "a stub must not read like a verdict the worker produced");
-    assert.equal(result.result_path, path.join(runDir, "result.md"));
+    // realpath, not the lexical join: containment now resolves symlinks
+    // (round-2 review codex-dcbfb) and the resolved path is what the caller is
+    // handed, so on macOS this is /private/var..., not /var....
+    assert.equal(result.result_path, path.join(fs.realpathSync(runDir), "result.md"));
   } finally {
     await m.shutdown();
     worker.cleanup();
@@ -738,9 +741,12 @@ test("foreign wait, owner dead: polls the disk and says that is what it did", as
     assert.equal(result.digest, "", "there is no event stream, so there is no digest");
     assert.match(result.degraded_note!, /NO digest/, "and the payload must SAY there is none, not just omit it");
     assert.equal(result.observed_model, "gpt-5.3-codex-spark", "a silent model swap stays visible across the grave");
-    assert.equal(result.result_path, path.join(runDir, "result.md"));
+    // realpath (see the note on the archival test above): containment resolves
+    // symlinks, and the resolved path is what the caller is handed.
+    const realRunDir = fs.realpathSync(runDir);
+    assert.equal(result.result_path, path.join(realRunDir, "result.md"));
     assert.ok((result.result_bytes ?? 0) > 0);
-    assert.equal(result.run_dir, runDir);
+    assert.equal(result.run_dir, realRunDir);
     assert.equal(result.final_message, undefined, "nothing is synthesized: no final message exists on this path");
   } finally {
     await m.shutdown();

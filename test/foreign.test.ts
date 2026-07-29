@@ -112,7 +112,8 @@ test("list() reports foreign runs as foreign, and never claims to know they are 
     const foreign = entries.find((e) => e.id === "opencode-elsewhere");
     assert.ok(foreign, "another session's in-flight run must appear");
     assert.equal(foreign.owner, "foreign");
-    assert.equal(foreign.run_dir, path.join(root, "opencode-elsewhere"));
+    // realpath, not the lexical join — see the containment note below.
+    assert.equal(foreign.run_dir, fs.realpathSync(path.join(root, "opencode-elsewhere")));
     assert.equal(foreign.observed_model, "glm-5.2");
     // Never "working": with no event stream this process cannot tell working
     // from wedged, and a board that guesses is worse than one that abstains.
@@ -225,7 +226,16 @@ test("a traversing id reads NOTHING — the id is a path segment, not a path", (
   assert.equal(readForeignRun("codex-inside/../../elsewhere/codex-outside", root, NOW), null);
   // ...and the guard did not simply break reading, which is the way a
   // containment fix silently becomes an availability bug.
-  assert.equal(readForeignRun("codex-inside", root, NOW)?.run_dir, path.join(root, "codex-inside"));
+  // `run_dir` is now the REALPATH of the run directory, not the lexical join:
+  // containment resolves symlinks (round-2 review codex-dcbfb), and handing
+  // back the resolved path is the honest half of that — the caller is told
+  // where the read actually landed. On macOS the temp root is itself a symlink
+  // (/var -> /private/var), so comparing against a lexical join would be
+  // comparing against a path nobody read.
+  assert.equal(
+    readForeignRun("codex-inside", root, NOW)?.run_dir,
+    fs.realpathSync(path.join(root, "codex-inside")),
+  );
 });
 
 test("isValidRunId accepts what manager.ts mints and refuses what moves the read", () => {
@@ -304,4 +314,41 @@ test("mutant: either guard ALONE closes the traversal — the pair is not one gu
       dropMutant(name);
     }
   }
+});
+
+test("a symlinked run dir does not escape the runs root — containment is realpath, not string prefix", () => {
+  // Round-2 review (codex-dcbfb), reproduced live before the fix: `codex-link`
+  // passed the id pattern AND lexical containment, then read an outside
+  // telemetry whose `worker_pid` drives a real signal. A lexical check answers
+  // "does this string sit under that string"; a symlink makes that question
+  // the wrong one.
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-foreign-symlink-"));
+  const runs = path.join(base, "runs");
+  const outside = path.join(base, "elsewhere", "codex-outside");
+  fs.mkdirSync(runs, { recursive: true });
+  fs.mkdirSync(outside, { recursive: true });
+  fs.writeFileSync(
+    path.join(outside, "telemetry.json"),
+    JSON.stringify({ lane: "codex", terminal_at: null, worker_pid: 424242, server_pid: 999999 }),
+  );
+  fs.symlinkSync(outside, path.join(runs, "codex-link"));
+  assert.equal(readForeignRun("codex-link", runs, NOW), null, "the symlinked id reads nothing");
+
+  // The honest case still works when the ROOT itself is a symlink — the ordinary
+  // macOS /var -> /private/var shape must not make every real run look like an escape.
+  const realRun = path.join(runs, "codex-real1");
+  fs.mkdirSync(realRun, { recursive: true });
+  fs.writeFileSync(path.join(realRun, "telemetry.json"), JSON.stringify({ lane: "codex", terminal_at: null }));
+  const rootLink = path.join(base, "runs-link");
+  fs.symlinkSync(runs, rootLink);
+  assert.ok(readForeignRun("codex-real1", rootLink, NOW), "a symlinked runs root still reads its own runs");
+});
+
+test("an uppercase id is refused — the generator only ever mints lowercase", () => {
+  // Round-2 review: `/i` admitted a shape manager.ts never produces, and on a
+  // case-insensitive volume that is two names for one run — the ambiguity an
+  // id guard exists to remove.
+  assert.equal(isValidRunId("CODEX-1ABCD"), false);
+  assert.equal(isValidRunId("Codex-1abcd"), false);
+  assert.equal(isValidRunId("codex-1abcd"), true);
 });

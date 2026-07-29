@@ -33096,16 +33096,241 @@ ${explanation}` : explanation;
 }
 
 // src/foreign.ts
+import fs9 from "node:fs";
+import path9 from "node:path";
+
+// src/worktree.ts
+import { execFile } from "node:child_process";
 import fs8 from "node:fs";
 import path8 from "node:path";
-var RUN_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)+$/i;
+import { promisify } from "node:util";
+var exec = promisify(execFile);
+async function git(cwd, args) {
+  const { stdout } = await exec("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 });
+  return stdout;
+}
+var OWNER_MARKER = ".clanker-owner";
+var sanitize = (s) => s.replace(/[^A-Za-z0-9._-]/g, "-");
+function deriveWorktreePath(branch, runId) {
+  return path8.join(WORKTREES_ROOT, `${sanitize(branch)}-${sanitize(runId).slice(-6)}`);
+}
+function readWorktreeOwner(worktreePath) {
+  try {
+    const first = fs8.readFileSync(path8.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
+    return first || null;
+  } catch {
+    return null;
+  }
+}
+async function isGitWorkTree(cwd) {
+  try {
+    const out = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
+    return out.trim() === "true";
+  } catch {
+    return false;
+  }
+}
+async function resolveTargetRepo(cwd) {
+  try {
+    const top = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
+    if (top) return top;
+  } catch {
+  }
+  throw new Error(
+    `cwd '${cwd}' is not inside a git work tree; a write dispatch cannot be isolated into a worktree cut from a non-repo directory (refusing to silently fall back to the host checkout \u2014 see issue #12)`
+  );
+}
+async function localHeadRef(targetRepo) {
+  try {
+    const head = (await git(targetRepo, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
+    return head || null;
+  } catch {
+    return null;
+  }
+}
+async function remoteDefaultRef(targetRepo) {
+  try {
+    const head = (await git(targetRepo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).trim();
+    if (head) return head;
+  } catch {
+  }
+  for (const ref of ["refs/remotes/origin/main", "refs/remotes/origin/master"]) {
+    try {
+      await git(targetRepo, ["rev-parse", "--verify", "--quiet", ref]);
+      return ref.replace("refs/remotes/", "");
+    } catch {
+    }
+  }
+  return null;
+}
+async function resolveBaseRef(targetRepo) {
+  const head = await localHeadRef(targetRepo);
+  if (head) return head;
+  const remote = await remoteDefaultRef(targetRepo);
+  if (remote) return remote;
+  throw new Error(
+    `target repo '${targetRepo}' has no local HEAD commit, origin/HEAD, origin/main, or origin/master to cut a worktree from (a repo with zero commits cannot be worktree'd)`
+  );
+}
+async function resolveBaseCommit(targetRepo, base) {
+  try {
+    const sha = (await git(targetRepo, ["rev-parse", "--verify", `${base}^{commit}`])).trim();
+    if (sha) return sha;
+  } catch {
+  }
+  throw new Error(
+    `dispatch base '${base}' does not resolve to a commit in target repo '${targetRepo}'; refusing to fall back to the repo's default base (the worktree would be cut from a commit the dispatcher did not name)`
+  );
+}
+async function headSha(cwd) {
+  return (await git(cwd, ["rev-parse", "--verify", "HEAD"])).trim();
+}
+async function createWorktree(branch, runId, targetRepo = BASE_REPO, base) {
+  const wtPath = deriveWorktreePath(branch, runId);
+  if (fs8.existsSync(wtPath)) {
+    throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
+  }
+  const baseRef = base ?? await resolveBaseRef(targetRepo);
+  fs8.mkdirSync(WORKTREES_ROOT, { recursive: true });
+  await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
+  fs8.writeFileSync(path8.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
+`);
+  return wtPath;
+}
+function parsePorcelainZ(out) {
+  const entries = out.split("\0");
+  if (entries.length > 0 && entries[entries.length - 1] === "") entries.pop();
+  const files = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.length < 3) continue;
+    const status = entry.slice(0, 2);
+    const destPath = entry.slice(3);
+    const isRename = status[0] === "R" || status[1] === "R";
+    const isCopy = status[0] === "C" || status[1] === "C";
+    if (isRename || isCopy) {
+      const srcPath = entries[++i];
+      files.push(destPath);
+      if (isRename && srcPath !== void 0) files.push(srcPath);
+    } else {
+      files.push(destPath);
+    }
+  }
+  return files;
+}
+function isGovernanceFile(file2) {
+  return file2 === OWNER_MARKER;
+}
+async function changedFiles(cwd) {
+  const out = await git(cwd, ["status", "--porcelain=v1", "-z"]);
+  return parsePorcelainZ(out).filter((file2) => !isGovernanceFile(file2));
+}
+async function holdsUnmergedWork(worktreePath, targetRepo, baseSha) {
+  if (!baseSha) return true;
+  try {
+    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseSha}..HEAD`])).trim();
+    return ahead !== "0";
+  } catch {
+    return true;
+  }
+}
+function realpathBestEffort(p) {
+  let cur = path8.resolve(p);
+  const tail = [];
+  for (; ; ) {
+    try {
+      const real = fs8.realpathSync(cur);
+      return tail.length ? path8.join(real, ...tail) : real;
+    } catch {
+      const parent = path8.dirname(cur);
+      if (parent === cur) return path8.resolve(p);
+      tail.unshift(path8.basename(cur));
+      cur = parent;
+    }
+  }
+}
+function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
+  const wt = realpathBestEffort(worktreePath);
+  const repo = realpathBestEffort(targetRepo);
+  if (wt === repo || wt.startsWith(repo + path8.sep) || repo.startsWith(wt + path8.sep)) {
+    throw new Error(
+      `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT outside the repo)`
+    );
+  }
+}
+async function changedFilesSince(worktreePath, base) {
+  const out = await git(worktreePath, ["diff", "--name-only", base, "HEAD"]);
+  const committed = out.split("\n").filter((line) => line.trim().length > 0);
+  const uncommitted = await changedFiles(worktreePath);
+  return [.../* @__PURE__ */ new Set([...committed, ...uncommitted])];
+}
+function matchDoNotTouch(patterns, files) {
+  const violations = [];
+  for (const pattern of patterns) {
+    const dir = pattern.replace(/\/+$/, "");
+    if (!dir) continue;
+    const matched = files.filter((file2) => file2 === dir || file2.startsWith(dir + "/"));
+    if (matched.length > 0) violations.push({ pattern, files: matched });
+  }
+  return violations;
+}
+async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runId) {
+  if (fs8.existsSync(worktreePath)) {
+    const owner = readWorktreeOwner(worktreePath);
+    if (!runId || owner !== runId) {
+      console.error(
+        `[clanker] refusing to remove worktree '${worktreePath}': it is owned by ${owner === null ? `no readable ${OWNER_MARKER} marker` : `run '${owner}'`}, and the caller claims ${runId === void 0 ? "no run id at all" : `run '${runId}'`} (a worktree is only ever reclaimed by the run it was created for \u2014 issue #3)`
+      );
+      return false;
+    }
+  }
+  const changes = await changedFiles(worktreePath);
+  if (changes.length > 0) return false;
+  try {
+    const ahead = (await git(worktreePath, ["rev-list", "--count", "@{upstream}..HEAD"])).trim();
+    if (ahead !== "0") return false;
+  } catch {
+    if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return false;
+  }
+  const markerPath = path8.join(worktreePath, OWNER_MARKER);
+  const marker = (() => {
+    try {
+      return fs8.readFileSync(markerPath, "utf8");
+    } catch {
+      return null;
+    }
+  })();
+  try {
+    fs8.rmSync(markerPath, { force: true });
+  } catch {
+  }
+  try {
+    try {
+      await git(targetRepo, ["worktree", "remove", worktreePath]);
+    } catch {
+      await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
+    }
+  } catch (err) {
+    if (marker !== null && fs8.existsSync(worktreePath)) {
+      try {
+        fs8.writeFileSync(markerPath, marker);
+      } catch {
+      }
+    }
+    throw err;
+  }
+  return true;
+}
+
+// src/foreign.ts
+var RUN_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)+$/;
 function isValidRunId(id) {
   return typeof id === "string" && id.length <= 128 && RUN_ID_PATTERN.test(id);
 }
 function containedRunDir(runsRoot, id) {
-  const root = path8.resolve(runsRoot);
-  const runDir = path8.resolve(root, id);
-  if (runDir === root || !runDir.startsWith(root + path8.sep)) return null;
+  const root = realpathBestEffort(path9.resolve(runsRoot));
+  const runDir = realpathBestEffort(path9.resolve(path9.resolve(runsRoot), id));
+  if (runDir === root || !runDir.startsWith(root + path9.sep)) return null;
   return runDir;
 }
 function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
@@ -33114,15 +33339,15 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
   if (runDir === null) return null;
   let telemetry;
   try {
-    telemetry = JSON.parse(fs8.readFileSync(path8.join(runDir, "telemetry.json"), "utf8"));
+    telemetry = JSON.parse(fs9.readFileSync(path9.join(runDir, "telemetry.json"), "utf8"));
   } catch {
     return null;
   }
   let newestMtimeMs = 0;
   try {
-    for (const entry of fs8.readdirSync(runDir)) {
+    for (const entry of fs9.readdirSync(runDir)) {
       try {
-        newestMtimeMs = Math.max(newestMtimeMs, fs8.statSync(path8.join(runDir, entry)).mtimeMs);
+        newestMtimeMs = Math.max(newestMtimeMs, fs9.statSync(path9.join(runDir, entry)).mtimeMs);
       } catch {
       }
     }
@@ -33130,7 +33355,7 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
   }
   let resultPath;
   try {
-    if (fs8.statSync(path8.join(runDir, RESULT_FILE)).size > 0) resultPath = path8.join(runDir, RESULT_FILE);
+    if (fs9.statSync(path9.join(runDir, RESULT_FILE)).size > 0) resultPath = path9.join(runDir, RESULT_FILE);
   } catch {
   }
   return {
@@ -33169,7 +33394,7 @@ function scanForeignRuns(options = {}) {
   const now = options.now ?? Date.now();
   let ids;
   try {
-    ids = fs8.readdirSync(runsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+    ids = fs9.readdirSync(runsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
   } catch {
     return [];
   }
@@ -33531,7 +33756,7 @@ function resolveProfileDispatch(input, env = process.env) {
 }
 
 // src/resume.ts
-import fs9 from "node:fs";
+import fs10 from "node:fs";
 function laneCanResume(lane) {
   return LANES_WITH_RESUME.has(lane);
 }
@@ -33552,7 +33777,7 @@ function planResumeTurn(run, model) {
       `run '${run.id}' recorded a backend session ref '${ref}' that starts with '-'; it would reach the backend as a flag rather than as the value of --resume, so this run cannot be resumed`
     );
   }
-  if (!fs9.existsSync(run.cwd)) {
+  if (!fs10.existsSync(run.cwd)) {
     throw new Error(
       `run '${run.id}' cannot take a resume turn: its working directory '${run.cwd}' no longer exists (a worktree with no changes is reclaimed when the run closes). Dispatch a fresh run instead.`
     );
@@ -33598,229 +33823,6 @@ function hostLaneBlockedReason(host, lane) {
     return "host=codex cannot dispatch the codex ACP lane (self-dispatch is prohibited)";
   }
   return void 0;
-}
-
-// src/worktree.ts
-import { execFile } from "node:child_process";
-import fs10 from "node:fs";
-import path9 from "node:path";
-import { promisify } from "node:util";
-var exec = promisify(execFile);
-async function git(cwd, args) {
-  const { stdout } = await exec("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 });
-  return stdout;
-}
-var OWNER_MARKER = ".clanker-owner";
-var sanitize = (s) => s.replace(/[^A-Za-z0-9._-]/g, "-");
-function deriveWorktreePath(branch, runId) {
-  return path9.join(WORKTREES_ROOT, `${sanitize(branch)}-${sanitize(runId).slice(-6)}`);
-}
-function readWorktreeOwner(worktreePath) {
-  try {
-    const first = fs10.readFileSync(path9.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
-    return first || null;
-  } catch {
-    return null;
-  }
-}
-async function isGitWorkTree(cwd) {
-  try {
-    const out = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
-    return out.trim() === "true";
-  } catch {
-    return false;
-  }
-}
-async function resolveTargetRepo(cwd) {
-  try {
-    const top = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
-    if (top) return top;
-  } catch {
-  }
-  throw new Error(
-    `cwd '${cwd}' is not inside a git work tree; a write dispatch cannot be isolated into a worktree cut from a non-repo directory (refusing to silently fall back to the host checkout \u2014 see issue #12)`
-  );
-}
-async function localHeadRef(targetRepo) {
-  try {
-    const head = (await git(targetRepo, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
-    return head || null;
-  } catch {
-    return null;
-  }
-}
-async function remoteDefaultRef(targetRepo) {
-  try {
-    const head = (await git(targetRepo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).trim();
-    if (head) return head;
-  } catch {
-  }
-  for (const ref of ["refs/remotes/origin/main", "refs/remotes/origin/master"]) {
-    try {
-      await git(targetRepo, ["rev-parse", "--verify", "--quiet", ref]);
-      return ref.replace("refs/remotes/", "");
-    } catch {
-    }
-  }
-  return null;
-}
-async function resolveBaseRef(targetRepo) {
-  const head = await localHeadRef(targetRepo);
-  if (head) return head;
-  const remote = await remoteDefaultRef(targetRepo);
-  if (remote) return remote;
-  throw new Error(
-    `target repo '${targetRepo}' has no local HEAD commit, origin/HEAD, origin/main, or origin/master to cut a worktree from (a repo with zero commits cannot be worktree'd)`
-  );
-}
-async function resolveBaseCommit(targetRepo, base) {
-  try {
-    const sha = (await git(targetRepo, ["rev-parse", "--verify", `${base}^{commit}`])).trim();
-    if (sha) return sha;
-  } catch {
-  }
-  throw new Error(
-    `dispatch base '${base}' does not resolve to a commit in target repo '${targetRepo}'; refusing to fall back to the repo's default base (the worktree would be cut from a commit the dispatcher did not name)`
-  );
-}
-async function headSha(cwd) {
-  return (await git(cwd, ["rev-parse", "--verify", "HEAD"])).trim();
-}
-async function createWorktree(branch, runId, targetRepo = BASE_REPO, base) {
-  const wtPath = deriveWorktreePath(branch, runId);
-  if (fs10.existsSync(wtPath)) {
-    throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
-  }
-  const baseRef = base ?? await resolveBaseRef(targetRepo);
-  fs10.mkdirSync(WORKTREES_ROOT, { recursive: true });
-  await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
-  fs10.writeFileSync(path9.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
-`);
-  return wtPath;
-}
-function parsePorcelainZ(out) {
-  const entries = out.split("\0");
-  if (entries.length > 0 && entries[entries.length - 1] === "") entries.pop();
-  const files = [];
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    if (entry.length < 3) continue;
-    const status = entry.slice(0, 2);
-    const destPath = entry.slice(3);
-    const isRename = status[0] === "R" || status[1] === "R";
-    const isCopy = status[0] === "C" || status[1] === "C";
-    if (isRename || isCopy) {
-      const srcPath = entries[++i];
-      files.push(destPath);
-      if (isRename && srcPath !== void 0) files.push(srcPath);
-    } else {
-      files.push(destPath);
-    }
-  }
-  return files;
-}
-function isGovernanceFile(file2) {
-  return file2 === OWNER_MARKER;
-}
-async function changedFiles(cwd) {
-  const out = await git(cwd, ["status", "--porcelain=v1", "-z"]);
-  return parsePorcelainZ(out).filter((file2) => !isGovernanceFile(file2));
-}
-async function holdsUnmergedWork(worktreePath, targetRepo, baseSha) {
-  if (!baseSha) return true;
-  try {
-    const ahead = (await git(worktreePath, ["rev-list", "--count", `${baseSha}..HEAD`])).trim();
-    return ahead !== "0";
-  } catch {
-    return true;
-  }
-}
-function realpathBestEffort(p) {
-  let cur = path9.resolve(p);
-  const tail = [];
-  for (; ; ) {
-    try {
-      const real = fs10.realpathSync(cur);
-      return tail.length ? path9.join(real, ...tail) : real;
-    } catch {
-      const parent = path9.dirname(cur);
-      if (parent === cur) return path9.resolve(p);
-      tail.unshift(path9.basename(cur));
-      cur = parent;
-    }
-  }
-}
-function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
-  const wt = realpathBestEffort(worktreePath);
-  const repo = realpathBestEffort(targetRepo);
-  if (wt === repo || wt.startsWith(repo + path9.sep) || repo.startsWith(wt + path9.sep)) {
-    throw new Error(
-      `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT outside the repo)`
-    );
-  }
-}
-async function changedFilesSince(worktreePath, base) {
-  const out = await git(worktreePath, ["diff", "--name-only", base, "HEAD"]);
-  const committed = out.split("\n").filter((line) => line.trim().length > 0);
-  const uncommitted = await changedFiles(worktreePath);
-  return [.../* @__PURE__ */ new Set([...committed, ...uncommitted])];
-}
-function matchDoNotTouch(patterns, files) {
-  const violations = [];
-  for (const pattern of patterns) {
-    const dir = pattern.replace(/\/+$/, "");
-    if (!dir) continue;
-    const matched = files.filter((file2) => file2 === dir || file2.startsWith(dir + "/"));
-    if (matched.length > 0) violations.push({ pattern, files: matched });
-  }
-  return violations;
-}
-async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runId) {
-  if (fs10.existsSync(worktreePath)) {
-    const owner = readWorktreeOwner(worktreePath);
-    if (!runId || owner !== runId) {
-      console.error(
-        `[clanker] refusing to remove worktree '${worktreePath}': it is owned by ${owner === null ? `no readable ${OWNER_MARKER} marker` : `run '${owner}'`}, and the caller claims ${runId === void 0 ? "no run id at all" : `run '${runId}'`} (a worktree is only ever reclaimed by the run it was created for \u2014 issue #3)`
-      );
-      return false;
-    }
-  }
-  const changes = await changedFiles(worktreePath);
-  if (changes.length > 0) return false;
-  try {
-    const ahead = (await git(worktreePath, ["rev-list", "--count", "@{upstream}..HEAD"])).trim();
-    if (ahead !== "0") return false;
-  } catch {
-    if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return false;
-  }
-  const markerPath = path9.join(worktreePath, OWNER_MARKER);
-  const marker = (() => {
-    try {
-      return fs10.readFileSync(markerPath, "utf8");
-    } catch {
-      return null;
-    }
-  })();
-  try {
-    fs10.rmSync(markerPath, { force: true });
-  } catch {
-  }
-  try {
-    try {
-      await git(targetRepo, ["worktree", "remove", worktreePath]);
-    } catch {
-      await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
-    }
-  } catch (err) {
-    if (marker !== null && fs10.existsSync(worktreePath)) {
-      try {
-        fs10.writeFileSync(markerPath, marker);
-      } catch {
-      }
-    }
-    throw err;
-  }
-  return true;
 }
 
 // src/util.ts
