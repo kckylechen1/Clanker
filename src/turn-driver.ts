@@ -84,7 +84,7 @@ export class TurnDriver {
     const outcome = await this.runTurn(run, conn, prompt, correction);
     if (run.cancellationRequested) {
       await this.host.close(run.id);
-      run.cancelTurn();
+      await run.cancelTurn();
       return;
     }
     if (run.isTerminalTurn()) return;
@@ -95,7 +95,7 @@ export class TurnDriver {
     // memory of the work it is being corrected about.
     await this.host.computeTouched(run);
     await this.host.close(run.id);
-    run.failTurn(
+    await run.failTurn(
       outcome.message,
       classifyTurnFailure({ message: outcome.message, turnsCount: run.turnsCount, toolCalls: run.toolCalls() }) ??
         classifyBackendFailure(outcome.message),
@@ -120,7 +120,7 @@ export class TurnDriver {
     }
     await this.host.computeTouched(run);
     await this.host.close(run.id);
-    run.cancelTurn();
+    await run.cancelTurn();
   }
 
   /**
@@ -185,7 +185,7 @@ export class TurnDriver {
       // consulted here on purpose: its CLANKER-INFRA-FAILURE describes a backend
       // that rejected the request SHAPE, which presupposes a backend that was
       // reached; nothing here ever got that far.
-      run.failTurn(message, classifyBackendFailure(message));
+      await run.failTurn(message, classifyBackendFailure(message));
       return;
     } finally {
       if (this.pendingConnects.get(run.id) === controller) this.pendingConnects.delete(run.id);
@@ -201,7 +201,7 @@ export class TurnDriver {
     const outcome = await this.runTurn(run, conn, prompt, correction);
     if (run.cancellationRequested) {
       await this.host.close(run.id);
-      run.cancelTurn();
+      await run.cancelTurn();
       return;
     }
     if (run.isTerminalTurn()) return;
@@ -228,7 +228,7 @@ export class TurnDriver {
     }
     await this.host.computeTouched(run);
     await this.host.close(run.id);
-    run.failTurn(outcome.message, failureClass);
+    await run.failTurn(outcome.message, failureClass);
   }
 
   private async retryAfterBackoff(run: LaneRun, message: string, nextAttempt: number): Promise<void> {
@@ -396,9 +396,9 @@ export class TurnDriver {
       await this.host.computeContractViolations(run);
     }
     if (stopReason === "cancelled") {
-      run.cancelTurn();
+      await run.cancelTurn();
     } else {
-      run.completeTurn();
+      await run.completeTurn();
     }
   }
 

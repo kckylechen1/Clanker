@@ -496,7 +496,7 @@ test("terminal events after session close remain ordered and do not reopen artif
   });
   run.beginTurn("finish after teardown");
   await run.markClosed();
-  run.completeTurn();
+  await run.completeTurn();
 
   const streams = run as unknown as { eventsStream: unknown; chunksStream: unknown };
   assert.equal(streams.eventsStream, null);

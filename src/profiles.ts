@@ -412,7 +412,10 @@ export function freeParams(profile: DispatchProfile): string[] {
   if (profile.isolation !== "forbidden") params.push("worktree", "base", "doNotTouch");
   if (modelIsCallerSupplied(profile)) params.push("model");
   if (profile.sandbox?.kind === "caller") params.push("sandbox");
-  params.push("effort");
+  // `issue` is unconditional: a review verdict is exactly as worth recording on
+  // its ticket as an implementation is, and a bookkeeping parameter that only
+  // some profiles carry produces an account with holes in it.
+  params.push("effort", "issue");
   return params;
 }
 
@@ -455,6 +458,17 @@ export interface ProfileDispatchInput {
   model?: string;
   sandbox?: CodexSandboxMode;
   effort?: string;
+  /**
+   * Ticket this dispatch is being run for (#27) — `"41"` or `"owner/repo#41"`.
+   * Supplying one makes the run post its own terminal account as an issue
+   * comment; omitting it means no account is kept anywhere but the ledger.
+   *
+   * Never inferred. The server could plausibly guess a ticket from the prompt
+   * text or from a worktree branch name, and a guess that lands on the wrong
+   * ticket writes a false account onto someone else's thread — strictly worse
+   * than the silence it was trying to fix.
+   */
+  issue?: string;
 }
 
 /** What a resolved profile hands to LaneManager's private dispatch path. */
@@ -467,6 +481,8 @@ export interface ResolvedProfileDispatch {
   doNotTouch?: string[];
   model?: string;
   effort?: string;
+  /** Caller-supplied ticket reference, forwarded verbatim; validated in the manager's pre-flight. */
+  issue?: string;
   readOnly: boolean;
   sandbox?: CodexSandboxMode;
   profile?: "worker" | "kimi-crew";
@@ -569,6 +585,7 @@ export function resolveProfileDispatch(
     doNotTouch: input.doNotTouch,
     model,
     effort: input.effort,
+    issue: input.issue,
     readOnly: profile.readOnly,
     sandbox,
     profile: profile.ocProfile,

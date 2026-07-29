@@ -40,6 +40,25 @@ const effortField = z
   .optional()
   .describe("Reasoning effort override (codex/gemini/grok only; warned and ignored elsewhere)");
 
+/**
+ * #27's one new dispatch parameter. The schema keeps it a plain optional string
+ * and lets the server's own `parseIssueRef` be the single judge of the format —
+ * a zod `.regex()` here would be a second copy of that rule, and the copy that
+ * drifts is always the one nobody remembers exists.
+ */
+const issueField = z
+  .string()
+  .trim()
+  .min(1)
+  .optional()
+  .describe(
+    "Optional ticket this dispatch is being run for — \"41\" or \"owner/repo#41\". When set, the server " +
+      "posts ONE comment per terminal turn on that issue: run id, lane/profile, observed model, duration, " +
+      "turns, tokens, the head of the verdict VERBATIM, and the run_dir. It never changes the issue's " +
+      "state — closing a ticket stays a human act. Omit it and nothing is recorded on any issue; the " +
+      "server never guesses a ticket from the prompt or a branch name.",
+  );
+
 const sandboxEnum = z.enum(["read-only", "workspace-write", "danger-full-access"]);
 
 function narrowShape(profile: DispatchProfile): Record<string, z.ZodTypeAny> {
@@ -101,6 +120,11 @@ function narrowShape(profile: DispatchProfile): Record<string, z.ZodTypeAny> {
       );
   }
   shape.effort = effortField;
+  // On EVERY profile, welded dimensions notwithstanding: a cold review's verdict
+  // belongs on its ticket exactly as much as an implementation's does, and #27
+  // exists because the accounts that get skipped are the ones nobody was
+  // required to keep.
+  shape.issue = issueField;
   return shape;
 }
 
@@ -198,6 +222,7 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
           model: args.model as string | undefined,
           sandbox: args.sandbox as CodexSandboxMode | undefined,
           effort: args.effort as string | undefined,
+          issue: args.issue as string | undefined,
         }));
       } catch (error) { return fail(error); }
     });

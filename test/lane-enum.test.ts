@@ -77,6 +77,9 @@ test("there is no universal entrance — every start tool names exactly one prof
     // absent here they would silently stop being asserted on.
     worktree: undefined, base: undefined, doNotTouch: undefined,
     model: undefined, sandbox: undefined, effort: undefined,
+    // `issue` (#27) joins the pass-through for the same reason: a parameter
+    // missing from this literal is a parameter nothing here asserts on.
+    issue: undefined,
   }], "the tool's own registry row — not the caller's argument — decides the profile");
 });
 
