@@ -94,12 +94,27 @@ export function redact(text: string): string {
  * toward redacting: a verdict that reads a little worse is a cost paid to the
  * reader, a published token is a cost paid to everyone.
  *
- * The one carve-out is bare 40/64-char lowercase hex — git SHAs, which are the
- * single most load-bearing token in this repo's verdicts ("base ebd72ed…",
- * "regressed at <sha>"). Blanking those would gut the accounting this feature
- * exists to keep, and a secret that happens to be exactly-40 lowercase hex and
- * appears with no key name, no prefix and no URL around it is a shape this
- * codebase has never seen.
+ * The one carve-out is bare 40-char lowercase hex — a git SHA-1, the single
+ * most load-bearing token in this repo's verdicts ("base ebd72ed…", "regressed
+ * at <sha>"). Blanking those would gut the accounting this feature exists to
+ * keep, and a secret that happens to be exactly-40 lowercase hex and appears
+ * with no key name, no prefix and no URL around it is a shape this codebase has
+ * never seen. SHA-256 (64 hex) is deliberately NOT carved out even though it is
+ * also a digest: it appeared ONCE in the 290-verdict corpus, while sparing it
+ * would spare every 32-byte hex API key — 100% of that family — so a rare
+ * `[REDACTED]` where a sha256 digest stood is the cheaper of the two errors.
+ * Second cold review flagged the older comment here for claiming 40/64; the
+ * code has always been 40, and this is the comment being made to tell the truth
+ * rather than the behaviour being widened to match a stale sentence.
+ *
+ * KNOWN AND ACCEPTED GAP: a credential broken up by whitespace or punctuation
+ * (a token wrapped across two lines, say) is matched only in whatever
+ * contiguous piece is long enough. Reassembling across separators before
+ * matching was measured and rejected — it is the same move as putting `-`, `_`
+ * and `/` back in the long-run class, which took the corpus false positives
+ * from 10 spans to 227 (every file:line, every constant name). A fragment that
+ * short is also not directly usable as a credential, so the trade buys back
+ * nothing worth the evidence it would destroy.
  */
 const PUBLIC_SECRET_RULES: readonly { readonly re: RegExp; readonly replace: string }[] = [
   // Known credential prefixes, matched on shape alone: GitHub (`ghp_`/`gho_`/
@@ -116,12 +131,12 @@ const PUBLIC_SECRET_RULES: readonly { readonly re: RegExp; readonly replace: str
   // worth naming: the long-run rule below treats `-`/`_` as boundaries (see
   // there for why), which is exactly the alphabet a JWT is written in.
   { re: /\beyJ[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]+){0,2}/g, replace: "[REDACTED]" },
-  // `Authorization: Bearer <token>` / `token <token>`. `redact()` already blanks
-  // the value after a COLON, which on this header leaves the scheme word behind
-  // and the token itself untouched ("Authorization: [REDACTED] ghp_…"); this
-  // rule takes the value that follows the scheme instead. Gated on a digit and
-  // 12+ characters so ordinary prose about tokens ("the token is staged in a
-  // file") is not shredded — a real credential essentially always carries one.
+  // A bare `Bearer <token>` / `token <token>` with no header around it. The
+  // header form is handled structurally before any of these rules run (see
+  // AUTH_HEADER below); this one catches the scheme word standing on its own in
+  // prose or in a curl line. Gated on a digit and 12+ characters so ordinary
+  // prose about tokens ("the token is staged in a file") is not shredded — a
+  // real credential essentially always carries one.
   { re: /\b(bearer|token)(\s+)(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{12,}/gi, replace: "$1$2[REDACTED]" },
   // URL userinfo: `https://user:pass@host` and the token-as-username form
   // `https://ghp_xxx@host`. The password half is always a credential; a lone
@@ -203,14 +218,49 @@ function looksRandom(span: string, requireDigitOrNoWord: boolean): boolean {
   if (longestSameCaseRun(span) < 6) return true;
   return requireDigitOrNoWord ? /\d/.test(span) : false;
 }
+/**
+ * An HTTP authentication header, matched by its STRUCTURE rather than by a list
+ * of scheme names: `Authorization: <scheme> <credentials>` (RFC 9110), plus the
+ * proxy spelling. The credentials are blanked whole; the scheme word stays,
+ * because "a Basic credential was published here" is exactly the evidence a
+ * reader of a redacted verdict needs.
+ *
+ * Structure, not a name list, because the second cold review landed `Basic`
+ * escaping through a rule that knew `bearer|token` — and the next report would
+ * have been `Digest`, then `Negotiate`, then `ApiKey`. A rule that has to be
+ * extended once per scheme is a rule that is wrong by construction.
+ */
+const AUTH_HEADER =
+  /\b((?:proxy-)?authorization)(["']?[ \t]*[:=][ \t]*["']?)([A-Za-z][A-Za-z0-9._-]*)([ \t]+)[^\r\n'"`]+/gi;
+/**
+ * Where a matched header is parked while the other rules run.
+ *
+ * It has to be parked rather than merely rewritten in place, because `redact()`
+ * would then eat the SCHEME: its pattern is `authorization\s*[:=]\s*\S+`, whose
+ * `\S+` starts immediately after the colon and therefore covers `Basic`, not
+ * the credential — which is the entire shape of the bug being fixed here
+ * ("Authorization: [REDACTED] dXNlcjpodW50ZXIy"). Parking makes this rule the
+ * OWNER of the headers it matches: no later rule can see them, and none can
+ * un-redact them either, since what is parked is already the redacted form.
+ */
+const AUTH_PARK = /\[\[clanker-auth-(\d+)\]\]/g;
 export function redactForPublic(text: string): string {
-  let out = redact(text);
+  const parked: string[] = [];
+  let out = text.replace(AUTH_HEADER, (_m, name: string, sep: string, scheme: string, gap: string) => {
+    parked.push(`${name}${sep}${scheme}${gap}[REDACTED]`);
+    return `[[clanker-auth-${parked.length - 1}]]`;
+  });
+  out = redact(out);
   for (const { re, replace } of PUBLIC_SECRET_RULES) out = out.replace(re, replace);
   out = out.replace(PUBLIC_HEX_BLOB, (m) => (GIT_SHA.test(m) ? m : "[REDACTED]"));
   // Loose first: it consumes whole separator-bearing runs, so running it after
   // the tight rule would only ever see the fragments the tight rule left.
   out = out.replace(PUBLIC_LOOSE_BLOB, (m) => (looksRandom(m, false) ? "[REDACTED]" : m));
-  return out.replace(PUBLIC_TIGHT_BLOB, (m) => (looksRandom(m, true) ? "[REDACTED]" : m));
+  out = out.replace(PUBLIC_TIGHT_BLOB, (m) => (looksRandom(m, true) ? "[REDACTED]" : m));
+  // Unpark last. A placeholder the worker wrote itself has no entry and is left
+  // exactly as it was typed; every entry that does exist is already redacted
+  // text, so restoring can only ever put back something safe.
+  return out.replace(AUTH_PARK, (m, index: string) => parked[Number(index)] ?? m);
 }
 
 /**

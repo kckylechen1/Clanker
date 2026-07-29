@@ -267,6 +267,44 @@ test("#27: the four leaks a cold review landed on `redact()` are all closed at t
   assert.ok(util.redact(leaks[2][0]).includes("hunter2"), "redact() leaves URL credentials");
 });
 
+test("#27: an auth header is redacted by its STRUCTURE, whatever the scheme is called", async () => {
+  const { redactForPublic } = await import("../src/util.js");
+  // Second cold review landed `Basic` walking straight through a rule that knew
+  // `bearer|token`: `redact()` eats the SCHEME (its `\S+` starts after the
+  // colon), leaving `Authorization: [REDACTED] dXNlcjpodW50ZXIy` — the same bug
+  // as round one wearing a different scheme name. A short Basic payload is
+  // under every length threshold the blob rules use, so nothing else caught it.
+  const basic = Buffer.from("user:hunter2").toString("base64");
+  for (const [line, secret] of [
+    [`Authorization: Basic ${basic}`, basic],
+    [`authorization:Basic ${basic}`, basic],
+    [`{"Authorization": "Basic ${basic}"}`, basic],
+    [`curl -H 'Authorization: Basic ${basic}' https://api.example.com`, basic],
+    ["Proxy-Authorization: Digest response=deadbeefcafe1234", "deadbeefcafe1234"],
+    ["Authorization: Negotiate YIIZfwYGKwYBBQUCoIIZ", "YIIZfwYGKwYBBQUCoIIZ"],
+    ["Authorization: ApiKey k9x2m4", "k9x2m4"],
+  ] as const) {
+    const out = redactForPublic(line);
+    assert.ok(!out.includes(secret), `credential survived: ${line}\n → ${out}`);
+    // The scheme is kept on purpose: "a Basic credential was published here" is
+    // what a reader of a redacted verdict needs in order to act on it.
+    const scheme = line.match(/(?:Basic|Digest|Negotiate|ApiKey)/)![0];
+    assert.ok(out.includes(scheme), `the scheme must survive as evidence: ${out}`);
+    assert.ok(out.includes("[REDACTED]"), out);
+  }
+  // Prose about the header is not a header.
+  for (const prose of [
+    "Authorization header is missing from the request",
+    "the Authorization header (RFC 9110) carries a scheme and credentials",
+    "src/util.ts:125 — the authorization rule is structural now",
+  ]) {
+    assert.equal(redactForPublic(prose), prose, `prose must survive: ${prose}`);
+  }
+  // A worker that writes the park placeholder itself gets it back untouched —
+  // the machinery must not be a way to make the redactor say something else.
+  assert.equal(redactForPublic("see [[clanker-auth-0]] below"), "see [[clanker-auth-0]] below");
+});
+
 test("#27: unlabelled credential shapes are caught, and a verdict's own evidence is not", async () => {
   const { redactForPublic } = await import("../src/util.js");
   // Shapes with no key name and no prefix to announce them. The cost of missing
@@ -886,6 +924,27 @@ test("mutation: the local-file redactor at the public sink republishes the token
   );
   assert.equal(redacted, true, "the mutant still CLAIMS it redacted…");
   assert.ok(body.includes(token), "…while publishing the token — the green build must not");
+});
+
+test("mutation: a scheme-name list instead of the header's structure lets `Basic` through", async () => {
+  // The bug the second review landed, reconstructed exactly: the rule knows
+  // scheme NAMES rather than the header's shape, so the next scheme escapes.
+  const mutant = await loadMutantModule<typeof import("../src/util.js")>(
+    "util-scheme-list",
+    [{
+      file: "util.ts",
+      find:
+        "const AUTH_HEADER =\n" +
+        "  /\\b((?:proxy-)?authorization)([\"']?[ \\t]*[:=][ \\t]*[\"']?)([A-Za-z][A-Za-z0-9._-]*)([ \\t]+)[^\\r\\n'\"`]+/gi;",
+      replace:
+        "const AUTH_HEADER =\n" +
+        "  /\\b((?:proxy-)?authorization)([\"']?[ \\t]*[:=][ \\t]*[\"']?)(bearer|token)([ \\t]+)[^\\r\\n'\"`]+/gi;",
+    }],
+    "util.ts",
+  );
+  const basic = Buffer.from("user:hunter2").toString("base64");
+  const out = mutant.redactForPublic(`Authorization: Basic ${basic}`);
+  assert.ok(out.includes(basic), `the mutant republishes the credential: ${out}`);
 });
 
 test("mutation: a summarizing body stops carrying the verdict verbatim", async () => {
