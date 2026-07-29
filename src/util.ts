@@ -229,6 +229,30 @@ function looksRandom(span: string, requireDigitOrNoWord: boolean): boolean {
  * escaping through a rule that knew `bearer|token` — and the next report would
  * have been `Digest`, then `Negotiate`, then `ApiKey`. A rule that has to be
  * extended once per scheme is a rule that is wrong by construction.
+ *
+ * WHERE THE STRUCTURE STOPS, since the same argument cuts against this rule and
+ * the next reader deserves the true boundary rather than the flattering one:
+ * SCHEME names are open, and this rule handles them all; HEADER names are open
+ * too, and this rule handles exactly one family — `Authorization` and
+ * `Proxy-Authorization`. A custom header is covered only incidentally, by two
+ * other rules: `X-Api-Key: …` and `X-Auth-Token: …` are caught because
+ * `redact()`'s key-name rule sees `api key` / `token` in the NAME, and a value
+ * that is long AND random-looking is caught by the blob rules below whatever
+ * the name is. Measured, both of these go: `X-Auth: Kd82nQp5vLx7Rt3wZm09` — a synthetic value, gitleaks:allow —
+ * and a 32-hex session id.
+ * Note the AND: length alone is not enough, because those rules
+ * gate on randomness too — `X-Auth: correcthorsebatterystaple` (25 chars, word
+ * shaped) and `X-Auth: hunter2hunter2hunter2hunter2` (28 chars, 7 distinct
+ * characters) both survive. "20+ characters is covered" would be the
+ * comfortable sentence rather than the true one.
+ *
+ * So the gap that is really left: a CUSTOM header name carrying no key-ish
+ * word, holding a value that is short or word-shaped — `X-Auth: hunter2`.
+ * Accepted rather than fixed, on the measurement already in this file: closing
+ * it means treating header names as an open set, i.e. matching `\S+:\s*\S+`,
+ * which is every line of prose with a colon in it — the same move that took
+ * corpus false positives from 10 spans to 227. Do not "fix" it by growing a
+ * name table, and do not let this comment drift into claiming full coverage.
  */
 const AUTH_HEADER =
   /\b((?:proxy-)?authorization)(["']?[ \t]*[:=][ \t]*["']?)([A-Za-z][A-Za-z0-9._-]*)([ \t]+)[^\r\n'"`]+/gi;
