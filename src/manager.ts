@@ -26,6 +26,7 @@ import {
   HANDSHAKE_TIMEOUT_MS,
   isGlmModel,
   LANES_WITH_PINNED_WRITE_MODEL,
+  modelSwapWarning,
   RUNS_ROOT,
   TURN_TIMEOUT_MS,
   WRITE_DISCIPLINE_PREFIX,
@@ -945,6 +946,7 @@ export class LaneManager {
   }
 
   private buildForeignWaitResult(foreign: ForeignRun, ownerDetail: string): WaitResult {
+    const swap = modelSwapWarning(foreign.resolved_model, foreign.observed_model);
     const result: WaitResult = {
       id: foreign.id,
       lane: foreign.lane ?? "unknown",
@@ -961,8 +963,14 @@ export class LaneManager {
         `${ownerDetail}, so this wait polled ${foreign.run_dir} instead of an event stream. There is NO digest, ` +
         "no plan and no final_message for this run: those live in the process that spawned it and are not on " +
         "disk. status/terminal state, the verdict file, observed_model and the issue-comment account below come " +
-        "straight from telemetry.json; nothing here is inferred.",
+        "straight from telemetry.json; nothing here is inferred. The one exception is `warnings`, which is " +
+        "COMPUTED here by comparing two of those telemetry fields (resolved_model against observed_model) — " +
+        "stated so a reader knows it is this server's reading of the record, not something the dead owner wrote.",
       observed_model: foreign.observed_model,
+      // Same derivation as the live path (#54), off the same two telemetry
+      // fields — a swap does not become less wrong because the process that
+      // committed it has died.
+      ...(swap ? { warnings: [swap] } : {}),
       // The #27 account survives its owner because it lives in telemetry.json.
       // `issue_comment_pending` on a run whose owner is dead means the post
       // will never resolve — the honest reading is "go look at the ticket",
@@ -980,6 +988,7 @@ export class LaneManager {
 
   private buildWaitResult(run: LaneRun): WaitResult {
     const status = run.turnStatus;
+    const telemetry = run.telemetry();
     const result: WaitResult = {
       id: run.id,
       lane: run.lane,
@@ -990,8 +999,17 @@ export class LaneManager {
       suspected_stall: run.suspectedStall(this.stallThresholdMs),
       run_dir: run.runDir,
     };
-    const warnings = this.warningsById.get(run.id);
-    if (warnings && warnings.length) result.warnings = warnings;
+    // DERIVED, not stored (#54). The swap is a fact about the telemetry this
+    // wait is already reading, so it is recomputed on every wait rather than
+    // pushed into `warningsById` the way dispatch-time advisories are: the
+    // backend only reports `observed_model` once the session exists, and a
+    // resume turn can legitimately move the run onto another model, so a
+    // latched warning would either miss the swap or outlive it. Raised as soon
+    // as it is knowable — NOT gated on the terminal branch below — because a
+    // dispatcher polling a live run can still cancel it.
+    const swap = modelSwapWarning(telemetry.resolved_model, telemetry.observed_model);
+    const warnings = dedupe([...(this.warningsById.get(run.id) ?? []), ...(swap ? [swap] : [])]);
+    if (warnings.length) result.warnings = warnings;
     if (run.isTerminalTurn()) {
       const resultBytes = run.resultBytes();
       if (resultBytes > 0) {
@@ -1007,7 +1025,7 @@ export class LaneManager {
       if (run.error) result.error = annotatedError(run.error, run.failureClass);
       if (run.failureClass) result.failure_class = run.failureClass;
       if (run.worktreeRetained) result.worktree_retained = run.worktreeRetained;
-      result.telemetry = run.telemetry();
+      result.telemetry = telemetry;
     }
     return result;
   }

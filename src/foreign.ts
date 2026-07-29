@@ -51,6 +51,14 @@ export interface ForeignRun {
   terminal_reason: string | null;
   /** The model that actually ran — the field a silent swap shows up in (#25). */
   observed_model: string | null;
+  /**
+   * The model Clanker DECIDED to run, which is the only thing `observed_model`
+   * can be judged against (#54). Projected here for the same reason the
+   * issue-comment pair below is: the disk-poll reader is the one reader who
+   * cannot ask the owning process, so leaving it out would mean the one caller
+   * who most needs the swap alarm is the one who never gets it.
+   */
+  resolved_model: string | null;
   read_only: boolean | null;
   turns: number | null;
   /**
@@ -91,6 +99,7 @@ interface Telemetry {
   terminal_at?: string | null;
   terminal_reason?: string | null;
   observed_model?: string | null;
+  resolved_model?: string | null;
   read_only?: boolean;
   turns?: number;
   server_pid?: number;
@@ -205,6 +214,7 @@ export function readForeignRun(id: string, runsRoot = RUNS_ROOT, now = Date.now(
     terminal_at: telemetry.terminal_at ?? null,
     terminal_reason: telemetry.terminal_reason ?? null,
     observed_model: telemetry.observed_model ?? null,
+    resolved_model: telemetry.resolved_model ?? null,
     read_only: telemetry.read_only ?? null,
     turns: telemetry.turns ?? null,
     server_pid: typeof telemetry.server_pid === "number" ? telemetry.server_pid : null,
