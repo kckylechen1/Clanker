@@ -182,6 +182,84 @@ export function resolveCursorModel(model: string | undefined): string | undefine
 }
 
 /**
+ * Model-family tokens for comparing `resolved_model` against `observed_model`.
+ *
+ * Three normalizations, each answering a shape that really occurs in the
+ * telemetry corpus under ~/.cache/clanker/runs (589 records, read 2026-07-29 —
+ * the counts below are from that scan, not from intuition):
+ *
+ *  1. DROP THE PROVIDER PREFIX. `kimi-for-coding/k3` and `k3` are the same
+ *     model reached through different routing; `openai/x` vs `opencode/x`
+ *     likewise. Treating a prefix difference as a swap is the one failure this
+ *     comparison is explicitly not allowed to have — a false alarm on routing
+ *     makes the real alarm unbelievable, and an unbelieved alarm is no alarm.
+ *  2. LOWERCASE, and fold spaces/underscores onto `-`. The cursor lane reports
+ *     the VENDOR'S DISPLAY NAME rather than the id it was handed (`Composer
+ *     2.5` for `composer-2.5`) — see cursor-acp.ts, which reports it in the
+ *     vendor's own spelling on purpose. 58 of the 589 records are exactly this
+ *     pair and none of them is a swap.
+ *  3. COMPARE AS A TOKEN PREFIX, not as strings. Cursor's display name can
+ *     drop a trailing qualifier (`cursor-grok-4.5-high` reported as `Cursor
+ *     Grok 4.5`, run cursor-1b5da), and cursor-acp.ts's own contract note says
+ *     a reader "should compare model FAMILY, not string equality".
+ *
+ * The residual risk of (3) is real and accepted: `x-mini` would be read as the
+ * same family as `x`. It buys silence on a recurring, structural false alarm
+ * and costs a hypothetical one; no record in the corpus is silenced by it that
+ * should have fired. Every genuine swap in the corpus survives all three steps
+ * — `gpt-5.6-sol` vs `gpt-5.6-terra-fast` diverges at token 3, and everything
+ * that fell back to `opencode/big-pickle` diverges at token 1.
+ */
+function modelFamilyTokens(id: string): string[] {
+  const withoutProvider = id.slice(id.lastIndexOf("/") + 1);
+  return withoutProvider.toLowerCase().replace(/[\s_]+/g, "-").split("-").filter((t) => t.length > 0);
+}
+
+/** True when `a` and `b` name the same model family under `modelFamilyTokens`'s rules. */
+export function sameModelFamily(a: string, b: string): boolean {
+  const [ta, tb] = [modelFamilyTokens(a), modelFamilyTokens(b)];
+  if (ta.length === 0 || tb.length === 0) return false;
+  const [shorter, longer] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
+  return shorter.every((token, i) => token === longer[i]);
+}
+
+/**
+ * The #54 alarm: the backend ran a different model than the one Clanker asked
+ * it for, and said so only by quietly filing a different `observed_model`.
+ *
+ * Why this is a warning and not a footnote: the run whose verdict gets filed
+ * under the wrong model poisons the model's own profile card, so a defect
+ * belonging to model A is recorded against model B. That has already cost this
+ * machine four dispatches' worth of profile data once (opencode substituting
+ * its bundled model when `kimi-for-coding` auth failed), and #54 is the second
+ * occurrence on the same lane.
+ *
+ * Compares `resolved_model` — what Clanker DECIDED to run, after alias
+ * expansion — and never `requested_model`. Comparing the request would fire on
+ * all 26 corpus records where the caller passed a shortname (`kimi` observed as
+ * `kimi-for-coding/k3`), i.e. it would call every correct alias expansion a
+ * swap. Returns null when either side is unknown: an unreported `observed_model`
+ * is missing evidence, not evidence of a swap.
+ */
+export function modelSwapWarning(
+  resolvedModel: string | null | undefined,
+  observedModel: string | null | undefined,
+): string | null {
+  const resolved = resolvedModel?.trim();
+  const observed = observedModel?.trim();
+  if (!resolved || !observed) return null;
+  if (sameModelFamily(resolved, observed)) return null;
+  // Names both sides in full, because the reader's next action is an
+  // ATTRIBUTION decision — which model this verdict gets recorded against —
+  // and "model mismatch" alone does not tell them which of the two won.
+  return (
+    `model swap: this run was dispatched to '${resolved}' (resolved_model) but the backend reports it ` +
+    `actually ran '${observed}' (observed_model). Attribute this run's output — and any judgement about ` +
+    `model quality drawn from it — to '${observed}', NOT to '${resolved}'.`
+  );
+}
+
+/**
  * Lanes whose backend pins a load-bearing default model, so a write dispatch
  * may omit one.
  *
