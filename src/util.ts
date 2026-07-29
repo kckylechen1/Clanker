@@ -172,16 +172,37 @@ const PUBLIC_KEY_WORDS: ReadonlySet<string> = new Set([
 const PUBLIC_SRC_EXTENSION =
   /\.(?:ts|tsx|js|jsx|mjs|cjs|go|rs|py|rb|java|kt|swift|c|h|cc|cpp|cs|sh|bash|zsh|md|json|jsonl|ya?ml|toml|ini|sql|lock)$/i;
 /**
- * `<key><:|=><value>` where the key is a whole token and the value runs to the
- * end of the line, the closing quote, or a parked header — never through one
- * (see freshParkTag: a value that ate a placeholder would delete a header this
- * function had already redacted and set aside).
+ * `<key><:|=><value>` where the key is a whole token and the value is ONE
+ * whitespace-delimited token — the same blast radius `redact()` has always had.
+ *
+ * The first version of this rule let the value run to end of line, and the
+ * leader reproduced what that costs on prose the key-word test cannot tell from
+ * a key: `token: expired at noon` came back as `token: [REDACTED]`, where the
+ * old `redact()` gives `token: [REDACTED] at noon`. That is a REGRESSION rather
+ * than an inherited flaw — this rule replaced a narrower one — and the corpus
+ * statistics missed it because they counted SPANS: eating one word and eating a
+ * whole diagnostic sentence both score 1. Measured the other way, the two
+ * versions eat 89 vs 46 characters across the corpus (22.3 vs 7.7 per hit, worst
+ * case 53 vs 24), which is the number that shows the difference.
+ *
+ * Why one token is not a coverage loss: a credential value has no spaces in it.
+ * The credential that DOES span a space is `Authorization: Basic <blob>`, and
+ * that belongs to AUTH_HEADER, which owns the whole header and runs first. The
+ * one real casualty is a space-bearing passphrase (`passphrase = open sesame`
+ * now blanks `open` and leaves `sesame`) — noted rather than papered over, and
+ * accepted: mangling a sentence of diagnosis, which is what this feature exists
+ * to deliver, is worse than a partial hit on a shape nothing in this codebase
+ * has ever emitted.
+ *
+ * The value also stops at a parked header (`[[`) — see freshParkTag: a value
+ * that ate a placeholder would delete a header this function had already
+ * redacted and set aside.
  *
  * Go's `:=` is excluded because it is assignment, not a key separator: the
  * corpus quotes Go, and `sig := portfolio.AgentSignal{` is evidence.
  */
 const PUBLIC_KEY_ASSIGNMENT =
-  /(^|[\s,{(\["'])([A-Za-z][A-Za-z0-9_.-]*)(["']?[ \t]*(?::(?!=)|=)[ \t]*["']?)((?:(?!\[\[)[^\r\n'"`])+)/gm;
+  /(^|[\s,{(\["'])([A-Za-z][A-Za-z0-9_.-]*)(["']?[ \t]*(?::(?!=)|=)[ \t]*["']?)((?:(?!\[\[)[^\s'"`])+)/gm;
 
 /** Words of a key token: `X-Api-Key-Legacy` → x, api, key, legacy, xapi, apikey, keylegacy. */
 function keyTokenWords(token: string): string[] {

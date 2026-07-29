@@ -407,7 +407,7 @@ test("#27: the public sink's key-name table is longer than the local one, and st
     ["PRIVATE_KEY=hunter2", "hunter2"],
     ["signature: c2ln", "c2ln"],
     ['{"credentials": "hunter2"}', "hunter2"],
-    ["passphrase = open sesame", "open sesame"],
+    ["passphrase = opensesame", "opensesame"],
     // The four a fourth cold review walked past, all the same miss: the
     // keyword was present but not LAST, and the rule required it to sit
     // immediately before the separator. The rule now takes the whole key token
@@ -425,6 +425,27 @@ test("#27: the public sink's key-name table is longer than the local one, and st
     assert.match(out, /^[^[]/, `the key name must not be swallowed: ${out}`);
   }
   assert.ok(redact("X-Auth: hunter2").includes("hunter2"), "the LOCAL redactor is deliberately not widened");
+
+  // The value is ONE token, which is the blast radius `redact()` has always
+  // had. The first version of this rule ran to end of line and the leader
+  // reproduced the cost on prose: a diagnosis sentence whose first word happens
+  // to follow a key-shaped word was deleted whole. Corpus statistics missed it
+  // because they count SPANS — eating one word and eating a sentence both
+  // score 1 — so this assertion is about what is LEFT, not about what is gone.
+  for (const [line, kept] of [
+    ["token: expired at noon", "at noon"],
+    ["session: the run died here", "run died here"],
+    ["auth: broken since tuesday", "since tuesday"],
+  ] as const) {
+    const out = redactForPublic(line);
+    assert.ok(out.includes(kept), `the rest of the sentence must survive: ${JSON.stringify(out)}`);
+    assert.ok(out.includes("[REDACTED]"), out);
+  }
+  // The one thing one-token costs, recorded rather than papered over: a
+  // passphrase that contains a space keeps everything after the first word.
+  // Accepted — the space-bearing credential this codebase actually emits is
+  // `Authorization: Basic <blob>`, and that belongs to the header rule.
+  assert.equal(redactForPublic("passphrase = open sesame"), "passphrase = [REDACTED] sesame");
 
   // The bound, which is what keeps this from being the prose-eating rule its
   // predecessor was accused of being: the keyword has to be in KEY POSITION and
@@ -1178,21 +1199,19 @@ test("mutation: a scheme-name list instead of the header's structure lets `Basic
     }],
     "util.ts",
   );
-  // Re-aimed after the key rule was rewritten to read whole tokens: that rule
-  // now also matches `Authorization:` and catches the plain `Basic` case, so
-  // the two rules overlap and the bare-Basic leak no longer reproduces from
-  // this mutation alone. Defence in depth is the good news; the mutant has to
-  // be pointed at what the header rule STILL uniquely does, which is exactly
-  // the shape the key rule cannot reach — a quoted auth-param, where the key
-  // rule's value stops at the first quote.
-  const out = mutant.redactForPublic('Authorization: Digest response="deadbeefcafe1234"');
-  assert.ok(out.includes("deadbeefcafe1234"), `the mutant republishes the digest: ${out}`);
-  // …and it loses the scheme word too: the key rule blanks everything after
-  // the colon, so `Basic` — the evidence a reader acts on — goes with it.
+  // This mutant briefly stopped discriminating when the key rule's value ran
+  // to end of line — that rule then covered the plain `Basic` case as well, and
+  // the overlap read as defence in depth. Narrowing the value back to one token
+  // (the blast-radius fix) took the overlap away again, and correctly: on
+  // `Authorization: Basic <blob>` the key rule can only blank the scheme word,
+  // leaving the credential one token further along. So the header rule is once
+  // more the only thing standing between this shape and the comment.
   const basic = Buffer.from("user:hunter2").toString("base64");
   const plain = mutant.redactForPublic(`Authorization: Basic ${basic}`);
-  assert.ok(!plain.includes(basic), "the key rule still stops the plain case from leaking");
-  assert.ok(!plain.includes("Basic"), `…but only the header rule keeps the scheme: ${plain}`);
+  assert.ok(plain.includes(basic), `the mutant republishes the credential: ${plain}`);
+  // And the quoted auth-param shape, which no other rule can reach at all.
+  const digest = mutant.redactForPublic('Authorization: Digest response="deadbeefcafe1234"');
+  assert.ok(digest.includes("deadbeefcafe1234"), `the mutant republishes the digest: ${digest}`);
 });
 
 test("mutation: a key rule that only reads the END of the token walks past four real shapes", async () => {
@@ -1221,6 +1240,24 @@ test("mutation: a key rule that only reads the END of the token walks past four 
   // …while still catching the shape it was built for, which is why it survived
   // three rounds of review before this one.
   assert.ok(!mutant.redactForPublic("X-Auth: hunter2").includes("hunter2"));
+});
+
+test("mutation: a key value that runs to end of line deletes the sentence after it", async () => {
+  // The regression this rule shipped with for exactly one round: the value ran
+  // to the end of the line, so a key-shaped word in prose took the diagnosis
+  // with it. `redact()` — the rule this one replaced — never did that.
+  const mutant = await loadMutantModule<typeof import("../src/util.js")>(
+    "util-key-value-to-eol",
+    [{
+      file: "util.ts",
+      find: '(["\']?[ \\t]*(?::(?!=)|=)[ \\t]*["\']?)((?:(?!\\[\\[)[^\\s\'"`])+)/gm;',
+      replace: '(["\']?[ \\t]*(?::(?!=)|=)[ \\t]*["\']?)((?:(?!\\[\\[)[^\\r\\n\'"`])+)/gm;',
+    }],
+    "util.ts",
+  );
+  const out = mutant.redactForPublic("token: expired at noon");
+  assert.ok(!out.includes("at noon"), `the mutant eats the whole sentence: ${out}`);
+  assert.equal(out, "token: [REDACTED]");
 });
 
 test("mutation: substring matching instead of words eats a verdict's own evidence", async () => {

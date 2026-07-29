@@ -28330,7 +28330,7 @@ var PUBLIC_KEY_WORDS = /* @__PURE__ */ new Set([
   "bearer"
 ]);
 var PUBLIC_SRC_EXTENSION = /\.(?:ts|tsx|js|jsx|mjs|cjs|go|rs|py|rb|java|kt|swift|c|h|cc|cpp|cs|sh|bash|zsh|md|json|jsonl|ya?ml|toml|ini|sql|lock)$/i;
-var PUBLIC_KEY_ASSIGNMENT = /(^|[\s,{(\["'])([A-Za-z][A-Za-z0-9_.-]*)(["']?[ \t]*(?::(?!=)|=)[ \t]*["']?)((?:(?!\[\[)[^\r\n'"`])+)/gm;
+var PUBLIC_KEY_ASSIGNMENT = /(^|[\s,{(\["'])([A-Za-z][A-Za-z0-9_.-]*)(["']?[ \t]*(?::(?!=)|=)[ \t]*["']?)((?:(?!\[\[)[^\s'"`])+)/gm;
 function keyTokenWords(token) {
   const parts = token.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[-_.\s]+/).filter(Boolean).map((word) => word.toLowerCase());
   const words = [...parts];
