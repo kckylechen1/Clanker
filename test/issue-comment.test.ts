@@ -1,0 +1,657 @@
+/**
+ * #27 — the dispatch keeps its own account on the ticket.
+ *
+ * Every judgment and attribution on this repo's issues has been typed in by
+ * hand. Hand-typing does not merely cost time, it MISSES: PR #36's body carried
+ * `Closes #17`, the automatic close never fired, and the ticket stayed open
+ * until someone noticed at end of day. The server already holds every fact such
+ * a note needs; the only missing input was which ticket a dispatch was for.
+ *
+ * These tests hold that feature to the three properties that decide whether it
+ * is bookkeeping or noise:
+ *
+ *   1. The verdict is QUOTED, never restated (plugin/README.md's rule for every
+ *      relay seat — a server that summarized would be breaking, in code, the
+ *      rule it imposes on its seats).
+ *   2. Failure is LOUD: stderr AND `telemetry.issue_comment_error`. #27 is
+ *      itself a report of bookkeeping that died quietly.
+ *   3. The server COMMENTS AND NOTHING ELSE. Closing a ticket is the act of a
+ *      person who has read the diff.
+ *
+ * `gh` is never really invoked except in the two places that must prove the
+ * production wiring itself (the default executor's binary name, and its
+ * spawn-failure path); everywhere else the executor is injected, so the suite
+ * can assert on the exact argv the server would have run.
+ *
+ * The last block is the discrimination check: each load-bearing rule is deleted
+ * from a copy of `src/` and the corresponding assertion must go red there.
+ */
+import "./isolate.js";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import {
+  ISSUE_COMMENT_VERDICT_BUDGET,
+  assertCommentOnlyArgs,
+  buildIssueCommentBody,
+  execFileGhRunner,
+  parseIssueRef,
+  postIssueComment,
+  type GhResult,
+  type GhRunner,
+  type IssueCommentFacts,
+} from "../src/issue-comment.js";
+import { LaneManager } from "../src/manager.js";
+import { LaneRun } from "../src/run.js";
+import { fakeSpec, loadMutantManager, loadMutantModule, until } from "./helpers.js";
+
+// ---------------------------------------------------------------------------
+// recording executor
+// ---------------------------------------------------------------------------
+
+interface Recorder {
+  runner: GhRunner;
+  calls: { args: string[]; cwd?: string; timeoutMs: number }[];
+}
+
+/** A `gh` that never exists: records what it was asked to run and answers as told. */
+function recorder(reply: GhResult | (() => Promise<GhResult>) = { code: 0, stdout: "", stderr: "" }): Recorder {
+  const calls: Recorder["calls"] = [];
+  return {
+    calls,
+    runner: async (args, opts) => {
+      calls.push({ args, cwd: opts.cwd, timeoutMs: opts.timeoutMs });
+      return typeof reply === "function" ? await reply() : reply;
+    },
+  };
+}
+
+function facts(over: Partial<IssueCommentFacts> = {}): IssueCommentFacts {
+  return {
+    runId: "codex-8b2b3",
+    status: "done",
+    turn: 1,
+    lane: "codex",
+    profileId: "codex-review",
+    observedModel: "gpt-5.5",
+    durationMs: 754_000,
+    totalTokens: 24_500,
+    retries: 0,
+    corrections: 0,
+    finalMessage: "VERDICT: BUG — src/run.ts:822 writes the tmp file before mkdir. Do not merge.",
+    runDir: "/tmp/clanker/runs/codex-8b2b3",
+    ...over,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 1. parameter validation — refused at dispatch, not discovered at terminal
+// ---------------------------------------------------------------------------
+
+test("#27: a valid issue reference parses in both accepted spellings", () => {
+  assert.deepEqual(parseIssueRef("41"), { number: "41", raw: "41" });
+  assert.deepEqual(parseIssueRef(" 41 "), { number: "41", raw: " 41 " });
+  assert.deepEqual(parseIssueRef("kckylechen1/Clanker#41"), {
+    number: "41",
+    repo: "kckylechen1/Clanker",
+    raw: "kckylechen1/Clanker#41",
+  });
+  assert.deepEqual(parseIssueRef("some.org/my-repo#7").repo, "some.org/my-repo");
+});
+
+test("#27: anything else is refused, and the refusal quotes what the caller wrote", () => {
+  for (const bad of [
+    "", "   ", "abc", "#41", "41abc", "41 42", "owner/repo41", "owner#41",
+    "owner/repo#", "owner/repo#4a", "41\n--repo", "a/b/c#1", "4 1",
+  ]) {
+    assert.throws(() => parseIssueRef(bad), /not a valid issue reference/, `must refuse ${JSON.stringify(bad)}`);
+  }
+});
+
+test("#27: a flag-shaped reference is refused BEFORE it can reach gh as a flag", () => {
+  // execFile passes an argv array and never opens a shell, so this is not
+  // shell-injection defence. The hazard is one argv position over: `gh` re-reads
+  // a leading `-` as a FLAG rather than as the issue it names — the same class
+  // of bug cursor-acp.ts already carries `refuseFlagShapedToken` for.
+  for (const flagShaped of ["-41", "--repo", "-R", "--json", "--repo=evil/repo", "-"]) {
+    assert.throws(() => parseIssueRef(flagShaped), /not a valid issue reference/, flagShaped);
+  }
+});
+
+test("#27: an invalid issue is refused at DISPATCH time, before any run exists", async () => {
+  const m = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir() });
+  try {
+    await assert.rejects(
+      () => m.dispatchProfile({ profile: "codex-review", prompt: "review", cwd: os.tmpdir(), issue: "--repo" }),
+      /not a valid issue reference/,
+    );
+    // Nothing was started: a rejected parameter must cost the caller the
+    // refusal and nothing else.
+    assert.deepEqual(m.list().filter((e) => e.owner === "this-process"), []);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 2. the body — verbatim verdict, honest truncation
+// ---------------------------------------------------------------------------
+
+test("#27: the comment carries the verdict VERBATIM, not a restatement", () => {
+  const verdict = "VERDICT: BUG — src/run.ts:822 writes the tmp file before mkdir. Do not merge.";
+  const { body, truncated, redacted } = buildIssueCommentBody(facts({ finalMessage: verdict }));
+
+  assert.equal(truncated, false);
+  assert.equal(redacted, false);
+  // The exact bytes, on their own line, with nothing wrapped around them: a
+  // `> ` blockquote or a ``` fence would already be a transformation of the
+  // text this comment exists to reproduce.
+  assert.ok(body.split("\n").includes(verdict), `verdict must appear as its own untouched line:\n${body}`);
+  assert.ok(body.includes("🤖 clanker `codex-8b2b3` — done · turn 1"));
+  assert.ok(body.includes("codex / codex-review"));
+  assert.ok(body.includes("observed `gpt-5.5`"));
+  assert.ok(body.includes("12m34s"), `754000ms is 12m34s:\n${body}`);
+  assert.ok(body.includes("1 turn"));
+  assert.ok(body.includes("24.5k tok"));
+  assert.ok(body.includes("/tmp/clanker/runs/codex-8b2b3"), "the run_dir is handed over as an absolute path");
+});
+
+test("#27: an over-long verdict is cut at the budget and SAYS it was cut", () => {
+  const verdict = "X".repeat(ISSUE_COMMENT_VERDICT_BUDGET + 137);
+  const { body, truncated } = buildIssueCommentBody(facts({ finalMessage: verdict }));
+
+  assert.equal(truncated, true);
+  assert.ok(body.includes("X".repeat(ISSUE_COMMENT_VERDICT_BUDGET)), "the head is present, verbatim");
+  assert.ok(!body.includes("X".repeat(ISSUE_COMMENT_VERDICT_BUDGET + 1)), "and stops at the budget");
+  // "Truncated silently" is the failure this repo has already paid for once:
+  // a clipped verdict that does not announce itself reads as a whole verdict.
+  assert.match(body, /truncated at 400 of 537 characters/);
+  assert.match(body, /result\.md/, "and points at the lossless artifact");
+});
+
+test("#27: a run that died before speaking still files an account, labelled as the error", () => {
+  const { body } = buildIssueCommentBody(
+    facts({ status: "error", finalMessage: "", error: "lane process exited mid-turn (code=1 signal=null)" }),
+  );
+  assert.ok(body.includes("🤖 clanker `codex-8b2b3` — error · turn 1"));
+  assert.ok(body.split("\n").includes("error:"), "the fallback names which field is being shown");
+  assert.ok(body.split("\n").includes("lane process exited mid-turn (code=1 signal=null)"));
+});
+
+test("#27: secret-shaped values are redacted before leaving for a remote, and it is announced", () => {
+  // The one deliberate deviation from byte-for-byte quoting. A comment is the
+  // only artifact this server pushes to a possibly-public surface, and a worker
+  // that echoed a credential into its final message would otherwise publish it.
+  // Announced in the body, so it is never a silent rewrite.
+  const { body, redacted } = buildIssueCommentBody(
+    facts({ finalMessage: "the env dump showed ZHIPUAI_API_KEY=sk-live-abcdef and nothing else" }),
+  );
+  assert.equal(redacted, true);
+  assert.ok(!body.includes("sk-live-abcdef"), "the credential must not reach the comment");
+  assert.match(body, /secret-shaped values were redacted/);
+  assert.match(body, /holds the unredacted text/);
+});
+
+// ---------------------------------------------------------------------------
+// 3. argv — a comment and nothing else, ever
+// ---------------------------------------------------------------------------
+
+test("#27: the executor is only ever handed `gh issue comment`", async () => {
+  const rec = recorder();
+  const out = await postIssueComment(
+    { ref: parseIssueRef("kckylechen1/Clanker#27"), facts: facts(), cwd: os.tmpdir() },
+    { run: rec.runner },
+  );
+  assert.equal(out.ok, true);
+  assert.equal(rec.calls.length, 1);
+
+  const args = rec.calls[0].args;
+  assert.deepEqual(args.slice(0, 3), ["issue", "comment", "27"]);
+  assert.deepEqual(args.slice(3, 5), ["--repo", "kckylechen1/Clanker"]);
+  assert.equal(args[5], "--body");
+  assert.equal(args.length, 7, "no argv beyond the body");
+  // No state-changing verb can be present at ANY position outside the body.
+  for (const [i, arg] of args.entries()) {
+    if (i === 6) continue; // the body is free-form worker output
+    assert.ok(
+      !["close", "reopen", "edit", "delete", "transfer", "pin", "lock", "--state"].includes(arg),
+      `argv[${i}] = ${arg}`,
+    );
+  }
+});
+
+test("#27: a bare number carries no --repo and answers from the dispatch's own repo", async () => {
+  const rec = recorder();
+  await postIssueComment({ ref: parseIssueRef("27"), facts: facts(), cwd: os.tmpdir() }, { run: rec.runner });
+  assert.deepEqual(rec.calls[0].args.slice(0, 3), ["issue", "comment", "27"]);
+  assert.equal(rec.calls[0].args[3], "--body");
+  assert.equal(rec.calls[0].cwd, os.tmpdir());
+});
+
+test("#27: any argv that is not a comment is refused in code, not only in review", () => {
+  assert.throws(() => assertCommentOnlyArgs(["issue", "close", "27"]), /only `gh issue comment`/);
+  assert.throws(() => assertCommentOnlyArgs(["issue", "edit", "27", "--body", "x"]), /only `gh issue comment`/);
+  assert.throws(() => assertCommentOnlyArgs(["pr", "merge", "36"]), /only `gh issue comment`/);
+  assert.throws(() => assertCommentOnlyArgs(["issue", "comment", "27", "--state", "closed"]), /unexpected flag/);
+  assert.throws(() => assertCommentOnlyArgs(["issue", "comment", "--repo"]), /must be a bare number/);
+  assert.throws(() => assertCommentOnlyArgs(["issue", "comment", "27", "--body"]), /has no value/);
+  // …and the legitimate shapes still pass.
+  assertCommentOnlyArgs(["issue", "comment", "27", "--body", "hi"]);
+  assertCommentOnlyArgs(["issue", "comment", "27", "--repo", "o/r", "--body", "hi"]);
+});
+
+// ---------------------------------------------------------------------------
+// 4. failure is loud, never fatal
+// ---------------------------------------------------------------------------
+
+test("#27: a non-zero `gh` is loud, reports its stderr, and does not throw", async () => {
+  const logged: string[] = [];
+  const rec = recorder({ code: 1, stdout: "", stderr: "gh: Could not resolve to an Issue with the number 999999." });
+  const out = await postIssueComment(
+    { ref: parseIssueRef("999999"), facts: facts(), cwd: os.tmpdir() },
+    { run: rec.runner, logError: (m) => logged.push(m) },
+  );
+  assert.equal(out.ok, false);
+  assert.match((out as { error: string }).error, /`gh` exited 1/);
+  assert.match((out as { error: string }).error, /Could not resolve to an Issue/);
+  assert.equal(logged.length, 1, "silence is the failure mode #27 exists to end");
+  assert.match(logged[0], /\[clanker\] issue comment for run 'codex-8b2b3' on #999999 FAILED/);
+  assert.match(logged[0], /result\.md/, "the log still points the reader at the verdict");
+});
+
+test("#27: a missing `gh` binary is reported as itself, not swallowed", async () => {
+  const logged: string[] = [];
+  const enoent = Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" });
+  const out = await postIssueComment(
+    { ref: parseIssueRef("27"), facts: facts() },
+    {
+      run: () => Promise.reject(enoent),
+      logError: (m) => logged.push(m),
+    },
+  );
+  assert.equal(out.ok, false);
+  assert.match((out as { error: string }).error, /spawn gh ENOENT/);
+  assert.match(logged[0], /spawn gh ENOENT/);
+});
+
+test("#27: a `gh` that hangs is cut off by the hard ceiling instead of holding the terminal", async () => {
+  const logged: string[] = [];
+  const started = Date.now();
+  const out = await postIssueComment(
+    { ref: parseIssueRef("27"), facts: facts() },
+    {
+      // Never settles. The ceiling has to live in postIssueComment, not only
+      // inside the default executor — an injectable dependency's timeout is a
+      // timeout only for that one implementation.
+      run: () => new Promise<GhResult>(() => {}),
+      timeoutMs: 120,
+      logError: (m) => logged.push(m),
+    },
+  );
+  assert.equal(out.ok, false);
+  assert.match((out as { error: string }).error, /did not return within 120ms/);
+  assert.ok(Date.now() - started < 5_000, "the ceiling really fired");
+  assert.equal(logged.length, 1);
+});
+
+test("#27: the ceiling is operator-overridable through the environment", async () => {
+  const rec = recorder();
+  await postIssueComment({ ref: parseIssueRef("27"), facts: facts() }, {
+    run: rec.runner,
+    env: { CLANKER_ISSUE_COMMENT_TIMEOUT_MS: "2500" },
+  });
+  assert.equal(rec.calls[0].timeoutMs, 2500);
+
+  const rec2 = recorder();
+  await postIssueComment({ ref: parseIssueRef("27"), facts: facts() }, {
+    run: rec2.runner,
+    env: { CLANKER_ISSUE_COMMENT_TIMEOUT_MS: "not-a-number" },
+  });
+  assert.equal(rec2.calls[0].timeoutMs, 10_000, "a junk override falls back to the documented default");
+});
+
+test("#27: the DEFAULT executor really runs `gh`, and a missing binary rejects", async () => {
+  // The one test that exercises the production wiring rather than an injected
+  // fake. Without it, every assertion above would hold equally well over a
+  // module that never named `gh` at all.
+  const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-no-gh-"));
+  const savedPath = process.env.PATH;
+  process.env.PATH = emptyDir;
+  try {
+    await assert.rejects(
+      () => execFileGhRunner(["issue", "comment", "27", "--body", "x"], { timeoutMs: 5_000 }),
+      (error: NodeJS.ErrnoException) => {
+        assert.equal(error.code, "ENOENT");
+        assert.match(String(error.message), /gh/);
+        return true;
+      },
+    );
+  } finally {
+    process.env.PATH = savedPath;
+    fs.rmSync(emptyDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 5. the wiring: a real dispatch, through the manager
+// ---------------------------------------------------------------------------
+
+function makeManager(ghRunner?: GhRunner, baseRepo = os.tmpdir()): LaneManager {
+  return new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo, ghRunner });
+}
+
+test("#27: a terminal run posts exactly one comment carrying its real telemetry", async () => {
+  const rec = recorder();
+  const m = makeManager(rec.runner);
+  try {
+    const verdict = "F27-LIVE: the account writes itself";
+    const { id } = await m.dispatchProfile({
+      profile: "codex-review",
+      prompt: verdict,
+      cwd: os.tmpdir(),
+      issue: "kckylechen1/Clanker#27",
+    });
+    await until(() => m.status(id).status !== "running");
+
+    assert.equal(rec.calls.length, 1, "one terminal turn, one comment");
+    const body = rec.calls[0].args.at(-1)!;
+    // The fake agent echoes its prompt back as the final message, so the
+    // verdict text is the discriminator between "quoted the run" and "invented
+    // something plausible".
+    assert.ok(body.split("\n").includes(verdict), `verdict must be quoted verbatim:\n${body}`);
+    assert.ok(body.includes(`\`${id}\``), "the run id names which dispatch this account is for");
+    assert.ok(body.includes("codex / codex-review"), "and which seat shape produced it");
+    assert.ok(body.includes(m.status(id).run_dir), "and where the whole evidence lives");
+    assert.ok(body.includes("— done · turn 1"));
+    assert.equal(m.status(id).telemetry?.issue_comment_error, undefined, "a landed comment records no error");
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("#27: a dispatch with no issue invokes gh ZERO times", async () => {
+  // Not "posts nothing useful" — invokes nothing at all. Bookkeeping is opt-in
+  // and the server never guesses a ticket from the prompt or a branch name.
+  const rec = recorder();
+  const m = makeManager(rec.runner);
+  try {
+    const { id } = await m.dispatchProfile({ profile: "codex-review", prompt: "no ticket here #27 (in prose)", cwd: os.tmpdir() });
+    await until(() => m.status(id).status !== "running");
+    assert.equal(rec.calls.length, 0);
+    assert.equal(m.status(id).telemetry?.issue_comment_error, undefined, "no ticket owed means no error either");
+  } finally {
+    await m.shutdown();
+  }
+});
+
+test("#27: a failed comment lands in telemetry as issue_comment_error and the run still finishes", async () => {
+  const rec = recorder({ code: 4, stdout: "", stderr: "HTTP 403: Resource not accessible by integration" });
+  const m = makeManager(rec.runner);
+  try {
+    const { id } = await m.dispatchProfile({ profile: "codex-review", prompt: "review", cwd: os.tmpdir(), issue: "27" });
+    await until(() => m.status(id).status !== "running");
+
+    const status = m.status(id);
+    assert.equal(status.status, "done", "bookkeeping never fails the dispatch it accounts for");
+    assert.match(status.telemetry!.issue_comment_error!, /^#27: `gh` exited 4/);
+    assert.match(status.telemetry!.issue_comment_error!, /Resource not accessible/);
+    // Durable, not just in memory: the record outlives this process, which is
+    // the whole point of writing it down instead of logging it.
+    const onDisk = JSON.parse(fs.readFileSync(path.join(status.run_dir, "telemetry.json"), "utf8"));
+    assert.match(onDisk.issue_comment_error, /`gh` exited 4/);
+  } finally {
+    await m.shutdown();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 6. the correction round is a SECOND comment, not an edit
+// ---------------------------------------------------------------------------
+
+function makeBaseRepo(): { base: string; root: string } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-issue-comment-repo-"));
+  const origin = path.join(root, "origin.git");
+  const seed = path.join(root, "seed");
+  const base = path.join(root, "base");
+  const git = (cwd: string, args: string[]) =>
+    execFileSync("git", args, {
+      cwd,
+      stdio: "pipe",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t",
+        GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t",
+      },
+    });
+  git(root, ["init", "--bare", "-b", "main", origin]);
+  git(root, ["clone", origin, seed]);
+  fs.writeFileSync(path.join(seed, "README.md"), "seed\n");
+  git(seed, ["add", "."]);
+  git(seed, ["commit", "-m", "init"]);
+  git(seed, ["push", "origin", "main"]);
+  git(root, ["clone", origin, base]);
+  return { base, root };
+}
+
+test("#27: the second terminal transition APPENDS a turn-2 comment carrying the corrected verdict", async () => {
+  // The ruling, spelled out: the ledger row is once per DISPATCH (it feeds
+  // rates), result.md is once per TERMINAL TRANSITION and overwrites (a reader
+  // must get the corrected verdict), and this is once per terminal transition
+  // and APPENDS. "This run was corrected, and here is what changed" is exactly
+  // the history the thread exists to preserve; editing the first comment would
+  // erase the only durable evidence that a correction round happened.
+  //
+  // Driven on LaneRun directly so the two turns' MESSAGES differ: the
+  // end-to-end test below runs a write profile, whose fake worker echoes the
+  // server-prepended write-discipline preamble and therefore produces two
+  // verdicts with an identical first 400 characters.
+  const rec = recorder();
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-issue-correction-"));
+  const run = new LaneRun({
+    id: "oc-corrected",
+    lane: "opencode",
+    cwd: os.tmpdir(),
+    runDir,
+    readOnly: false,
+    supervised: true,
+    profileId: "oc-glm-write",
+    issueRef: parseIssueRef("kckylechen1/Clanker#27"),
+    ghRunner: rec.runner,
+  });
+  const say = (text: string) =>
+    run.onUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } } as never);
+
+  run.beginTurn("implement the frozen spec");
+  say("VERDICT ONE: shipped, but src/ was widened");
+  await run.completeTurn();
+  assert.equal(rec.calls.length, 1);
+
+  run.reopenForResume();
+  run.beginTurn("you drifted: only touch src/", true);
+  say("VERDICT TWO: narrowed back to src/, as corrected");
+  await run.completeTurn();
+
+  assert.equal(rec.calls.length, 2, "the correction round is its own entry in the thread");
+  const one = rec.calls[0].args.at(-1)!;
+  const two = rec.calls[1].args.at(-1)!;
+  assert.ok(one.includes("— done · turn 1"), one);
+  assert.ok(two.includes("— done · turn 2"), two);
+  assert.ok(two.includes("1 correction"), "and says it WAS a correction");
+  assert.ok(one.split("\n").includes("VERDICT ONE: shipped, but src/ was widened"));
+  assert.ok(two.split("\n").includes("VERDICT TWO: narrowed back to src/, as corrected"));
+  assert.ok(
+    !two.includes("VERDICT ONE"),
+    "the second comment is the corrected verdict, not a restatement of the first",
+  );
+  // Both name the same run, so the thread reads as one dispatch's history.
+  for (const call of rec.calls) {
+    assert.deepEqual(call.args.slice(0, 2), ["issue", "comment"]);
+    assert.ok(call.args.at(-1)!.includes("`oc-corrected`"));
+  }
+  run.closeStreams();
+});
+
+test("#27: a corrected dispatch really files two comments end to end, turn 1 then turn 2", async () => {
+  const rec = recorder();
+  const repo = makeBaseRepo();
+  const m = makeManager(rec.runner, repo.base);
+  try {
+    const { id } = await m.dispatchProfile({
+      profile: "oc-glm-write",
+      prompt: "implement the frozen spec",
+      worktree: `clanker/issue-comment-${Math.random().toString(36).slice(2, 8)}`,
+      issue: "27",
+    });
+    await until(() => m.status(id).status !== "running");
+    assert.equal(rec.calls.length, 1);
+
+    await m.promptExisting(id, "you drifted: only touch src/", true);
+    await until(() => m.status(id).status !== "running");
+
+    assert.equal(rec.calls.length, 2, "the correction round is its own entry in the thread");
+    const first = rec.calls[0].args.at(-1)!;
+    const second = rec.calls[1].args.at(-1)!;
+    assert.ok(first.includes("· turn 1"), first);
+    assert.ok(second.includes("· turn 2"), second);
+    assert.ok(second.includes("1 correction"), "and says it WAS a correction");
+    assert.ok(first.includes("opencode / oc-glm-write"), "the profile is named, not just the lane");
+    // Both comments name the same run: the thread reads as one dispatch's history.
+    assert.ok(first.includes(`\`${id}\``) && second.includes(`\`${id}\``));
+    // And every one of them was still only ever a comment.
+    for (const call of rec.calls) assert.deepEqual(call.args.slice(0, 2), ["issue", "comment"]);
+    // One dispatch, one ledger row — the two dedup semantics coexist.
+    const ledger = path.join(process.env.CLANKER_LEDGER_DIR ?? "", "ledger.jsonl");
+    const rows = fs.existsSync(ledger)
+      ? fs.readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      : [];
+    assert.equal(rows.filter((r) => r.label === id).length, 1, "two comments, still exactly one ledger row");
+  } finally {
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
+test("#27: a cancelled run still files its account", async () => {
+  const rec = recorder();
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-issue-cancel-"));
+  const run = new LaneRun({
+    id: "codex-cancelled",
+    lane: "codex",
+    cwd: os.tmpdir(),
+    runDir,
+    readOnly: true,
+    issueRef: parseIssueRef("27"),
+    ghRunner: rec.runner,
+  });
+  run.beginTurn("do the thing");
+  await run.cancelTurn();
+  assert.equal(rec.calls.length, 1, "a cancellation is an outcome and belongs on the ticket");
+  assert.ok(rec.calls[0].args.at(-1)!.includes("— cancelled · turn 1"));
+  run.closeStreams();
+});
+
+// ---------------------------------------------------------------------------
+// 7. discrimination — each rule deleted, the matching assertion goes red
+// ---------------------------------------------------------------------------
+
+test("mutation: a permissive pattern lets a flag-shaped reference through", async () => {
+  const mutant = await loadMutantModule<typeof import("../src/issue-comment.js")>(
+    "issue-comment-loose-pattern",
+    [{
+      file: "issue-comment.ts",
+      find: "export const ISSUE_REF_PATTERN = /^(?:[\\w.-]+\\/[\\w.-]+#)?\\d+$/;",
+      replace: "export const ISSUE_REF_PATTERN = /\\d+/;",
+    }],
+    "issue-comment.ts",
+  );
+  // Green build refuses it (asserted above); the mutant accepts it and would
+  // hand `gh` a token it re-reads as a flag.
+  assert.doesNotThrow(() => mutant.parseIssueRef("--repo=evil/repo#41"));
+});
+
+test("mutation: a summarizing body stops carrying the verdict verbatim", async () => {
+  const mutant = await loadMutantModule<typeof import("../src/issue-comment.js")>(
+    "issue-comment-summarize",
+    [{
+      file: "issue-comment.ts",
+      find: "  const head = truncated ? cleaned.slice(0, ISSUE_COMMENT_VERDICT_BUDGET) : cleaned;",
+      replace: "  const head = `the worker reported ${cleaned.split(/\\s+/).length} words of judgment`;",
+    }],
+    "issue-comment.ts",
+  );
+  const verdict = "VERDICT: BUG — do not merge.";
+  const { body } = mutant.buildIssueCommentBody(facts({ finalMessage: verdict }));
+  assert.ok(!body.split("\n").includes(verdict), "the mutant restates instead of quoting — the green build must not");
+});
+
+test("mutation: without the truncation notice a clipped verdict reads as a whole one", async () => {
+  const mutant = await loadMutantModule<typeof import("../src/issue-comment.js")>(
+    "issue-comment-silent-truncation",
+    [{
+      file: "issue-comment.ts",
+      find: "  if (truncated) {\n    lines.push(",
+      replace: "  if (false) {\n    lines.push(",
+    }],
+    "issue-comment.ts",
+  );
+  const { body } = mutant.buildIssueCommentBody(facts({ finalMessage: "X".repeat(ISSUE_COMMENT_VERDICT_BUDGET + 137) }));
+  assert.doesNotMatch(body, /truncated at/, "the mutant clips in silence");
+});
+
+test("mutation: a dropped argv gate would let a state-changing subcommand through", async () => {
+  const mutant = await loadMutantModule<typeof import("../src/issue-comment.js")>(
+    "issue-comment-no-argv-gate",
+    [{
+      file: "issue-comment.ts",
+      find: "export function assertCommentOnlyArgs(args: readonly string[]): void {",
+      replace: "export function assertCommentOnlyArgs(args: readonly string[]): void {\n  if (args) return;",
+    }],
+    "issue-comment.ts",
+  );
+  assert.doesNotThrow(() => mutant.assertCommentOnlyArgs(["issue", "close", "27"]));
+});
+
+test("mutation: a swallowed gh failure reports success and records nothing", async () => {
+  const mutant = await loadMutantModule<typeof import("../src/issue-comment.js")>(
+    "issue-comment-silent-failure",
+    [{
+      file: "issue-comment.ts",
+      find: "  if (result.code !== 0) {",
+      replace: "  if (false as boolean) {",
+    }],
+    "issue-comment.ts",
+  );
+  const logged: string[] = [];
+  const out = await mutant.postIssueComment(
+    { ref: mutant.parseIssueRef("27"), facts: facts() },
+    { run: async () => ({ code: 7, stdout: "", stderr: "boom" }), logError: (m) => logged.push(m) },
+  );
+  assert.equal(out.ok, true, "the mutant calls a failed post a success");
+  assert.equal(logged.length, 0, "…in total silence — the exact shape of #27 itself");
+});
+
+test("mutation: a terminal transition that skips the post leaves the ticket with no account", async () => {
+  // Attacks the WIRING, not the module: run.ts's terminal tail is where the
+  // account is actually owed, and a module that works perfectly while nobody
+  // calls it is the failure this repo has shipped before (#19's bundles).
+  const mutant = await loadMutantManager("issue-comment-unwired", [{
+    file: "run.ts",
+    find: "    this.writeLedgerRowOnce();\n    await this.postIssueCommentForTurn();\n  }\n\n  /**\n   * @param failureClass",
+    replace: "    this.writeLedgerRowOnce();\n  }\n\n  /**\n   * @param failureClass",
+  }]);
+  const rec = recorder();
+  const m = new mutant.LaneManager({
+    resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir(), ghRunner: rec.runner,
+  });
+  try {
+    const { id } = await m.dispatchProfile({ profile: "codex-review", prompt: "review", cwd: os.tmpdir(), issue: "27" });
+    await until(() => m.status(id).status !== "running");
+    assert.equal(m.status(id).status, "done", "the mutant's run still finishes");
+    assert.equal(rec.calls.length, 0, "…and files nothing, which the green build must not");
+  } finally {
+    await m.shutdown();
+  }
+});
