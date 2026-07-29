@@ -57,17 +57,19 @@ test("each generated tool exposes only its own profile's free parameters", () =>
   const manager = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true });
   const tools = captureTools(manager);
   // Read-only codex review: prompt/cwd/worktree(optional)/base/doNotTouch/
-  // effort — no model (lane default), no sandbox (welded read-only), no lane,
-  // no read_only. base/doNotTouch exist wherever a worktree can.
-  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-review")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "effort"]);
+  // effort/issue — no model (lane default), no sandbox (welded read-only), no
+  // lane, no read_only. base/doNotTouch exist wherever a worktree can; `issue`
+  // (#27) exists on EVERY profile, because a review verdict is as worth
+  // recording on its ticket as an implementation is.
+  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-review")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "effort", "issue"]);
   // Write codex: adds a caller-selectable sandbox, and worktree is mandatory.
-  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "sandbox", "effort"]);
+  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "sandbox", "effort", "issue"]);
   // OpenCode write: model is the caller's, sandbox is not a knob on this lane.
-  assert.deepEqual(Object.keys(tools.get("clanker_start_oc-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "model", "effort"]);
-  // Supervised GLM: everything but prompt/cwd/worktree/base/doNotTouch/effort is welded.
-  assert.deepEqual(Object.keys(tools.get("clanker_start_oc-glm-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "effort"]);
+  assert.deepEqual(Object.keys(tools.get("clanker_start_oc-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "model", "effort", "issue"]);
+  // Supervised GLM: everything but prompt/cwd/worktree/base/doNotTouch/effort/issue is welded.
+  assert.deepEqual(Object.keys(tools.get("clanker_start_oc-glm-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "effort", "issue"]);
   // Gemini: the lane forbids worktrees, so the parameter does not exist.
-  assert.deepEqual(Object.keys(tools.get("clanker_start_gemini-recon")!.config.inputSchema), ["prompt", "cwd", "effort"]);
+  assert.deepEqual(Object.keys(tools.get("clanker_start_gemini-recon")!.config.inputSchema), ["prompt", "cwd", "effort", "issue"]);
 
   const codexWrite = z.object(tools.get("clanker_start_codex-write")!.config.inputSchema);
   assert.equal(codexWrite.safeParse({ prompt: "w", worktree: "b" }).success, true);

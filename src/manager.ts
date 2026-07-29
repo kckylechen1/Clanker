@@ -40,6 +40,7 @@ import {
   scanForeignRuns,
   type ForeignRun,
 } from "./foreign.js";
+import { parseIssueRef, type GhRunner, type IssueRef } from "./issue-comment.js";
 import { resolveProfileDispatch, type ProfileDispatchInput } from "./profiles.js";
 import { LaneRun } from "./run.js";
 import type {
@@ -103,6 +104,14 @@ export interface DispatchParams extends Omit<LaneRequestOptions, "secrets"> {
    * is refused without one rather than silently never checked.
    */
   doNotTouch?: string[];
+  /**
+   * Ticket this dispatch is being run for (#27) — `"41"` or `"owner/repo#41"`.
+   * Validated in `validateDispatchParams` (pure, before any disk side effect)
+   * so an unusable reference is refused while the caller is still there to
+   * hear it, rather than discovered at terminal time when the run has already
+   * been paid for and its verdict has nowhere to go.
+   */
+  issue?: string;
 }
 
 /**
@@ -138,6 +147,8 @@ interface ValidatedDispatch {
   profile: "worker" | "kimi-crew";
   readOnly: boolean;
   requiresIsolation: boolean;
+  /** Parsed `issue` (#27), present only when the caller named a ticket. */
+  issueRef?: IssueRef;
 }
 
 /**
@@ -159,6 +170,11 @@ function validateDispatchParams(
   if (!LANE_NAMES.includes(params.lane)) {
     throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
   }
+  // #27: parsed here, in the pure pre-flight, for the same reason every other
+  // check is here — a refusal must cost the caller nothing but the refusal. It
+  // is also the ONLY place the format is judged, so both dispatch entrances
+  // (dispatchStart and dispatchProfile) are held to one rule.
+  const issueRef = params.issue?.trim() ? parseIssueRef(params.issue) : undefined;
   const profile = params.profile ?? "worker";
   if (profile !== "worker" && profile !== "kimi-crew") throw new Error(`unsupported profile '${profile}'`);
   if (params.lane === "gemini" && profile !== "worker") throw new Error("Clanker: Gemini rejects profile");
@@ -213,7 +229,7 @@ function validateDispatchParams(
       "write-capable dispatch must run in an isolated worktree: pass `worktree` (a branch name). Strict reads may run in-place.",
     );
   }
-  return { params, profile, readOnly, requiresIsolation };
+  return { params, profile, readOnly, requiresIsolation, issueRef };
 }
 
 /**
@@ -401,6 +417,14 @@ export interface LaneManagerOptions {
   cancelGraceMs?: number;
   /** SIGTERM grace before SIGKILL escalation (primarily a test override). */
   processTerminateGraceMs?: number;
+  /**
+   * Executor for the #27 issue comment's `gh` call, injected the same way
+   * `resolveSpec` injects the lane spawn: the suite proves what argv the server
+   * would run — and that it runs none at all without an `issue` — without a
+   * `gh` on PATH and without writing on a real ticket. Undefined in production,
+   * where `execFileGhRunner` runs.
+   */
+  ghRunner?: GhRunner;
 }
 
 const DEFAULT_SESSION_TTL_MS = envInt("CLANKER_SESSION_TTL_MS", 600_000);
@@ -425,6 +449,8 @@ export class LaneManager {
   private readonly capacityRetryBackoffMs: number;
   private readonly cancelGraceMs: number;
   private readonly processTerminateGraceMs?: number;
+  /** Injected `gh` executor for #27 issue comments; undefined runs the real one. */
+  private readonly ghRunner?: GhRunner;
   private readonly warningsById = new Map<string, string[]>();
   private readonly closing = new Map<string, Promise<void>>();
   /** The turn engine (turn-driver.ts); every per-turn method below forwards to it. */
@@ -448,6 +474,7 @@ export class LaneManager {
     this.capacityRetryBackoffMs = opts.capacityRetryBackoffMs ?? CAPACITY_RETRY_BACKOFF_MS;
     this.cancelGraceMs = opts.cancelGraceMs ?? CANCEL_GRACE_MS;
     this.processTerminateGraceMs = opts.processTerminateGraceMs;
+    this.ghRunner = opts.ghRunner;
     this.turnDriver = new TurnDriver(this.turnHost());
     if (!opts.disableReaper) {
       const period = Math.max(5_000, Math.floor(this.sessionTtlMs / 10));
@@ -534,6 +561,7 @@ export class LaneManager {
         doNotTouch: resolved.doNotTouch,
         model: resolved.model,
         effort: resolved.effort,
+        issue: resolved.issue,
         readOnly: resolved.readOnly,
         sandbox: resolved.sandbox,
         profile: resolved.profile,
@@ -554,7 +582,7 @@ export class LaneManager {
     if (this.shuttingDown) throw new Error("Clanker manager is shutting down; refusing a new dispatch");
     const validated = validateDispatchParams(params, minted, this.host);
     params = validated.params;
-    const { profile, readOnly } = validated;
+    const { profile, readOnly, issueRef } = validated;
     // Server-owned workspace-discipline prefix on every write-class dispatch
     // (a08f7a1): the words the worker is held to are the words it was handed,
     // so the ledger's initialPrompt and the first turn both use lanePrompt.
@@ -755,6 +783,14 @@ export class LaneManager {
       initialPrompt: lanePrompt,
       turnTimeoutMs: minted.turnTimeoutMs,
       supervised: minted.supervision === "sonnet",
+      issueRef,
+      ghRunner: this.ghRunner,
+      // The DISPATCH PROFILE id (`codex-review`), not the OpenCode agent
+      // profile in `requestOpts.profile` — the issue comment names which seat
+      // shape produced the verdict, and "worker" answers nothing. Only the
+      // profile entrance mints one, so a direct dispatchStart run simply names
+      // its lane.
+      profileId: minted.profileId,
     });
     this.runs.set(id, run);
 
@@ -1105,13 +1141,13 @@ export class LaneManager {
         run.markForcedKill();
         await this.computeTouched(run);
         await this.close(id);
-        run.cancelTurn();
+        await run.cancelTurn();
       }
     }
     if (run.turnStatus === "running") {
       await this.computeTouched(run);
       await this.close(id);
-      run.cancelTurn();
+      await run.cancelTurn();
     }
     return { id, status: run.turnStatus };
   }

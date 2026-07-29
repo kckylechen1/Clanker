@@ -25,6 +25,12 @@ import {
   resolveCursorModel,
   resolveOcModel,
 } from "./constants.js";
+import {
+  describeRef,
+  postIssueComment,
+  type GhRunner,
+  type IssueRef,
+} from "./issue-comment.js";
 import { laneSessionRefFrom } from "./lane-session.js";
 import { appendLedgerRow } from "./ledger.js";
 import type {
@@ -162,6 +168,22 @@ export class LaneRun {
    * steering an unsupervised worker.
    */
   readonly supervised: boolean;
+  /**
+   * The ticket this dispatch is being run for (#27), already parsed and
+   * validated at dispatch time. Undefined means the dispatcher kept no account
+   * on any issue — which is a choice, not a failure, and stays completely
+   * silent: no `gh` is invoked, nothing is logged.
+   */
+  readonly issueRef?: IssueRef;
+  /** Dispatch-profile id (profiles.ts), for the issue comment's own byline. */
+  readonly profileId?: string;
+  /**
+   * Test/operator seam for the `gh` invocation, in the same spirit as
+   * LaneManager's injectable `resolveSpec`: the process-spawning capability is
+   * handed in rather than reached for, so the suite can prove what argv the
+   * server would run without a `gh` on PATH and without touching a real issue.
+   */
+  private readonly ghRunner?: GhRunner;
 
   turnStatus: RunStatus = "running";
   turnsCount = 0;
@@ -213,6 +235,13 @@ export class LaneRun {
    * with a siren attached.
    */
   private resumeModel?: string;
+  /**
+   * Why nobody will find this turn's comment on the ticket (#27), surfaced as
+   * telemetry `issue_comment_error`. Set only when an issue WAS named and the
+   * post failed — so "field absent" reads as "no account was owed, or the
+   * account was kept", never as "we tried and said nothing about it".
+   */
+  private issueCommentError?: string;
   /** Live worker identity (#32): pid — which is also its pgid — and the ms epoch it was spawned. */
   private workerPid?: number;
   private workerStartedAt?: number;
@@ -263,6 +292,12 @@ export class LaneRun {
     turnTimeoutMs?: number;
     /** True only for the supervised profile shape; gates correction turns. */
     supervised?: boolean;
+    /** Parsed ticket reference (#27); absent means no issue bookkeeping at all. */
+    issueRef?: IssueRef;
+    /** Dispatch-profile id, minted only by the profile entrance. */
+    profileId?: string;
+    /** Injected `gh` executor; production leaves it undefined and the real one runs. */
+    ghRunner?: GhRunner;
   }) {
     this.id = init.id;
     this.lane = init.lane;
@@ -280,6 +315,9 @@ export class LaneRun {
     this.initialPrompt = init.initialPrompt ?? "";
     this.turnTimeoutMs = init.turnTimeoutMs;
     this.supervised = init.supervised ?? false;
+    this.issueRef = init.issueRef;
+    this.profileId = init.profileId;
+    this.ghRunner = init.ghRunner;
   }
 
   // ---- lifecycle ----------------------------------------------------------
@@ -312,7 +350,22 @@ export class LaneRun {
     return this.turnStartedAt;
   }
 
-  completeTurn(): void {
+  /**
+   * The three terminal transitions below are `async` for exactly one reason:
+   * the #27 issue comment is a NETWORK call, and the leader's ruling is that it
+   * is awaited under a hard ceiling rather than fired and forgotten. A one-shot
+   * controller can exit moments after a run goes terminal, and a floating
+   * promise at that moment is a comment that silently never happens — the exact
+   * class of failure #27 exists to end.
+   *
+   * The status flip stays SYNCHRONOUS: everything up to the first `await` runs
+   * before the caller gets its promise back, so `clanker_wait`'s
+   * `isTerminalTurn()` and every `if (run.turnStatus === "running")` guard in
+   * the manager observe the terminal state at exactly the tick they did before.
+   * What the `await` delays is only the CALLER's resumption — i.e. the drive,
+   * which is already tracked and settled by `shutdown()`.
+   */
+  async completeTurn(): Promise<void> {
     if (this.isTerminalTurn()) return;
     this.flushMessageDigest();
     this.turnStatus = "done";
@@ -324,13 +377,14 @@ export class LaneRun {
     this.markTerminal("done");
     this.writeResultFileOnce();
     this.writeLedgerRowOnce();
+    await this.postIssueCommentForTurn();
   }
 
   /**
    * @param failureClass optional classification tag (e.g. CLANKER-INFRA-FAILURE)
    *   from failure-classifier.ts, surfaced verbatim to wait/status callers.
    */
-  failTurn(message: string, failureClass?: string): void {
+  async failTurn(message: string, failureClass?: string): Promise<void> {
     if (this.isTerminalTurn()) return;
     this.flushMessageDigest();
     this.turnStatus = "error";
@@ -344,6 +398,7 @@ export class LaneRun {
     this.markTerminal("error");
     this.writeResultFileOnce();
     this.writeLedgerRowOnce();
+    await this.postIssueCommentForTurn();
   }
 
   /**
@@ -362,7 +417,7 @@ export class LaneRun {
     this.touch("transient_retry");
   }
 
-  cancelTurn(): void {
+  async cancelTurn(): Promise<void> {
     if (this.isTerminalTurn()) return;
     this.flushMessageDigest();
     this.turnStatus = "cancelled";
@@ -373,6 +428,7 @@ export class LaneRun {
     this.markTerminal("cancelled");
     this.writeResultFileOnce();
     this.writeLedgerRowOnce();
+    await this.postIssueCommentForTurn();
   }
 
   /**
@@ -753,6 +809,7 @@ export class LaneRun {
       cancellation_requested: this.cancellationRequested, forced_kill: this.forcedKill,
       tool_calls: this.toolCallCount, stop_reason: this.stopReason,
       ...(this.terminalAt ? { terminal_reason: this.turnStatus } : {}),
+      ...(this.issueCommentError !== undefined ? { issue_comment_error: this.issueCommentError } : {}),
       prompt_usage: this.promptUsage, session_usage: this.sessionUsage,
     };
   }
@@ -880,6 +937,66 @@ export class LaneRun {
    * correction was issued to replace.
    */
   private ledgerRowWritten = false;
+
+  /**
+   * Post this terminal turn's account to the ticket the dispatcher named (#27).
+   *
+   * ONE COMMENT PER TERMINAL TURN — deliberately neither of the two dedup
+   * shapes its siblings use, and this is the ruling, not an oversight:
+   *
+   *  - `writeLedgerRowOnce` is once per DISPATCH, because the ledger is a
+   *    statistics table and a corrected run that appended two rows would
+   *    double-count one dispatch in every rate computed from it.
+   *  - `writeResultFileOnce` is once per TERMINAL TRANSITION and overwrites,
+   *    because a reader of `result.md` must get the latest verdict, never the
+   *    one a correction was issued to replace.
+   *  - This is once per terminal transition and APPENDS. An issue thread is a
+   *    narrative, and "this run was corrected once, and here is what changed"
+   *    is precisely the fact the thread exists to preserve. Editing the earlier
+   *    comment would erase the only durable evidence that a correction round
+   *    happened at all — the same information the leader today reconstructs by
+   *    hand when asked "why was this ruled that way".
+   *
+   * Never throws: bookkeeping does not get to fail a dispatch. A failure is
+   * loud on stderr (inside postIssueComment) and durable in telemetry.
+   */
+  private async postIssueCommentForTurn(): Promise<void> {
+    if (!this.issueRef) return;
+    const telemetry = this.telemetry();
+    const outcome = await postIssueComment(
+      {
+        ref: this.issueRef,
+        // The repo the worktree was cut FROM, not the dispatch cwd: a write
+        // run's cwd is its worktree, and the terminal path may already have
+        // removed it (closeRun runs before this status flip). The target repo
+        // outlives every run cut from it.
+        cwd: this.targetRepo ?? this.cwd,
+        facts: {
+          runId: this.id,
+          status: this.turnStatus,
+          turn: this.turnsCount,
+          lane: this.lane,
+          profileId: this.profileId,
+          observedModel: telemetry.observed_model,
+          durationMs: telemetry.duration_ms,
+          totalTokens: telemetry.prompt_usage?.totalTokens,
+          retries: telemetry.retries,
+          corrections: telemetry.corrections,
+          finalMessage: this.lastFinalMessage,
+          error: this.error,
+          runDir: this.runDir,
+        },
+      },
+      { run: this.ghRunner },
+    );
+    // Recorded either way. A cleared field on a later turn is not amnesia: it
+    // says THIS turn's comment landed, which is the only claim telemetry is
+    // entitled to make about a per-turn action.
+    this.issueCommentError = outcome.ok
+      ? undefined
+      : `${describeRef(this.issueRef)}: ${outcome.error}`;
+    this.persistTelemetry();
+  }
 
   private writeLedgerRowOnce(): void {
     if (this.ledgerRowWritten) return;

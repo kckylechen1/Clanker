@@ -165,6 +165,15 @@ export interface RunTelemetry {
   terminal_at?: string; duration_ms?: number; turns: number; retries: number; corrections: number;
   continuation_turns: number; cancellation_requested: boolean; forced_kill: boolean;
   tool_calls: number; stop_reason?: string; terminal_reason?: string;
+  /**
+   * Why this run's #27 issue comment did not land, verbatim (`gh` not on PATH,
+   * non-zero exit with its stderr tail, the 10s ceiling). Present ONLY when an
+   * `issue` was named AND the post failed, so its absence is unambiguous: no
+   * ticket was named, or the account was successfully kept. Bookkeeping that
+   * dies in silence is the failure #27 was opened about, so this field and the
+   * stderr line next to it are the loud half of the fix.
+   */
+  issue_comment_error?: string;
   prompt_usage?: PromptUsageTelemetry;
   /** Latest ACP session usage: tokens currently in context and cumulative session cost. */
   session_usage?: { used: number; size: number; cost?: { amount: number; currency: string } };
