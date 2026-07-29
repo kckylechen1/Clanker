@@ -11,22 +11,152 @@ import { DIGEST_CHAR_BUDGET, isGlmModel, SERVER_VERSION, resolveOcModel } from "
 import { buildSpawnSpec } from "../src/backends.js";
 import { resolveNodeBinary } from "../src/node-binary.js";
 import { LaneRun } from "../src/run.js";
+import { fileURLToPath } from "node:url";
 import { dropMutant, loadMutantModule } from "./helpers.js";
+
+/**
+ * Anchored to this file, not to `process.cwd()`. The version sites below are
+ * repo-relative facts, and a gate that silently reads a different tree when the
+ * runner's cwd moves is a gate that can pass for the wrong reason.
+ */
+const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 
 // ---- CP3: opencode model shortname single source ------------------------
 
-test("runtime, package, and plugin versions agree", () => {
-  const packageVersion = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8")).version;
-  const pluginVersion = JSON.parse(
-    fs.readFileSync(path.resolve("plugin/.claude-plugin/plugin.json"), "utf8"),
-  ).version;
-  assert.equal(SERVER_VERSION, "0.4.7");
-  assert.equal(packageVersion, SERVER_VERSION);
-  assert.equal(pluginVersion, SERVER_VERSION);
-  const codexPluginVersion = JSON.parse(
-    fs.readFileSync(path.resolve("codex-plugin/.codex-plugin/plugin.json"), "utf8"),
-  ).version;
-  assert.equal(codexPluginVersion, SERVER_VERSION);
+/**
+ * Every place this repo writes its own version number, welded together.
+ *
+ * THE LIST WAS WRONG. Release doctrine here has said "five places" since the
+ * habit started; the real count is SIX. `package-lock.json` carries the version
+ * twice (top level, and again in the `""` root entry `npm` writes for the
+ * project itself) and nothing ever looked at either — so it sat at 0.4.4 while
+ * the other five went to 0.4.5 and then 0.4.6, drifting silently across two
+ * releases until two seats happened to trip over it independently.
+ *
+ * That is the shape worth fixing, not the digits: the old assertion pinned
+ * SERVER_VERSION to a LITERAL and compared three files to it, so a site missing
+ * from the list was a site nothing could catch, and a site missing from the
+ * list is exactly what happened.
+ *
+ * So this reads all six FROM DISK and asserts they agree with each other. It
+ * deliberately does NOT name a version string: a test carrying the literal has
+ * to be edited on every bump, which makes the test one more site to keep in
+ * sync — the very failure it exists to prevent. It pins the SHAPE (six sites,
+ * all equal, semver) and lets the value float.
+ */
+/**
+ * The five sites that live in FILES, read relative to `root`.
+ *
+ * Parameterised on `root` for one reason: it is the only way the mutation
+ * self-check below can doctor a site. The mutation harness copies `src/` and
+ * nothing else, so a src-level mutant cannot express "package-lock.json says
+ * 0.4.4" — which is the exact failure that went unnoticed for two releases and
+ * therefore the exact one the self-check has to be able to stage.
+ */
+function fileVersionSites(root: string): Array<[string, unknown]> {
+  const json = (rel: string) => JSON.parse(fs.readFileSync(path.join(root, rel), "utf8"));
+  const lock = json("package-lock.json");
+  return [
+    ["package.json .version", json("package.json").version],
+    ["package-lock.json .version", lock.version],
+    ['package-lock.json .packages[""].version', lock.packages?.[""]?.version],
+    ["plugin/.claude-plugin/plugin.json .version", json("plugin/.claude-plugin/plugin.json").version],
+    ["codex-plugin/.codex-plugin/plugin.json .version", json("codex-plugin/.codex-plugin/plugin.json").version],
+  ];
+}
+
+/** Which sites disagree with `expected`, named. Empty means the six are welded. */
+function versionDisagreements(root: string, expected: string): string[] {
+  const sites: Array<[string, unknown]> = [
+    ["src/constants.ts SERVER_VERSION", expected],
+    ...fileVersionSites(root),
+  ];
+  return sites
+    .filter(([, v]) => v !== expected)
+    .map(([where, v]) => `${where}=${JSON.stringify(v)}`);
+}
+
+/** The four JSON files carrying a version, as `root`-relative paths. */
+const VERSION_FILES = [
+  "package.json",
+  "package-lock.json",
+  "plugin/.claude-plugin/plugin.json",
+  "codex-plugin/.codex-plugin/plugin.json",
+];
+
+test("all six version sites agree — and the list is six, not five", () => {
+  const sites = fileVersionSites(REPO_ROOT);
+  assert.equal(
+    sites.length + 1,
+    6,
+    "the doctrine says six sites; adding a seventh without updating this count is the same bug again",
+  );
+  // Shape first: a site that reads as `undefined` would make every equality
+  // below vacuously true, which is how a gate rots into decoration.
+  for (const [where, value] of sites) {
+    assert.ok(
+      typeof value === "string" && /^\d+\.\d+\.\d+$/.test(value),
+      `${where} must carry a semver string, got ${JSON.stringify(value)}`,
+    );
+  }
+  assert.ok(/^\d+\.\d+\.\d+$/.test(SERVER_VERSION), `SERVER_VERSION must be semver, got ${SERVER_VERSION}`);
+  assert.deepEqual(
+    versionDisagreements(REPO_ROOT, SERVER_VERSION),
+    [],
+    `every version site must equal SERVER_VERSION (${SERVER_VERSION}); a bump that misses one ships a plugin ` +
+      `whose manifest disagrees with the server inside it — which is how package-lock.json sat at 0.4.4 ` +
+      `through two releases`,
+  );
+});
+
+test("MUTANT: doctoring any single version site — including either half of package-lock — goes red", () => {
+  // One staged mutant per file, run against a throwaway copy of the tree. The
+  // package-lock case is the load-bearing one: before this test that site had
+  // no reader at all, so "the suite is green" and "the lock is correct" were
+  // unrelated facts.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-version-mutant-"));
+  for (const rel of VERSION_FILES) {
+    fs.mkdirSync(path.join(root, path.dirname(rel)), { recursive: true });
+    fs.copyFileSync(path.join(REPO_ROOT, rel), path.join(root, rel));
+  }
+  // Baseline: the untouched copy must be quiet, or every red below proves
+  // nothing about the doctoring.
+  assert.deepEqual(versionDisagreements(root, SERVER_VERSION), [], "the pristine copy must agree with itself");
+
+  const bogus = "9.9.9";
+  for (const rel of VERSION_FILES) {
+    const target = path.join(root, rel);
+    const pristine = fs.readFileSync(target, "utf8");
+    const doc = JSON.parse(pristine);
+    doc.version = bogus;
+    fs.writeFileSync(target, JSON.stringify(doc, null, 2));
+    const found = versionDisagreements(root, SERVER_VERSION);
+    assert.ok(
+      found.some((f) => f.startsWith(rel + " ")),
+      `doctoring ${rel} must be reported by name, got ${JSON.stringify(found)}`,
+    );
+    fs.writeFileSync(target, pristine);
+  }
+
+  // The lock's SECOND copy, the one npm writes for the project itself. It is
+  // the half a hand-edit of line 3 would miss, so it gets its own mutant.
+  const lockPath = path.join(root, "package-lock.json");
+  const pristineLock = fs.readFileSync(lockPath, "utf8");
+  const lock = JSON.parse(pristineLock);
+  lock.packages[""].version = bogus;
+  fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2));
+  assert.ok(
+    versionDisagreements(root, SERVER_VERSION).some((f) => f.includes('packages[""]')),
+    "the lock's inner project entry must be checked separately from its top-level version",
+  );
+  fs.writeFileSync(lockPath, pristineLock);
+
+  // And the sixth site, which is code rather than a file.
+  assert.ok(
+    versionDisagreements(root, bogus).some((f) => f.startsWith("package.json ")),
+    "a SERVER_VERSION that agrees with nothing must be reported too",
+  );
+  fs.rmSync(root, { recursive: true, force: true });
 });
 
 test("CP3: resolveOcModel expands shortnames and passes full ids through", () => {
