@@ -20,7 +20,7 @@
  * write isolation, cross-repo worktree cut, writeCapableSandbox). This registry
  * narrows the entrance; it does not restate or replace those gates.
  */
-import { isGlmModel, TURN_TIMEOUT_MS } from "./constants.js";
+import { DEFAULT_CODEX_MODEL, isGlmModel, TURN_TIMEOUT_MS } from "./constants.js";
 import type { CodexSandboxMode, LaneName } from "./types.js";
 import { LANE_NAMES } from "./types.js";
 
@@ -59,18 +59,36 @@ export type ProfileRoleClass = "scout" | "reviewer" | "implementer";
 /**
  * Where the model id comes from.
  *  - `welded`         — fixed by the profile; callers cannot name a model.
- *  - `lane-default`   — omitted on purpose; the lane's own configured default runs.
+ *  - `lane-default`   — the argument is forbidden entirely; the caller cannot
+ *                       name a model. The name says who cannot choose, NOT
+ *                       whose default runs: on both lanes that hold this policy
+ *                       today (gemini-recon/gemini-research, grok-review),
+ *                       buildSpawnSpec ALWAYS passes a model of Clanker's own
+ *                       — `opts.model?.trim() || "gemini-3.6-flash-high"` into
+ *                       CLANKER_GEMINI_MODEL, `opts.model ?? "grok-4.5"` onto
+ *                       grok's argv — so the lane's own configured default is
+ *                       dead code on the dispatch path and never runs. Read
+ *                       this as "pinned by backends.ts, unreachable from the
+ *                       schema". (It used to say "the lane's own configured
+ *                       default runs", which was false on every lane holding
+ *                       it: #53 found the codex pair pinned to Clanker's
+ *                       DEFAULT_CODEX_MODEL while the registry advertised the
+ *                       operator's own config.toml as the thing in charge.)
  *  - `caller-required`— the lane fails closed without an explicit model
  *                       (backends.ts opencode guard), and no single model is
  *                       correct for the profile, so the caller must name one.
  *  - `caller-optional`— the caller MAY name any model the lane serves, and the
  *                       lane's pinned default runs when they do not. Distinct
- *                       from `lane-default`, which forbids the argument
- *                       entirely: the cursor lane serves ~200 models across
+ *                       from `lane-default` only in who may choose — both pin
+ *                       the same fallback in backends.ts; this one also opens
+ *                       the schema. The cursor lane serves ~200 models across
  *                       four vendors on one subscription, so choosing among
- *                       them is the point of the lane, while still having one
+ *                       them is the point of the lane; the codex lane serves
+ *                       several reasoning tiers of its own and #53 found the
+ *                       Captain unable to reach any of them. Both keep one
  *                       reproducible default (`defaultId`, documentation of
- *                       what backends.ts pins — never a second source for it).
+ *                       what backends.ts pins — never a second source for it;
+ *                       prefer importing that constant over retyping it).
  */
 export type ProfileModelPolicy =
   | { readonly kind: "welded"; readonly id: string }
@@ -146,9 +164,10 @@ export const DISPATCH_PROFILES: readonly DispatchProfile[] = [
       "the sandbox is welded because a Codex dispatch with read_only=true but a write-capable native " +
       "sandbox can still write the workspace, so leaving sandbox callable would be a way around the " +
       "read-only gate. Runs in place by default; an optional worktree branch runs the review inside an " +
-      "isolated tree instead.",
+      "isolated tree instead. Model is a free parameter: name one to run this review on a specific Codex " +
+      "model, omit it to run Clanker's pinned default.",
     lane: "codex",
-    model: { kind: "lane-default" },
+    model: { kind: "caller-optional", defaultId: DEFAULT_CODEX_MODEL },
     readOnly: true,
     sandbox: { kind: "welded", mode: "read-only" },
     isolation: "optional",
@@ -164,10 +183,11 @@ export const DISPATCH_PROFILES: readonly DispatchProfile[] = [
     description:
       "Write-capable Codex worker. read_only=false is welded and a managed worktree branch is " +
       "mandatory, so writes are boxed to the worktree. Sandbox strictness stays caller-selectable " +
-      "across all three Codex tiers and defaults to workspace-write. Model omitted on purpose: Codex " +
-      "runs its configured default.",
+      "across all three Codex tiers and defaults to workspace-write. Model is a free parameter: name one " +
+      "to run this worker on a specific Codex model, omit it to run Clanker's pinned default rather than " +
+      "whatever `~/.codex/config.toml` currently says.",
     lane: "codex",
-    model: { kind: "lane-default" },
+    model: { kind: "caller-optional", defaultId: DEFAULT_CODEX_MODEL },
     readOnly: false,
     sandbox: { kind: "caller", defaultMode: "workspace-write" },
     isolation: "required",
@@ -547,7 +567,10 @@ export function resolveProfileDispatch(
       break;
     case "lane-default":
       if (input.model !== undefined) {
-        throw new Error(`profile '${profile.id}' uses the lane's configured default model; it takes no model argument`);
+        // Same correction as the ProfileModelPolicy doc above: the model this
+        // profile lands on is pinned by backends.ts, not read from the lane's
+        // own config, so the refusal must not tell the caller otherwise.
+        throw new Error(`profile '${profile.id}' pins its model server-side; it takes no model argument`);
       }
       model = undefined;
       break;

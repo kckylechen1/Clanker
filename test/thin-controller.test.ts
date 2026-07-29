@@ -57,13 +57,19 @@ test("each generated tool exposes only its own profile's free parameters", () =>
   const manager = new LaneManager({ resolveSpec: () => fakeSpec(), disableReaper: true });
   const tools = captureTools(manager);
   // Read-only codex review: prompt/cwd/worktree(optional)/base/doNotTouch/
-  // effort/issue — no model (lane default), no sandbox (welded read-only), no
+  // model(optional, #53)/effort/issue — no sandbox (welded read-only), no
   // lane, no read_only. base/doNotTouch exist wherever a worktree can; `issue`
   // (#27) exists on EVERY profile, because a review verdict is as worth
-  // recording on its ticket as an implementation is.
-  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-review")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "effort", "issue"]);
+  // recording on its ticket as an implementation is. `model` was absent until
+  // #53: the lane always supported it and the registry answered `lane-default`,
+  // which forbids the argument — so the pinned fallback and a ban on naming a
+  // model were one policy, and no entrance to Codex's other models existed.
+  // Optional, not required: profiles.test.ts pins that distinction against
+  // oc-review's required one, and units.test.ts pins that omitting it still
+  // runs the same gpt-5.5.
+  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-review")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "model", "effort", "issue"]);
   // Write codex: adds a caller-selectable sandbox, and worktree is mandatory.
-  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "sandbox", "effort", "issue"]);
+  assert.deepEqual(Object.keys(tools.get("clanker_start_codex-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "model", "sandbox", "effort", "issue"]);
   // OpenCode write: model is the caller's, sandbox is not a knob on this lane.
   assert.deepEqual(Object.keys(tools.get("clanker_start_oc-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "model", "effort", "issue"]);
   // Supervised GLM: everything but prompt/cwd/worktree/base/doNotTouch/effort/issue is welded.

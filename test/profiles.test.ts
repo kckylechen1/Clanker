@@ -333,6 +333,116 @@ test("#19-F5: grok-review may omit the model and lands on the lane default; oc-r
   );
 });
 
+// ---- #53. the codex pair opens `model` WITHOUT moving the pinned default ---
+// The bug: backends.ts has always supported a codex model (CAPS.codex.model =
+// true; `opts.model?.trim() || DEFAULT_CODEX_MODEL`) and the registry answered
+// `lane-default`, which forbids the argument entirely — so the pinned fallback
+// and a ban on overriding it had been fused into one policy, and no entrance
+// existed to name a Codex model at all. Opening the parameter must not move
+// the fallback by one byte: that pin is what keeps an out-of-band
+// ~/.codex/config.toml edit from silently re-routing every dispatch.
+
+/** Every profile whose model the caller MAY name but need not. */
+const CALLER_OPTIONAL_MODEL_PROFILES = DISPATCH_PROFILES.filter((p) => p.model.kind === "caller-optional");
+
+test("#53: omitting model on the codex pair still lands on the pinned default, unchanged", () => {
+  for (const input of [
+    { profile: "codex-review", prompt: "review" },
+    { profile: "codex-write", prompt: "implement", worktree: "b" },
+  ]) {
+    const dispatch = resolveProfileDispatch(input);
+    assert.equal(dispatch.model, undefined, `${input.profile}: an omitted model must stay undefined through the registry`);
+    // ...and undefined is what makes backends.ts apply ITS default. Asserted
+    // end-to-end (registry -> spawn spec) rather than on the registry alone:
+    // the whole point of `caller-optional` is that the registry does NOT
+    // substitute defaultId, so a registry-only assertion would prove nothing
+    // about what actually runs.
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-53-default-"));
+    const cfg = JSON.parse(buildSpawnSpec("codex", dispatch, runDir).env.CODEX_CONFIG);
+    // Captain-pinned literals, not the imported constant (same anti-tautology
+    // rule as units.test.ts): comparing against DEFAULT_CODEX_MODEL would stay
+    // green if the constant itself drifted.
+    assert.equal(cfg.model, "gpt-5.5", `${input.profile}: omitting model must NOT change what runs`);
+    assert.equal(cfg.model_reasoning_effort, "xhigh", `${input.profile}: effort must be untouched by the model change`);
+  }
+});
+
+test("#53: an explicitly named codex model reaches codex-acp verbatim, and effort stays independent", () => {
+  for (const input of [
+    { profile: "codex-review", prompt: "review", model: "gpt-5.6-sol" },
+    { profile: "codex-write", prompt: "implement", worktree: "b", model: "gpt-5.6-sol", effort: "medium" },
+  ]) {
+    const dispatch = resolveProfileDispatch(input);
+    assert.equal(dispatch.model, "gpt-5.6-sol", `${input.profile}: an explicit model must survive the registry`);
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-53-explicit-"));
+    const cfg = JSON.parse(buildSpawnSpec("codex", dispatch, runDir).env.CODEX_CONFIG);
+    assert.equal(cfg.model, "gpt-5.6-sol", `${input.profile}: the pinned default must not overwrite an explicit model`);
+    // codex is the lane that carries BOTH knobs (CAPS.codex = model+effort,
+    // unlike cursor where the effort tier is baked into the model id), so the
+    // two must not shadow each other in either direction.
+    assert.equal(
+      cfg.model_reasoning_effort,
+      input.effort ?? "xhigh",
+      `${input.profile}: effort and model must be independent`,
+    );
+    assert.equal(cfg.features?.multi_agent_v2?.enabled, false, "solo-dispatch weld survives a model override");
+  }
+});
+
+test("#53: a caller-optional model is on the schema and OPTIONAL; oc-review's is required", () => {
+  const tools = captureTools(recordingManager("standalone"));
+  // Registry-derived, so a profile added tomorrow is covered without an edit
+  // here — and stated as optionality, not mere presence: the first shape of
+  // this fix could have exposed `model` as a REQUIRED field, which reads as
+  // "the parameter exists" on a key-presence check while actually breaking
+  // every existing omit-the-model caller.
+  for (const profile of DISPATCH_PROFILES) {
+    const schema = tools.get(`clanker_start_${profile.id}`)!.config.inputSchema;
+    const field = schema.model as z.ZodTypeAny | undefined;
+    if (profile.model.kind === "caller-optional") {
+      assert.ok(field, `clanker_start_${profile.id} must expose model`);
+      assert.equal(field.isOptional(), true, `clanker_start_${profile.id}: model must be optional, not required`);
+      assert.equal(field.safeParse(undefined).success, true, `clanker_start_${profile.id}: omitting model must validate`);
+    } else if (profile.model.kind === "caller-required") {
+      assert.ok(field, `clanker_start_${profile.id} must expose model`);
+      assert.equal(field.isOptional(), false, `clanker_start_${profile.id}: model must be required`);
+      assert.equal(field.safeParse(undefined).success, false, `clanker_start_${profile.id}: omitting model must fail`);
+    } else {
+      assert.equal("model" in schema, false, `clanker_start_${profile.id} must not expose model`);
+    }
+  }
+  // The specific pair the issue names, spelled out so the distinction cannot
+  // disappear into a loop that agrees with whatever the registry says.
+  assert.deepEqual(
+    ["codex-review", "codex-write", "oc-review"].map((id) => {
+      const field = tools.get(`clanker_start_${id}`)!.config.inputSchema.model as z.ZodTypeAny | undefined;
+      return field === undefined ? "absent" : field.isOptional() ? "optional" : "required";
+    }),
+    ["optional", "optional", "required"],
+  );
+  assert.ok(
+    CALLER_OPTIONAL_MODEL_PROFILES.some((p) => p.lane === "codex"),
+    "the codex lane must hold at least one caller-optional model profile",
+  );
+});
+
+test("#53: lane-default's refusal no longer credits the lane's own config for the model", () => {
+  // The registry documents capability; a refusal that names the wrong owner of
+  // the pinned model is the same defect as the doc comment #53 corrected. On
+  // gemini and grok alike, backends.ts always passes Clanker's own literal, so
+  // the lane's configured default is dead code on the dispatch path.
+  assert.throws(
+    () => resolveProfileDispatch({ profile: "gemini-recon", prompt: "recon", model: "gemini-3.6-pro" }),
+    /pins its model server-side; it takes no model argument/,
+  );
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-53-lane-default-"));
+  assert.equal(
+    buildSpawnSpec("gemini", { readOnly: true }, runDir).env.CLANKER_GEMINI_MODEL,
+    "gemini-3.6-flash-high",
+    "the model a lane-default dispatch runs is pinned by backends.ts, not read from the lane's config",
+  );
+});
+
 // ---- F6. 0.2.5 parity, compared on every dimension -------------------------
 // The first revision compared only lane/model/readOnly, so a registry that
 // changed worktree policy, sandbox policy or host reachability still went
