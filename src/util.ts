@@ -73,6 +73,54 @@ export function redact(text: string): string {
 /**
  * Redact for a sink this machine does not own — today, the #27 issue comment.
  *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THREAT MODEL — read this before "hardening" anything below.
+ *
+ * The input is a verdict written by a worker THIS SERVER SPAWNED. It is not
+ * adversary-controlled input, and treating it as if it were is how five rounds
+ * of review produced five rounds of patches: ask "what shape defeats this?" of
+ * any redactor and the answer is always yes, one more shape, forever. That
+ * question has no floor, so it is the wrong question here.
+ *
+ * What this function actually defends against is ACCIDENTAL PASTE — the ways a
+ * cooperating worker leaks a credential without meaning to:
+ *   - a chunk of `.env` or a config file quoted into the verdict,
+ *   - an error message or HTTP log line that carries a token,
+ *   - a `curl -H 'Authorization: …'` copied out of documentation,
+ *   - a URL with credentials in its query string.
+ * Those are the shapes the rules below cover, and they are covered because they
+ * are what really happens, not because they survived an adversarial search.
+ *
+ * Two facts bound the damage of any miss, and both are load-bearing in the
+ * trade-offs made below:
+ *   1. The unredacted verdict is ALWAYS on this machine in `result.md`. The
+ *      comment is a copy, never the only copy — so over-redaction destroys
+ *      nothing permanently, while a false positive DOES destroy the readability
+ *      of the account this feature exists to keep.
+ *   2. The worker is ours. A worker deliberately smuggling a credential past
+ *      this function is a compromised worker, and a redactor is the wrong place
+ *      to answer that.
+ *
+ * KNOWN, DELIBERATELY NOT COVERED. These are rulings, not a TODO list; each was
+ * measured and declined, and none should be "fixed" without revisiting the
+ * paragraph above:
+ *   - `X-Auth: Basic <blob>` — a CUSTOM header name carrying a scheme and a
+ *     credential. Closing it means judging header names by the key-word test
+ *     instead of the `Authorization` family, which is buildable (it was built
+ *     and then reverted) but adds a rule shape for a paste nobody has ever
+ *     produced: real pasted headers say `Authorization`. The registered family
+ *     is covered; `X-Auth: <blob>` without a scheme is covered by the key rule.
+ *   - The tail of a compound value containing `&` or `;` — `password="abc&def"`
+ *     keeps `&def`, because `&`/`;` terminate a value so that a query string's
+ *     other parameters survive. A pasted config line CAN hit this; it was left
+ *     because the fix has to be context-sensitive and this round stopped at the
+ *     line the leader drew rather than half-landing another mechanism.
+ *   - A token broken across whitespace or a line wrap. Reassembling across
+ *     separators before matching is the same move as putting `-`/`_`/`/` back
+ *     into the long-run class, which took corpus false positives from 10 spans
+ *     to 227 — every file:line and every constant name in every verdict.
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
  * A SEPARATE function from `redact()` on purpose, and the separation is the
  * point rather than an accident of layering: the two sinks have different
  * threat models and therefore different correct answers.
