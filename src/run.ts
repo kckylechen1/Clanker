@@ -341,13 +341,14 @@ export class LaneRun {
     this.error = undefined;
     this.failureClass = undefined;
     // Per-TURN bookkeeping, cleared with the rest of the previous turn's
-    // outcome. Missing this one left a run that had failed to comment on turn 1
-    // carrying that error into turn 2, where the terminal flip raises
-    // `issue_comment_pending` — so telemetry showed the OLD turn's failure and
-    // the NEW turn's unknown at once, breaking the "at most one of these two
-    // fields" contract stated in types.ts and telling the dispatcher two wrong
-    // things at the same time. Cleared here, at the one place a new turn
-    // declares that the last turn's outcome no longer describes this run.
+    // outcome: while THIS turn runs, the last turn's comment result is not an
+    // answer to "did this turn's verdict reach the ticket".
+    //
+    // This is the RUNNING-WINDOW view only. What enforces the "at most one of
+    // these two fields" contract is `markTerminal()`, which is the single
+    // statement that can violate it — see there for why the invariant does not
+    // live at the turn entrances (a resume that fails to connect never reaches
+    // this line at all).
     this.issueCommentError = undefined;
     this.issueCommentPending = false;
     this.turnsCount += 1;
@@ -839,11 +840,30 @@ export class LaneRun {
    * async method would make that guarantee depend on nothing awaiting in
    * between — a property the next edit to any of the three terminal methods
    * could silently take away.
+   *
+   * It is ALSO where the previous turn's `issue_comment_error` is dropped, and
+   * that placement is the second half of a lesson. `beginTurn()` clears it too,
+   * which was enough for every path that goes through a new turn — and then a
+   * third cold review found one that does not: a backend resume calls
+   * `reopenForResume()` and then AWAITS the connect, so a connect failure lands
+   * in `failTurn()` having never touched `beginTurn()`, raising a new pending
+   * next to the old error and breaking the "at most one of these two fields"
+   * contract stated in types.ts. That was the SECOND entry point to leak the
+   * same invariant, which says the shape "clear it at every entrance" is wrong:
+   * an invariant about a field belongs at the one statement that can violate
+   * it, not at every door somebody might come through. Raising pending and
+   * dropping a stale error are one act, written as one act, so no path — today's
+   * or tomorrow's — can perform half of it.
    */
   private markTerminal(reason: string): void {
     this.terminalAt = Date.now();
     this.stopReason ??= reason;
-    if (this.issueRef) this.issueCommentPending = true;
+    if (this.issueRef) {
+      this.issueCommentPending = true;
+      // Only ever a PREVIOUS turn's error: this turn's is written after the
+      // post settles, which is strictly later than this statement.
+      this.issueCommentError = undefined;
+    }
     this.persistTelemetry();
   }
 

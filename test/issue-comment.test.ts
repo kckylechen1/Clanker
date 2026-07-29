@@ -1184,8 +1184,8 @@ test("mutation: without the in-flight mark, the first terminal wait reads as a k
   // payload of a run whose comment landed.
   const mutant = await loadMutantManager("issue-comment-no-pending", [{
     file: "run.ts",
-    find: "    if (this.issueRef) this.issueCommentPending = true;",
-    replace: "    if (false as boolean) this.issueCommentPending = true;",
+    find: "    if (this.issueRef) {\n      this.issueCommentPending = true;",
+    replace: "    if (false as boolean) {\n      this.issueCommentPending = true;",
   }]);
   let release: () => void = () => {};
   const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -1208,7 +1208,73 @@ test("mutation: without the in-flight mark, the first terminal wait reads as a k
   }
 });
 
-test("mutation: a turn that keeps the previous turn's comment error reports two wrong things at once", async () => {
+test("mutation: with the invariant kept at the turn entrances, the resume-setup path breaks it again", async () => {
+  // The exact sequence a backend resume performs when its connect fails:
+  // reopenForResume(), then straight into failTurn() — beginTurn() is never
+  // reached. (The end-to-end version of this path, through a real cursor
+  // resume with a missing binary, is in test/cursor-resume.test.ts; this one
+  // pins WHERE the invariant is enforced.) The mutant keeps the entrance
+  // clearing and removes the one in markTerminal, which is the shape that
+  // shipped and the shape that lost.
+  const mutant = await loadMutantModule<typeof import("../src/run.js")>(
+    "run-invariant-at-entrances",
+    [{
+      file: "run.ts",
+      find:
+        "      this.issueCommentPending = true;\n" +
+        "      // Only ever a PREVIOUS turn's error: this turn's is written after the\n" +
+        "      // post settles, which is strictly later than this statement.\n" +
+        "      this.issueCommentError = undefined;",
+      replace: "      this.issueCommentPending = true;",
+    }],
+    "run.ts",
+  );
+  let attempt = 0;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const rec = recorder(async () => {
+    if (++attempt === 1) return { code: 4, stdout: "", stderr: "HTTP 403" };
+    await gate;
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-issue-resume-mutant-"));
+  const run = new mutant.LaneRun({
+    id: "cursor-resume-mutant",
+    lane: "cursor",
+    cwd: os.tmpdir(),
+    runDir,
+    readOnly: true,
+    issueRef: parseIssueRef("27"),
+    ghRunner: rec.runner,
+  });
+  try {
+    run.beginTurn("first pass");
+    await run.completeTurn();
+    assert.match(run.telemetry().issue_comment_error!, /`gh` exited 4/);
+
+    run.reopenForResume();
+    const terminal = run.failTurn("spawn cursor-agent ENOENT"); // no beginTurn: setup died first
+    const midFlight = run.telemetry();
+    assert.equal(midFlight.issue_comment_pending, true);
+    assert.match(
+      midFlight.issue_comment_error!,
+      /`gh` exited 4/,
+      "the mutant carries turn 1's failure into turn 2's pending — the second entry point to leak the same invariant",
+    );
+    release();
+    await terminal;
+  } finally {
+    release();
+    run.closeStreams();
+  }
+});
+
+test("mutation: a running turn that keeps the previous turn's comment error answers for the wrong turn", async () => {
+  // Re-aimed when the invariant moved into markTerminal(). Deleting the
+  // entrance clearing no longer breaks "at most one" — markTerminal repairs it
+  // at the flip — so what this line is still load-bearing FOR is the running
+  // window: while turn 2 runs, `issue_comment_error` must not be answering
+  // with turn 1's result. That is what the mutant loses, and all it loses.
   const mutant = await loadMutantModule<typeof import("../src/run.js")>(
     "run-stale-comment-error",
     [{
@@ -1243,14 +1309,15 @@ test("mutation: a turn that keeps the previous turn's comment error reports two 
     await run.completeTurn();
     run.reopenForResume();
     run.beginTurn("correction", true);
-    const terminal = run.completeTurn();
-    const midFlight = run.telemetry();
-    assert.equal(midFlight.issue_comment_pending, true);
+    // Turn 2 is RUNNING here — not terminal, so markTerminal has not repaired
+    // anything yet, and the field is answering for a turn that is over.
+    assert.equal(run.telemetry().issue_comment_pending, undefined, "no post is in flight during a running turn");
     assert.match(
-      midFlight.issue_comment_error!,
+      run.telemetry().issue_comment_error!,
       /`gh` exited 4/,
-      "the mutant carries turn 1's failure alongside turn 2's pending — the two fields the contract says are exclusive",
+      "the mutant reports turn 1's comment failure as if it described the turn now running",
     );
+    const terminal = run.completeTurn();
     release();
     await terminal;
   } finally {

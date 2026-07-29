@@ -251,6 +251,64 @@ test("a cursor correction re-spawns with --resume and the newly named model, kee
   }
 });
 
+test("#27: a resume that cannot even connect does not report the old turn's comment failure", async () => {
+  // The path a third cold review found, and the reason the "at most one of
+  // these two fields" invariant now lives in markTerminal() rather than at the
+  // turn entrances: a backend resume calls reopenForResume() and then AWAITS
+  // the connect. A connect failure lands straight in failTurn() — beginTurn(),
+  // where the previous turn's comment account used to be cleared, is never
+  // reached. Telemetry then carried turn 1's `issue_comment_error` next to
+  // turn 2's `issue_comment_pending`: two answers, both wrong.
+  const repo = makeRepo();
+  const capture = tmpCapture("resume-connect-fail");
+  const good = cursorResolver(fakeCursorAgent(), capture);
+  let spawns = 0;
+  // Turn 1 spawns the working fake; the resume gets a binary that does not
+  // exist, which is what a connect failure is made of.
+  const resolveSpec = (lane: LaneName, opts: LaneRequestOptions, runDir: string): SpawnSpec =>
+    ++spawns === 1
+      ? good(lane, opts, runDir)
+      : { command: path.join(os.tmpdir(), "clanker-no-such-cursor-binary"), args: [], env: {}, warnings: [] };
+
+  let ghCalls = 0;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const ghRunner = async () => {
+    // Turn 1's comment FAILS, which is what leaves an error to be inherited.
+    if (++ghCalls === 1) return { code: 4, stdout: "", stderr: "HTTP 403: Resource not accessible by integration" };
+    await gate; // hold turn 2's post so `pending` is observable
+    return { code: 0, stdout: "", stderr: "" };
+  };
+
+  const m = new LaneManager({ disableReaper: true, baseRepo: repo.base, resolveSpec, ghRunner });
+  try {
+    const { id } = await m.dispatchProfile({ profile: "cursor-review", prompt: "review this", cwd: repo.base, issue: "27" });
+    await terminal(m, id);
+    assert.match(m.status(id).telemetry!.issue_comment_error!, /`gh` exited 4/, "turn 1's comment really failed");
+
+    await m.promptExisting(id, "look again", true);
+    await terminal(m, id);
+
+    const status = m.status(id);
+    assert.equal(status.status, "error", "the resume died in setup, as intended");
+    assert.match(status.error!, /clanker-no-such-cursor-binary|ENOENT|spawn/i);
+    assert.equal(status.telemetry!.issue_comment_pending, true, "turn 2's own comment is in flight");
+    assert.equal(
+      status.telemetry!.issue_comment_error,
+      undefined,
+      "…and turn 1's failure must not be riding along: the invariant holds on a path that never sees beginTurn()",
+    );
+
+    release();
+    await until(() => m.status(id).telemetry?.issue_comment_pending === undefined, 10_000);
+    assert.equal(m.status(id).telemetry?.issue_comment_error, undefined, "turn 2's comment landed; nothing is owed");
+  } finally {
+    release();
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
+  }
+});
+
 test("a write run resumes as a write run, in the same worktree", async () => {
   const repo = makeRepo();
   const capture = tmpCapture("write");
