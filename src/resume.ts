@@ -82,6 +82,19 @@ export function planResumeTurn(run: ResumableRun, model?: string): ResumeTurnPla
         `Report the blocker; a correction turn here would be a fresh worker with no memory of the work.`,
     );
   }
+  // Refuse a flag-shaped ref HERE, not just at the sidecar's own argv gate
+  // (cursor-acp refuseFlagShapedToken). The sidecar catch is the real
+  // boundary and stays, but reaching it means the run has already been
+  // re-opened and published as `running`, only to flip to `error` a moment
+  // later — a caller polling that id sees a turn start and die for reasons
+  // the synchronous call could have stated outright (Scope-B review,
+  // gemini-ccfb4). Same shape, checked at the first place that holds it.
+  if (ref.startsWith("-")) {
+    throw new Error(
+      `run '${run.id}' recorded a backend session ref '${ref}' that starts with '-'; it would reach the ` +
+        `backend as a flag rather than as the value of --resume, so this run cannot be resumed`,
+    );
+  }
   // The respawn runs in the same directory the first turn did. For a write run
   // that is the managed worktree, and a CLEAN tree is reclaimed when the run
   // closes (manager.closeRun → removeIfClean) — so this is a real state, not a

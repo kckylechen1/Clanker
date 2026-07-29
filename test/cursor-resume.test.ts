@@ -380,10 +380,18 @@ test("a reclaimed worktree makes the correction refuse by name, not by spawn fai
   }
 });
 
-test("a flag-shaped session ref is refused at the argv boundary it would have crossed", async () => {
-  // The ref comes from the BACKEND's event stream, which is the one input this
-  // side does not control — so the argv guard has to hold for it exactly as it
-  // does for a caller-named model.
+test("a flag-shaped session ref is refused synchronously, and never reaches the CLI", async () => {
+  // The ref comes from the BACKEND's event stream — the one input this side
+  // does not control — so the guard has to hold for it exactly as it does for
+  // a caller-named model.
+  //
+  // The refusal MOVED (Scope-B review, gemini-ccfb4): it used to happen inside
+  // the sidecar's argv gate, which meant the run was re-opened and published as
+  // `running` before flipping to `error`, so a caller polling that id watched a
+  // turn start and die for a reason the synchronous call could have stated
+  // outright. The sidecar gate remains as the last line; this asserts the first
+  // one — and still asserts what the old test's strongest claim was: the
+  // poisoned argv is never handed to cursor-agent.
   const repo = makeRepo();
   const capture = tmpCapture("flagref");
   const m = new LaneManager({
@@ -395,11 +403,12 @@ test("a flag-shaped session ref is refused at the argv boundary it would have cr
     const { id } = await m.dispatchProfile({ profile: "cursor-review", prompt: "review", cwd: repo.base });
     await terminal(m, id);
     assert.equal(m.status(id).telemetry?.lane_session_ref, "--force");
-    await m.promptExisting(id, "resume with the poisoned ref", true);
-    await terminal(m, id);
-    assert.equal(m.status(id).status, "error");
-    assert.match(m.status(id).error ?? "", /starts with '-'|would reach cursor-agent as a flag/);
-    // The refusal happens before the CLI is asked to run anything with it.
+    const before = m.status(id).status;
+    await assert.rejects(
+      () => m.promptExisting(id, "resume with the poisoned ref", true),
+      /starts with '-'|would reach the backend as a flag/,
+    );
+    assert.equal(m.status(id).status, before, "a refused correction must not have re-opened the run");
     assert.equal(argvBlocks(capture).length, 1, "the poisoned argv was never handed to cursor-agent");
   } finally {
     await m.shutdown();
@@ -558,5 +567,38 @@ test("mutation: a resume turn that drops the run's write boundary is caught by t
     await m.shutdown();
     fs.rmSync(repo.root, { recursive: true, force: true });
     dropMutant("resume-boundary-widened");
+  }
+});
+
+
+test("a resume turn that dies before the backend speaks does not report the PREVIOUS turn's model", async () => {
+  // Scope-B review (gemini-ccfb4). `observed_model` exists to expose a backend
+  // that silently ran something other than what was asked for (#25). On a lane
+  // where every leg may name a different model, carrying the last leg's
+  // observation into a leg that never got an init event is exactly the lie the
+  // field is there to catch — it would read as "the swap took effect" when
+  // nothing ran at all.
+  const repo = makeRepo();
+  const capture = tmpCapture("staleobs");
+  const m = new LaneManager({
+    disableReaper: true,
+    baseRepo: repo.base,
+    resolveSpec: cursorResolver(fakeCursorAgent(), capture),
+  });
+  try {
+    const { id } = await m.dispatchProfile({ profile: "cursor-review", prompt: "review", cwd: repo.base });
+    await terminal(m, id);
+    assert.ok(m.status(id).telemetry?.observed_model, "first turn observed a model");
+    // Re-open the way a resume does, then read before any new init arrives.
+    const run = (m as unknown as { runs: Map<string, { reopenForResume(): void }> }).runs.get(id)!;
+    run.reopenForResume();
+    assert.equal(
+      m.status(id).telemetry?.observed_model ?? null,
+      null,
+      "the re-opened turn starts with no observation of its own",
+    );
+  } finally {
+    await m.shutdown();
+    fs.rmSync(repo.root, { recursive: true, force: true });
   }
 });

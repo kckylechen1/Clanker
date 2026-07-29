@@ -32206,6 +32206,8 @@ var LaneRun = class {
     this.sessionClosed = false;
     this.cancellationRequested = false;
     this.worktreeRetained = void 0;
+    this.observedModel = null;
+    this.observedEffort = null;
     this.turnStatus = "running";
     this.touch("resume_accepted");
   }
@@ -33506,6 +33508,11 @@ function planResumeTurn(run, model) {
   if (!ref) {
     throw new Error(
       `run '${run.id}' has no backend session ref recorded, so there is no conversation to resume \u2014 the lane never reported one (a turn that failed before the backend started never does). Report the blocker; a correction turn here would be a fresh worker with no memory of the work.`
+    );
+  }
+  if (ref.startsWith("-")) {
+    throw new Error(
+      `run '${run.id}' recorded a backend session ref '${ref}' that starts with '-'; it would reach the backend as a flag rather than as the value of --resume, so this run cannot be resumed`
     );
   }
   if (!fs9.existsSync(run.cwd)) {

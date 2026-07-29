@@ -406,6 +406,13 @@ export class LaneRun {
     this.sessionClosed = false;
     this.cancellationRequested = false;
     this.worktreeRetained = undefined;
+    // The PREVIOUS turn's observation must not survive into this one. A resume
+    // turn that dies before the backend announces itself would otherwise report
+    // the model the last turn ran on — and on a model-swapping relay that is
+    // precisely the lie `observed_model` exists to expose (#25). Cleared here,
+    // re-observed from this turn's own init event (Scope-B review, gemini-ccfb4).
+    this.observedModel = null;
+    this.observedEffort = null;
     this.turnStatus = "running";
     this.touch("resume_accepted");
   }
