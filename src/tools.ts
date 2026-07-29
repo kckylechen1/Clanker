@@ -217,23 +217,36 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
   });
 
   server.registerTool("clanker_prompt", {
-    title: "Send a correction turn to a supervised Clanker job",
+    title: "Send a correction turn to a Clanker job",
     description:
-      "Run another turn on a job whose session is still open — the supervised correction flow. This is " +
-      "turn-by-turn supervision, not mid-flight steering: issue it only after the previous turn has come " +
-      "back terminal, then poll the same id with clanker_wait. Refused when the job did not come from a " +
-      "supervised profile, when a turn is still running, or once the idle-TTL reaper has closed the " +
-      "session. The run keeps its id, its worktree and its single ledger row; result.md is rewritten with " +
-      "the corrected turn's verdict.",
+      "Run another turn on a job that already came back terminal. This is turn-by-turn supervision, not " +
+      "mid-flight steering: issue it only after the previous turn has come back terminal, then poll the " +
+      "same id with clanker_wait. Two shapes, chosen by the job's lane: a supervised job continues its " +
+      "still-open session (refused once the idle-TTL reaper closed it, or if the profile was not " +
+      "supervised); a cursor job is re-spawned against the conversation Cursor itself holds, which stays " +
+      "correctable after the session closed and accepts an optional `model` so the next turn runs on " +
+      "another model. Either way the run keeps its id, its worktree and its single ledger row, and " +
+      "result.md is rewritten with the corrected turn's verdict. A hand-off is CONTINUATION, never " +
+      "review: the resumed model reads the previous turn's whole context and is anchored by it, so " +
+      "verification still requires a separately dispatched cold-context job.",
     inputSchema: {
       id: z.string(),
       prompt: z.string().min(1),
       correction: z.boolean().optional(),
+      model: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe(
+          "Optional model (id or lane alias) for this turn — only on a lane that resumes a backend " +
+            "session (cursor). Omit to keep the model the job is already running.",
+        ),
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   }, async (args) => {
     try {
-      return ok(await manager.promptExisting(args.id, args.prompt, args.correction ?? false));
+      return ok(await manager.promptExisting(args.id, args.prompt, args.correction ?? false, args.model));
     } catch (error) { return fail(error); }
   });
 
