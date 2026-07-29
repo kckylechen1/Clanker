@@ -704,3 +704,99 @@ test("mutant: a foreign wait that does not re-read the record can only report th
     dropMutant(name);
   }
 });
+
+// ---- the id is a path segment (#32 cold review, run codex-aed92) ------------
+
+/**
+ * A runs root with a neighbour beside it: `<parent>/runs` is what the manager
+ * is given, `<parent>/elsewhere/codex-outside` is the record the caller is not
+ * entitled to, reachable only by an id that climbs out.
+ */
+function rootWithOutsider(): { root: string; outsideDir: string; escapingId: string } {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-adopt-traversal-"));
+  const root = path.join(parent, "runs");
+  const outsideDir = path.join(parent, "elsewhere", "codex-outside");
+  fs.mkdirSync(root, { recursive: true });
+  fs.mkdirSync(outsideDir, { recursive: true });
+  return { root, outsideDir, escapingId: path.join("..", "elsewhere", "codex-outside") };
+}
+
+test("a traversing id reaches no record, so it can drive no write and no signal", async () => {
+  // The read was never the point. `cancel` uses the record it reads to choose
+  // the directory it archives INTO and the pid it considers signalling, so a
+  // caller who can point `id` outside the runs root gets to nominate both.
+  const { root, outsideDir, escapingId } = rootWithOutsider();
+  const owner = spawnIdle();
+  const decoy = spawnIdle(); // the pid the planted record nominates
+  const planted = {
+    lane: "codex", terminal_at: null, server_pid: owner.pid,
+    worker_pid: decoy.pid, worker_started_at: Date.now(),
+  };
+  fs.writeFileSync(path.join(outsideDir, "telemetry.json"), JSON.stringify(planted, null, 2));
+  await killAndReap(owner); // owner provably dead: every adoption gate is otherwise OPEN
+  const m = manager(root);
+  try {
+    for (const call of [
+      () => m.cancel(escapingId),
+      () => m.wait(escapingId, 10),
+      () => m.promptExisting(escapingId, "x", true),
+    ]) {
+      await assert.rejects(call, (error: Error) => {
+        assert.match(error.message, /MALFORMED/, "a malformed id is its own answer, not 'not found'");
+        assert.doesNotMatch(error.message, /no record of it on disk/, "no lookup happened, so none may be claimed");
+        return true;
+      });
+    }
+    assert.throws(() => m.status(escapingId), /MALFORMED/);
+
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(path.join(outsideDir, "telemetry.json"), "utf8")),
+      planted,
+      "the outsider's record must be byte-identical: no terminal_at, no adoption error line",
+    );
+    assert.deepEqual(fs.readdirSync(outsideDir), ["telemetry.json"], "no result.md stub outside the runs root");
+    assert.ok(alive(decoy.pid!), "the nominated pid was never signalled");
+  } finally {
+    await m.shutdown();
+    try { process.kill(decoy.pid!, "SIGKILL"); } catch { /* already gone */ }
+  }
+});
+
+test("mutant: pre-fix, that same id kills the nominated worker and archives outside the runs root", async () => {
+  // The whole chain, proven end to end against the unguarded line: attacker
+  // telemetry outside the root → group kill of the pid it names → adoption's
+  // terminal record written into a directory the manager was never pointed at.
+  const name = "adopt-traversal-unguarded";
+  const mutated = await loadMutantManager(name, [
+    {
+      file: "foreign.ts",
+      find:
+        "  if (!isValidRunId(id)) return null;\n" +
+        "  const runDir = containedRunDir(runsRoot, id);\n" +
+        "  if (runDir === null) return null;",
+      replace: "  const runDir = path.join(runsRoot, id);",
+    },
+  ]);
+  const { root, outsideDir, escapingId } = rootWithOutsider();
+  const owner = spawnIdle();
+  const worker = await spawnWorker();
+  fs.writeFileSync(
+    path.join(outsideDir, "telemetry.json"),
+    JSON.stringify(orphanTelemetry(owner.pid!, worker), null, 2),
+  );
+  await killAndReap(owner);
+  const m = new mutated.LaneManager({
+    resolveSpec: () => fakeSpec(), disableReaper: true, baseRepo: os.tmpdir(), runsRoot: root, cancelGraceMs: 800,
+  });
+  try {
+    const result = await m.cancel(escapingId);
+    assert.equal(result.killed, true, "pre-fix, a planted record gets its nominated pid signalled");
+    await until(() => !alive(worker.pid), 4_000);
+    const after = JSON.parse(fs.readFileSync(path.join(outsideDir, "telemetry.json"), "utf8"));
+    assert.equal(after.terminal_reason, "cancelled-foreign", "…and the write lands outside the runs root");
+  } finally {
+    await m.shutdown();
+    worker.cleanup();
+    dropMutant(name);
+  }
+});

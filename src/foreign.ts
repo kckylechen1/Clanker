@@ -83,9 +83,60 @@ interface Telemetry {
   worker_started_at?: number;
 }
 
+/**
+ * The shape a run id is allowed to have — the first of two independent guards
+ * against a caller-supplied id being spent as a path segment (#32 cold review,
+ * run codex-aed92).
+ *
+ * `id` arrives here straight from `clanker_wait`/`clanker_cancel`'s bare
+ * `z.string()` (tools.ts) and everything below joins it onto `runsRoot`, so
+ * `id: "../elsewhere"` used to read a `telemetry.json` from OUTSIDE the runs
+ * root. A foreign record is not inert data: cancel archives into its
+ * `run_dir` and signals the `worker_pid` written in it (manager.ts
+ * cancelForeign → adopt.ts). Caller-chosen telemetry deciding which pid this
+ * server SIGKILLs is the actual severity, not the read.
+ *
+ * The pattern is derived from the only thing that mints run ids — manager.ts's
+ * ``` `${params.lane}-${(++this.counter).toString(36)}${randomBytes(2).hex}` ```
+ * in dispatchStartInternal, whose lane comes from LANE_NAMES (all lowercase
+ * alphanumerics, no separators) — and checked against this machine's cache:
+ * 563 of 563 run directories match it. Extra `-` segments are tolerated on
+ * purpose: an id this pattern rejects is a run nobody can see or cancel, which
+ * would be an availability bug in the module whose entire job is not losing
+ * track of orphans. What is NOT tolerated is anything that can move the read:
+ * a separator, a `.` segment, an empty segment, whitespace, a NUL.
+ */
+const RUN_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)+$/i;
+
+/** True when `id` has the shape manager.ts mints. See RUN_ID_PATTERN for why the shape is a security guard. */
+export function isValidRunId(id: unknown): id is string {
+  return typeof id === "string" && id.length <= 128 && RUN_ID_PATTERN.test(id);
+}
+
+/**
+ * Second guard, deliberately redundant with the first: where does the read
+ * ACTUALLY land? The pattern above is a claim about what ids look like; this
+ * is a claim about the resolved path, and the two fail for different reasons
+ * (a pattern widened by a later edit; a relative or oddly-nested runsRoot).
+ * Either alone would close today's hole — both are here so closing it does not
+ * depend on one line staying correct forever.
+ *
+ * Returns null when `id` resolves anywhere but strictly inside `runsRoot`.
+ */
+function containedRunDir(runsRoot: string, id: string): string | null {
+  const root = path.resolve(runsRoot);
+  const runDir = path.resolve(root, id);
+  // Strict containment: the runs root itself is never a run directory, and an
+  // absolute `id` resolves away from the root entirely — both land here.
+  if (runDir === root || !runDir.startsWith(root + path.sep)) return null;
+  return runDir;
+}
+
 /** Read one run directory's durable record, or null when there is nothing readable there. */
 export function readForeignRun(id: string, runsRoot = RUNS_ROOT, now = Date.now()): ForeignRun | null {
-  const runDir = path.join(runsRoot, id);
+  if (!isValidRunId(id)) return null;
+  const runDir = containedRunDir(runsRoot, id);
+  if (runDir === null) return null;
   let telemetry: Telemetry;
   try {
     telemetry = JSON.parse(fs.readFileSync(path.join(runDir, "telemetry.json"), "utf8")) as Telemetry;

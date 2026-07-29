@@ -29,6 +29,7 @@ import { archiveAdoptedRun, killAdoptedWorker, probeOwner } from "./adopt.js";
 import {
   foreignControlRefusal,
   foreignRunStatus,
+  isValidRunId,
   readForeignRun,
   scanForeignRuns,
   type ForeignRun,
@@ -1334,9 +1335,23 @@ export class LaneManager {
    * second case rendered as the first is how one contract ends up with two
    * live workers both opening PRs. Disk knows the difference; ask it.
    *
+   * A THIRD kind of absent joined those two with the traversal fix
+   * (foreign.ts isValidRunId): an id that could never name a run at all. It
+   * gets its own sentence, because "no record of it on disk" would be a lie of
+   * the same family — it says a lookup happened and came back empty, when in
+   * fact nothing was looked up and nothing outside the runs root was touched.
+   *
    * Never returns.
    */
   private throwUnknownRun(id: string): never {
+    if (!isValidRunId(id)) {
+      throw new Error(
+        `run id '${String(id).slice(0, 80)}' is MALFORMED — a Clanker run id is '<lane>-<suffix>' ` +
+          `(e.g. 'codex-1a2b3c'), and this one is not, so no lookup was performed at all. Nothing was read ` +
+          `from ${this.runsRoot}, and nothing outside it was read, written or signalled. This is not the same ` +
+          `answer as "no such run": a run that exists cannot have this id.`,
+      );
+    }
     const foreign = readForeignRun(id, this.runsRoot);
     if (foreign) throw new Error(foreignControlRefusal(id, foreign));
     throw new Error(

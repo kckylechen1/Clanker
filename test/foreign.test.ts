@@ -18,8 +18,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LaneManager } from "../src/manager.js";
-import { readForeignRun, scanForeignRuns } from "../src/foreign.js";
-import { fakeSpec, until } from "./helpers.js";
+import { isValidRunId, readForeignRun, scanForeignRuns } from "../src/foreign.js";
+import { dropMutant, fakeSpec, loadMutantModule, until } from "./helpers.js";
 
 const NOW = 1_800_000_000_000;
 
@@ -184,5 +184,124 @@ test("a genuinely unknown id still says not found, and says where it looked", as
     });
   } finally {
     await m.shutdown();
+  }
+});
+
+// ---- an id is a path segment (#32 cold review, run codex-aed92) -------------
+
+/**
+ * A runs root with a NEIGHBOUR directory beside it holding a run record this
+ * process was never meant to read — the attacker-controlled telemetry a
+ * traversing id used to reach.
+ *
+ * Returns the escaping id (relative, as a caller would pass it) and the
+ * outsider's directory.
+ */
+function rootWithOutsider(): { root: string; outsideDir: string; escapingId: string } {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-traversal-"));
+  const root = path.join(parent, "runs");
+  const outsideDir = path.join(parent, "elsewhere", "codex-outside");
+  fs.mkdirSync(root, { recursive: true });
+  fs.mkdirSync(outsideDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(outsideDir, "telemetry.json"),
+    JSON.stringify({ lane: "codex", terminal_at: null, server_pid: 999_999_999, worker_pid: 424_242 }),
+  );
+  return { root, outsideDir, escapingId: path.join("..", "elsewhere", "codex-outside") };
+}
+
+test("a traversing id reads NOTHING — the id is a path segment, not a path", () => {
+  // `id` arrives from clanker_wait/clanker_cancel as a bare z.string() and is
+  // joined onto the runs root. Reading a stranger's telemetry.json is only the
+  // first half: the record read here decides which directory cancel archives
+  // into and which pid it considers signalling.
+  const { root, escapingId } = rootWithOutsider();
+  writeRun(root, "codex-inside", { lane: "codex", terminal_at: null });
+
+  assert.equal(readForeignRun(escapingId, root, NOW), null, "../ must not resolve outside the runs root");
+  assert.equal(readForeignRun("../elsewhere/codex-outside/", root, NOW), null, "a trailing slash changes nothing");
+  assert.equal(readForeignRun("..", root, NOW), null);
+  assert.equal(readForeignRun("/etc", root, NOW), null, "an absolute id resolves away from the root entirely");
+  assert.equal(readForeignRun("codex-inside/../../elsewhere/codex-outside", root, NOW), null);
+  // ...and the guard did not simply break reading, which is the way a
+  // containment fix silently becomes an availability bug.
+  assert.equal(readForeignRun("codex-inside", root, NOW)?.run_dir, path.join(root, "codex-inside"));
+});
+
+test("isValidRunId accepts what manager.ts mints and refuses what moves the read", () => {
+  // The shape comes from dispatchStartInternal:
+  //   `${lane}-${(++counter).toString(36)}${randomBytes(2).toString("hex")}`
+  // with lane drawn from LANE_NAMES. Verified against the machine's own cache:
+  // every run directory there matches.
+  for (const good of ["codex-1a2b3c", "gemini-zz00ff", "opencode-10a1", "cursor-1f", "codex-live-owner"]) {
+    assert.equal(isValidRunId(good), true, `${good} is the shape the generator emits`);
+  }
+  for (const bad of [
+    "../elsewhere", "..", ".", "", "codex", "a/b", "a\\b", "/abs/path", "codex-1a2b/../..",
+    "codex 1a2b", "codex-1a2b\n", "codex-1a2b\0", "codex-.-1a2b", "-codex-1", "codex-",
+  ]) {
+    assert.equal(isValidRunId(bad), false, `${JSON.stringify(bad)} must not be usable as a path segment`);
+  }
+});
+
+test("mutant: without both guards the traversing id really does read the outsider (the exploit is real)", async () => {
+  // Proves the fixture above is an exploit and not a no-op: with the pre-fix
+  // line restored, the same id returns a record whose run_dir — the directory
+  // cancel archives into — sits outside the runs root, carrying the outsider's
+  // chosen worker_pid.
+  const name = "foreign-traversal-unguarded";
+  const mutated = await loadMutantModule<typeof import("../src/foreign.js")>(name, [
+    {
+      file: "foreign.ts",
+      find:
+        "  if (!isValidRunId(id)) return null;\n" +
+        "  const runDir = containedRunDir(runsRoot, id);\n" +
+        "  if (runDir === null) return null;",
+      replace: "  const runDir = path.join(runsRoot, id);",
+    },
+  ], "foreign.ts");
+  const { root, outsideDir, escapingId } = rootWithOutsider();
+  try {
+    const leaked = mutated.readForeignRun(escapingId, root, NOW);
+    assert.ok(leaked, "pre-fix, a traversing id resolves to a real record");
+    assert.equal(path.resolve(leaked.run_dir), path.resolve(outsideDir), "…outside the runs root");
+    assert.equal(leaked.worker_pid, 424_242, "…and the caller chose the pid cancel would consider signalling");
+  } finally {
+    dropMutant(name);
+  }
+});
+
+test("mutant: either guard ALONE closes the traversal — the pair is not one guard written twice", async () => {
+  // Defense in depth is only depth if each layer holds on its own. One mutant
+  // deletes the id whitelist, the other deletes the resolved-path containment;
+  // the traversing id must come back null in both.
+  const cases = [
+    {
+      name: "foreign-traversal-pattern-only",
+      mutation: {
+        file: "foreign.ts",
+        find: "  const runDir = containedRunDir(runsRoot, id);\n  if (runDir === null) return null;",
+        replace: "  const runDir = path.join(runsRoot, id);",
+      },
+      why: "the id whitelist alone must refuse ../",
+    },
+    {
+      name: "foreign-traversal-containment-only",
+      mutation: {
+        file: "foreign.ts",
+        find: "  if (!isValidRunId(id)) return null;",
+        replace: "  if (false) return null;",
+      },
+      why: "resolved-path containment alone must refuse ../",
+    },
+  ];
+  for (const { name, mutation, why } of cases) {
+    const mutated = await loadMutantModule<typeof import("../src/foreign.js")>(name, [mutation], "foreign.ts");
+    const { root, escapingId } = rootWithOutsider();
+    try {
+      assert.equal(mutated.readForeignRun(escapingId, root, NOW), null, why);
+    } finally {
+      dropMutant(name);
+    }
   }
 });
