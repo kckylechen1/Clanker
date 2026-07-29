@@ -203,6 +203,41 @@ test("#47: every seat reports whether its run's account reached the ticket", asy
   }
 });
 
+test("#48: every seat reports the class of a terminal failure it was handed", async () => {
+  // Third instance of the same shape as the two tests above, and the same root
+  // cause each time: the fact already reaches the relay and dies there. #48's
+  // run codex-45fd0 came back with the vendor's cybersecurity-policy page as
+  // its entire output — a review that never happened. The classifier now flips
+  // that run to `status: error` with `failure_class: CLANKER-VENDOR-REFUSAL`,
+  // but a zero-discretion seat reports only what its card whitelists, and
+  // `failure_class` was not on any of the nine lists. `status: error` alone
+  // says a run went wrong; it does not say the vendor declined to do the work,
+  // which is the one thing that decides whether re-dispatching the same prompt
+  // to the same vendor is worth anything.
+  for (const seat of ALL_SEATS) {
+    const body = await readFile(new URL(`../plugin/agents/${seat}.md`, import.meta.url), "utf8");
+    // Anchored to the DELIVERY LIST, exactly as the two tests above are, and
+    // for the reason spelled out there: prose about a field is not permission
+    // to return it.
+    const afterList = body.split(/`plan_final`, `telemetry\.observed_model`/)[1] ?? "";
+    const deliveryList = afterList.split("`run_dir` and `result_path` are absolute paths")[0] ?? "";
+    assert.ok(deliveryList.length > 0, `${seat}.md: could not find the delivery list to check`);
+    assert.match(
+      deliveryList,
+      /`failure_class`/,
+      `${seat}.md must list failure_class among the fields it returns — without it a vendor refusal ` +
+        `reaches the dispatcher as a bare 'error' and a review that never happened stays unexplained`,
+    );
+    // And the tag itself must be named somewhere in the card, so the seat is
+    // not asked to relay a string it has never been told is load-bearing.
+    assert.match(
+      body,
+      /CLANKER-VENDOR-REFUSAL/,
+      `${seat}.md must name CLANKER-VENDOR-REFUSAL — the one failure class that means no verdict exists`,
+    );
+  }
+});
+
 test("the README profile table and the registry agree, in both directions", async () => {
   // README's table is the first thing anyone reads about what a dispatch can
   // be, and it silently fell one row behind the registry: `gemini-research`
