@@ -172,6 +172,37 @@ test("every seat reports the model that actually ran", async () => {
   }
 });
 
+test("#47: every seat reports whether its run's account reached the ticket", async () => {
+  // Same shape as observed_model one test up, one #27 later. The comment's
+  // outcome is already on the terminal wait payload — `telemetry` carries
+  // issue_comment_error/issue_comment_pending (run.ts telemetry()), and the
+  // degraded disk-poll path lifts them to the top level (manager.ts
+  // buildForeignWaitResult) — so again no seat needs a tool it does not have.
+  // What was missing was permission: every card tells its seat its reply
+  // contains ONLY the listed fields, and that whitelist mechanically excluded
+  // these two, so a zero-discretion relay could not have reported them if it
+  // wanted to. `result_path` without the account tells the dispatcher what the
+  // worker decided and not whether anyone will ever find that decision.
+  for (const seat of ALL_SEATS) {
+    const body = await readFile(new URL(`../plugin/agents/${seat}.md`, import.meta.url), "utf8");
+    // Anchored to the DELIVERY LIST for the reason spelled out above: every
+    // card's list runs from `plan_final`/`telemetry.observed_model` to the
+    // sentence about absolute paths, and prose ABOUT a field elsewhere in the
+    // card is not the same as the field being permitted in the reply.
+    const afterList = body.split(/`plan_final`, `telemetry\.observed_model`/)[1] ?? "";
+    const deliveryList = afterList.split("`run_dir` and `result_path` are absolute paths")[0] ?? "";
+    assert.ok(deliveryList.length > 0, `${seat}.md: could not find the delivery list to check`);
+    for (const field of ["issue_comment_error", "issue_comment_pending"]) {
+      assert.match(
+        deliveryList,
+        new RegExp(field),
+        `${seat}.md must list ${field} among the fields it returns — a verdict whose account never ` +
+          `reached its ticket is bookkeeping that died in silence, which is the whole of #27`,
+      );
+    }
+  }
+});
+
 test("the README profile table and the registry agree, in both directions", async () => {
   // README's table is the first thing anyone reads about what a dispatch can
   // be, and it silently fell one row behind the registry: `gemini-research`
