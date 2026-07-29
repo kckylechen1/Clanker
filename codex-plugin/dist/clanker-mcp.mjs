@@ -28316,12 +28316,12 @@ var PUBLIC_SECRET_RULES = [
   // worth naming: the long-run rule below treats `-`/`_` as boundaries (see
   // there for why), which is exactly the alphabet a JWT is written in.
   { re: /\beyJ[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]+){0,2}/g, replace: "[REDACTED]" },
-  // `Authorization: Bearer <token>` / `token <token>`. `redact()` already blanks
-  // the value after a COLON, which on this header leaves the scheme word behind
-  // and the token itself untouched ("Authorization: [REDACTED] ghp_…"); this
-  // rule takes the value that follows the scheme instead. Gated on a digit and
-  // 12+ characters so ordinary prose about tokens ("the token is staged in a
-  // file") is not shredded — a real credential essentially always carries one.
+  // A bare `Bearer <token>` / `token <token>` with no header around it. The
+  // header form is handled structurally before any of these rules run (see
+  // AUTH_HEADER below); this one catches the scheme word standing on its own in
+  // prose or in a curl line. Gated on a digit and 12+ characters so ordinary
+  // prose about tokens ("the token is staged in a file") is not shredded — a
+  // real credential essentially always carries one.
   { re: /\b(bearer|token)(\s+)(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{12,}/gi, replace: "$1$2[REDACTED]" },
   // URL userinfo: `https://user:pass@host` and the token-as-username form
   // `https://ghp_xxx@host`. The password half is always a credential; a lone
@@ -28352,12 +28352,20 @@ function looksRandom(span, requireDigitOrNoWord) {
   if (longestSameCaseRun(span) < 6) return true;
   return requireDigitOrNoWord ? /\d/.test(span) : false;
 }
+var AUTH_HEADER = /\b((?:proxy-)?authorization)(["']?[ \t]*[:=][ \t]*["']?)([A-Za-z][A-Za-z0-9._-]*)([ \t]+)[^\r\n'"`]+/gi;
+var AUTH_PARK = /\[\[clanker-auth-(\d+)\]\]/g;
 function redactForPublic(text) {
-  let out = redact(text);
+  const parked = [];
+  let out = text.replace(AUTH_HEADER, (_m, name, sep, scheme, gap) => {
+    parked.push(`${name}${sep}${scheme}${gap}[REDACTED]`);
+    return `[[clanker-auth-${parked.length - 1}]]`;
+  });
+  out = redact(out);
   for (const { re, replace } of PUBLIC_SECRET_RULES) out = out.replace(re, replace);
   out = out.replace(PUBLIC_HEX_BLOB, (m) => GIT_SHA.test(m) ? m : "[REDACTED]");
   out = out.replace(PUBLIC_LOOSE_BLOB, (m) => looksRandom(m, false) ? "[REDACTED]" : m);
-  return out.replace(PUBLIC_TIGHT_BLOB, (m) => looksRandom(m, true) ? "[REDACTED]" : m);
+  out = out.replace(PUBLIC_TIGHT_BLOB, (m) => looksRandom(m, true) ? "[REDACTED]" : m);
+  return out.replace(AUTH_PARK, (m, index) => parked[Number(index)] ?? m);
 }
 function stderrSuffix(stderr) {
   const cleaned = redact(stderr).trim();
@@ -28518,7 +28526,10 @@ async function postIssueComment(input, deps = {}) {
     if (scratch !== void 0) {
       try {
         fs4.rmSync(scratch, { recursive: true, force: true });
-      } catch {
+      } catch (error40) {
+        logError(
+          `[clanker] issue comment for run '${input.facts.runId}': could not remove the staged body at ${scratch}: ${errMessage(error40)}. The comment itself is unaffected.`
+        );
       }
     }
   }
@@ -28849,6 +28860,8 @@ var LaneRun = class {
     this.forcedKill = false;
     this.error = void 0;
     this.failureClass = void 0;
+    this.issueCommentError = void 0;
+    this.issueCommentPending = false;
     this.turnsCount += 1;
     if (correction) this.corrections += 1;
     this.turnStatus = "running";
@@ -30207,6 +30220,8 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
     server_pid: typeof telemetry.server_pid === "number" ? telemetry.server_pid : null,
     worker_pid: typeof telemetry.worker_pid === "number" ? telemetry.worker_pid : null,
     worker_started_at: typeof telemetry.worker_started_at === "number" ? telemetry.worker_started_at : null,
+    issue_comment_error: typeof telemetry.issue_comment_error === "string" ? telemetry.issue_comment_error : null,
+    issue_comment_pending: telemetry.issue_comment_pending === true,
     run_dir: runDir,
     ...resultPath ? { result_path: resultPath } : {},
     last_activity_ms: newestMtimeMs > 0 ? Math.max(0, now - newestMtimeMs) : -1
@@ -35025,8 +35040,15 @@ ${params.prompt}`;
       suspected_stall: foreign.last_activity_ms >= 0 && foreign.last_activity_ms > this.stallThresholdMs,
       run_dir: foreign.run_dir,
       degraded: "disk-poll",
-      degraded_note: `${ownerDetail}, so this wait polled ${foreign.run_dir} instead of an event stream. There is NO digest, no plan and no final_message for this run: those live in the process that spawned it and are not on disk. status/terminal state, the verdict file and observed_model below come straight from telemetry.json; nothing here is inferred.`,
-      observed_model: foreign.observed_model
+      degraded_note: `${ownerDetail}, so this wait polled ${foreign.run_dir} instead of an event stream. There is NO digest, no plan and no final_message for this run: those live in the process that spawned it and are not on disk. status/terminal state, the verdict file, observed_model and the issue-comment account below come straight from telemetry.json; nothing here is inferred.`,
+      observed_model: foreign.observed_model,
+      // The #27 account survives its owner because it lives in telemetry.json.
+      // `issue_comment_pending` on a run whose owner is dead means the post
+      // will never resolve — the honest reading is "go look at the ticket",
+      // which is precisely what a dispatcher needs and could not previously
+      // see from this path at all.
+      ...foreign.issue_comment_error !== null ? { issue_comment_error: foreign.issue_comment_error } : {},
+      ...foreign.issue_comment_pending ? { issue_comment_pending: true } : {}
     };
     if (foreign.result_path) {
       result.result_path = foreign.result_path;
