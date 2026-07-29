@@ -3226,8 +3226,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path11) {
-      let input = path11;
+    function removeDotSegments(path12) {
+      let input = path12;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3479,8 +3479,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path11, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path11 && path11 !== "/" ? path11 : void 0;
+        const [path12, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path12 && path12 !== "/" ? path12 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -6873,12 +6873,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs11, exportName) {
+    function addFormats(ajv, list, fs12, exportName) {
       var _a;
       var _b;
       (_a = (_b = ajv.opts.code).formats) !== null && _a !== void 0 ? _a : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs11[f]);
+        ajv.addFormat(f, fs12[f]);
     }
     module.exports = exports = formatsPlugin;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -7364,8 +7364,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path11, errorMaps, issueData } = params;
-  const fullPath = [...path11, ...issueData.path || []];
+  const { data, path: path12, errorMaps, issueData } = params;
+  const fullPath = [...path12, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7481,11 +7481,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path11, key) {
+  constructor(parent, value, path12, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path11;
+    this._path = path12;
     this._key = key;
   }
   get path() {
@@ -11367,10 +11367,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path11) {
-  if (!path11)
+function getElementAtPath(obj, path12) {
+  if (!path12)
     return obj;
-  return path11.reduce((acc, key) => acc?.[key], obj);
+  return path12.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11690,11 +11690,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path11, issues) {
+function prefixIssues(path12, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path11);
+    iss.path.unshift(path12);
     return iss;
   });
 }
@@ -11831,7 +11831,7 @@ function treeifyError(error40, _mapper) {
     return issue2.message;
   };
   const result = { errors: [] };
-  const processError = (error41, path11 = []) => {
+  const processError = (error41, path12 = []) => {
     var _a, _b;
     for (const issue2 of error41.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
@@ -11841,7 +11841,7 @@ function treeifyError(error40, _mapper) {
       } else if (issue2.code === "invalid_element") {
         processError({ issues: issue2.issues }, issue2.path);
       } else {
-        const fullpath = [...path11, ...issue2.path];
+        const fullpath = [...path12, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -11871,9 +11871,9 @@ function treeifyError(error40, _mapper) {
   processError(error40);
   return result;
 }
-function toDotPath(path11) {
+function toDotPath(path12) {
   const segs = [];
-  for (const seg of path11) {
+  for (const seg of path12) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -27761,7 +27761,7 @@ var RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 864e5;
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.3.9";
+var SERVER_VERSION = "0.4.0";
 var DEFAULT_CODEX_MODEL = "gpt-5.5";
 var DEFAULT_CODEX_EFFORT = "xhigh";
 var WRITE_DISCIPLINE_PREFIX = `Workspace discipline, enforced by the dispatching contract \u2014 these override any
@@ -27819,8 +27819,8 @@ function envInt(name, fallback) {
 
 // src/manager.ts
 import crypto from "node:crypto";
-import fs9 from "node:fs";
-import path9 from "node:path";
+import fs10 from "node:fs";
+import path10 from "node:path";
 
 // src/acp-client.ts
 import { spawn } from "node:child_process";
@@ -31828,7 +31828,8 @@ function buildSpawnSpec(lane, opts, runDir) {
   }
 }
 
-// src/foreign.ts
+// src/adopt.ts
+import { spawnSync } from "node:child_process";
 import fs7 from "node:fs";
 import path7 from "node:path";
 
@@ -32699,20 +32700,292 @@ function truncate(s, max) {
   return s.slice(0, Math.max(0, max - 1)) + "\u2026";
 }
 
+// src/adopt.ts
+var IDENTITY_TOLERANCE_MS = 2e3;
+var DEATH_POLL_MS = 50;
+var KILL_SETTLE_MS = 1e3;
+function probeOwner(serverPid, self = process.pid) {
+  if (typeof serverPid !== "number" || !Number.isInteger(serverPid) || serverPid <= 0) {
+    return {
+      state: "unknown",
+      pid: null,
+      detail: "this run's telemetry names no server_pid (it predates PR #40), so whether its owner is still alive cannot be established"
+    };
+  }
+  if (serverPid === self) {
+    return { state: "alive", pid: serverPid, detail: `server_pid ${serverPid} is this very process` };
+  }
+  try {
+    process.kill(serverPid, 0);
+    return { state: "alive", pid: serverPid, detail: `server_pid ${serverPid} answers to kill(pid, 0)` };
+  } catch (error40) {
+    const code = error40.code;
+    if (code === "ESRCH") {
+      return { state: "dead", pid: serverPid, detail: `server_pid ${serverPid} no longer exists (ESRCH)` };
+    }
+    if (code === "EPERM") {
+      return {
+        state: "alive",
+        pid: serverPid,
+        detail: `server_pid ${serverPid} exists but belongs to another user (EPERM)`
+      };
+    }
+    return {
+      state: "unknown",
+      pid: serverPid,
+      detail: `probing server_pid ${serverPid} failed with ${code ?? "an unknown error"}`
+    };
+  }
+}
+function readProcessFacts(pid) {
+  if (process.platform === "win32") {
+    return { ok: false, reason: "process identity cannot be verified on win32 (no ps, no process groups)" };
+  }
+  let result;
+  try {
+    result = spawnSync("ps", ["-p", String(pid), "-o", "lstart=,comm="], {
+      encoding: "utf8",
+      env: { ...process.env, LC_ALL: "C", LANG: "C" },
+      timeout: 5e3
+    });
+  } catch (error40) {
+    return { ok: false, reason: `ps could not be run: ${error40 instanceof Error ? error40.message : String(error40)}` };
+  }
+  if (result.error) return { ok: false, reason: `ps could not be run: ${result.error.message}` };
+  if (result.status !== 0) {
+    return { ok: false, reason: `ps reports no process with pid ${pid} (exit ${result.status})` };
+  }
+  const line = (result.stdout ?? "").split("\n").find((l) => l.trim().length > 0);
+  if (!line) return { ok: false, reason: `ps returned no row for pid ${pid}` };
+  const match = /^\s*(\w{3}\s+(?:\w{3}\s+\d{1,2}|\d{1,2}\s+\w{3})\s+\d{1,2}:\d{2}:\d{2}\s+\d{4})\s*(\S.*)?$/.exec(line);
+  if (!match) return { ok: false, reason: `ps start time is not in a format this build can parse: '${line.trim()}'` };
+  const startedAt = Date.parse(match[1]);
+  if (!Number.isFinite(startedAt)) {
+    return { ok: false, reason: `ps start time '${match[1]}' did not parse as a date` };
+  }
+  return { ok: true, facts: { startedAt, comm: (match[2] ?? "").trim() } };
+}
+var LANE_COMMANDS = {
+  codex: ["node", "tachi", "codex", "codex-acp"],
+  cursor: ["node", "tachi", "cursor-agent", "cursor"],
+  gemini: ["node", "tachi", "agy", "gemini"],
+  grok: ["grok", "tachi", "node"],
+  opencode: ["opencode", "tachi", "node", "bun"]
+};
+function verifyWorkerIdentity(pid, recordedStartedAt, lane, toleranceMs = IDENTITY_TOLERANCE_MS) {
+  if (typeof recordedStartedAt !== "number" || !Number.isFinite(recordedStartedAt)) {
+    return {
+      verified: false,
+      reason: "no worker_started_at on record, so a pid-reuse check is impossible \u2014 refusing to signal a pid that cannot be shown to still be the worker"
+    };
+  }
+  const probe = readProcessFacts(pid);
+  if (!probe.ok) return { verified: false, reason: probe.reason };
+  const skew = probe.facts.startedAt - recordedStartedAt;
+  const expected = LANE_COMMANDS[lane ?? ""] ?? [];
+  const base = path7.basename(probe.facts.comm);
+  const commMatches = expected.length === 0 ? void 0 : expected.some((c) => base === c || base.startsWith(c));
+  const shared = {
+    observed_started_at: probe.facts.startedAt,
+    skew_ms: skew,
+    comm: probe.facts.comm,
+    ...commMatches === void 0 ? {} : { comm_matches_lane: commMatches }
+  };
+  if (Math.abs(skew) > toleranceMs) {
+    return {
+      ...shared,
+      verified: false,
+      reason: `pid ${pid} started ${new Date(probe.facts.startedAt).toISOString()}, but this run recorded its worker starting ${new Date(recordedStartedAt).toISOString()} (${skew}ms apart, tolerance \xB1${toleranceMs}ms) \u2014 the pid has been recycled onto a different process and must not be signalled`
+    };
+  }
+  return {
+    ...shared,
+    verified: true,
+    reason: `pid ${pid} start time matches the recorded worker within ${Math.abs(skew)}ms` + (commMatches === false ? `, though its command '${probe.facts.comm}' is not one lane '${lane}' usually spawns` : "")
+  };
+}
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error40) {
+    return error40.code === "EPERM";
+  }
+}
+var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitForDeath(pid, budgetMs) {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (!alive(pid)) return true;
+    await sleep(Math.min(DEATH_POLL_MS, Math.max(1, deadline - Date.now())));
+  }
+  return !alive(pid);
+}
+function signalGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+    return { sent: `${signal}\u2192group ${pid}`, groupWide: true };
+  } catch (error40) {
+    const code = error40.code;
+    if (!alive(pid)) return { sent: null, reason: `group ${pid} was already gone (${code ?? "error"})` };
+    try {
+      process.kill(pid, signal);
+      return { sent: `${signal}\u2192pid ${pid} (not a group leader)`, groupWide: false };
+    } catch (inner) {
+      return { sent: null, reason: `neither group nor pid ${pid} could be signalled (${inner.code})` };
+    }
+  }
+}
+async function killAdoptedWorker(opts) {
+  const { workerPid, workerStartedAt, lane, graceMs } = opts;
+  if (typeof workerPid !== "number" || !Number.isInteger(workerPid) || workerPid <= 0) {
+    return {
+      killed: false,
+      identity_verified: false,
+      worker_gone: true,
+      signals: [],
+      note: "no worker_pid on record \u2014 the dispatch died before it ever spawned a worker; nothing to signal"
+    };
+  }
+  if (!alive(workerPid)) {
+    return {
+      killed: false,
+      identity_verified: false,
+      worker_gone: true,
+      signals: [],
+      note: `worker pid ${workerPid} is already gone; archiving the record only`
+    };
+  }
+  const identity = verifyWorkerIdentity(workerPid, workerStartedAt, lane);
+  if (!identity.verified) {
+    return {
+      killed: false,
+      identity_verified: false,
+      // Something IS alive on that pid; it is just not provably our worker.
+      worker_gone: false,
+      signals: [],
+      identity,
+      note: `no signal sent: ${identity.reason}`
+    };
+  }
+  const signals = [];
+  const term = signalGroup(workerPid, "SIGTERM");
+  const bareOnly = term.sent !== null && !term.groupWide;
+  if (term.sent) signals.push(term.sent);
+  if (await waitForDeath(workerPid, graceMs)) {
+    return {
+      killed: signals.length > 0,
+      identity_verified: true,
+      worker_gone: true,
+      signals,
+      identity,
+      note: signals.length ? `worker group ${workerPid} exited on SIGTERM` + (bareOnly ? " (bare pid \u2014 worker led no group, so descendants may survive)" : "") : `worker ${workerPid} vanished before any signal landed`
+    };
+  }
+  const recheck = verifyWorkerIdentity(workerPid, workerStartedAt, lane);
+  if (!recheck.verified) {
+    return {
+      killed: signals.length > 0,
+      identity_verified: false,
+      worker_gone: false,
+      signals,
+      identity: recheck,
+      note: `SIGTERM was sent, but pid ${workerPid} no longer verifies as this run's worker (${recheck.reason}) \u2014 SIGKILL withheld`
+    };
+  }
+  const kill = signalGroup(workerPid, "SIGKILL");
+  if (kill.sent) signals.push(kill.sent);
+  const gone = await waitForDeath(workerPid, KILL_SETTLE_MS);
+  return {
+    killed: signals.length > 0,
+    identity_verified: true,
+    worker_gone: gone,
+    signals,
+    identity: recheck,
+    note: gone ? `worker group ${workerPid} survived SIGTERM for ${graceMs}ms and was SIGKILLed` : `worker group ${workerPid} did not exit within ${KILL_SETTLE_MS}ms of SIGKILL \u2014 it may be stuck in the kernel`
+  };
+}
+var ADOPTED_TERMINAL_REASON = "cancelled-foreign";
+function archiveAdoptedRun(input) {
+  const { runDir, id, adopterPid, ownerPid, workerPid, outcome } = input;
+  const nowIso = new Date(input.now ?? Date.now()).toISOString();
+  const problems = [];
+  const explanation = `run '${id}' was adopted and cancelled by Clanker server pid ${adopterPid} at ${nowIso}: its own server (pid ${ownerPid ?? "unknown"}) was gone, so this process took over. worker_pid ${workerPid ?? "none"}; identity_verified=${outcome.identity_verified}; signals=[${outcome.signals.join(", ") || "none"}]; ${outcome.note}`;
+  let telemetryWritten = false;
+  const telemetryPath = path7.join(runDir, "telemetry.json");
+  try {
+    let record2 = {};
+    try {
+      record2 = JSON.parse(fs7.readFileSync(telemetryPath, "utf8"));
+    } catch {
+      record2 = { id };
+      problems.push("existing telemetry.json was unreadable; wrote a minimal terminal record over it");
+    }
+    if (!record2.terminal_at) {
+      record2.terminal_at = nowIso;
+      record2.terminal_reason = ADOPTED_TERMINAL_REASON;
+    }
+    record2.error = record2.error ? `${String(record2.error)}
+${explanation}` : explanation;
+    const tmp = `${telemetryPath}.${process.pid}.tmp`;
+    fs7.writeFileSync(tmp, JSON.stringify(record2, null, 2));
+    fs7.renameSync(tmp, telemetryPath);
+    telemetryWritten = true;
+  } catch (error40) {
+    problems.push(`telemetry archival failed: ${error40 instanceof Error ? error40.message : String(error40)}`);
+  }
+  let resultStubWritten = false;
+  const resultPath = path7.join(runDir, RESULT_FILE);
+  try {
+    let size = 0;
+    try {
+      size = fs7.statSync(resultPath).size;
+    } catch {
+    }
+    if (size === 0) {
+      const lines = [
+        `# clanker run ${id}`,
+        "",
+        "- status: cancelled",
+        `- terminal_reason: ${ADOPTED_TERMINAL_REASON}`,
+        `- run_dir: ${runDir}`,
+        "",
+        "## adoption",
+        "",
+        explanation,
+        "",
+        RESULT_FINAL_MESSAGE_HEADING,
+        "",
+        "(no verdict: this run was cancelled by an adopting server process, which never held its event stream. Nothing here was produced by the worker.)",
+        ""
+      ];
+      const tmp = `${resultPath}.${process.pid}.tmp`;
+      fs7.writeFileSync(tmp, lines.join("\n"));
+      fs7.renameSync(tmp, resultPath);
+      resultStubWritten = true;
+    }
+  } catch (error40) {
+    problems.push(`result stub write failed: ${error40 instanceof Error ? error40.message : String(error40)}`);
+  }
+  return { telemetry_written: telemetryWritten, result_stub_written: resultStubWritten, problems };
+}
+
 // src/foreign.ts
+import fs8 from "node:fs";
+import path8 from "node:path";
 function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
-  const runDir = path7.join(runsRoot, id);
+  const runDir = path8.join(runsRoot, id);
   let telemetry;
   try {
-    telemetry = JSON.parse(fs7.readFileSync(path7.join(runDir, "telemetry.json"), "utf8"));
+    telemetry = JSON.parse(fs8.readFileSync(path8.join(runDir, "telemetry.json"), "utf8"));
   } catch {
     return null;
   }
   let newestMtimeMs = 0;
   try {
-    for (const entry of fs7.readdirSync(runDir)) {
+    for (const entry of fs8.readdirSync(runDir)) {
       try {
-        newestMtimeMs = Math.max(newestMtimeMs, fs7.statSync(path7.join(runDir, entry)).mtimeMs);
+        newestMtimeMs = Math.max(newestMtimeMs, fs8.statSync(path8.join(runDir, entry)).mtimeMs);
       } catch {
       }
     }
@@ -32720,7 +32993,7 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
   }
   let resultPath;
   try {
-    if (fs7.statSync(path7.join(runDir, RESULT_FILE)).size > 0) resultPath = path7.join(runDir, RESULT_FILE);
+    if (fs8.statSync(path8.join(runDir, RESULT_FILE)).size > 0) resultPath = path8.join(runDir, RESULT_FILE);
   } catch {
   }
   return {
@@ -32733,10 +33006,24 @@ function readForeignRun(id, runsRoot = RUNS_ROOT, now = Date.now()) {
     observed_model: telemetry.observed_model ?? null,
     read_only: telemetry.read_only ?? null,
     turns: telemetry.turns ?? null,
+    server_pid: typeof telemetry.server_pid === "number" ? telemetry.server_pid : null,
+    worker_pid: typeof telemetry.worker_pid === "number" ? telemetry.worker_pid : null,
+    worker_started_at: typeof telemetry.worker_started_at === "number" ? telemetry.worker_started_at : null,
     run_dir: runDir,
     ...resultPath ? { result_path: resultPath } : {},
     last_activity_ms: newestMtimeMs > 0 ? Math.max(0, now - newestMtimeMs) : -1
   };
+}
+function foreignRunStatus(run) {
+  if (!run.terminal_at) return "running";
+  switch (run.terminal_reason) {
+    case "done":
+      return "done";
+    case "error":
+      return "error";
+    default:
+      return "cancelled";
+  }
 }
 function scanForeignRuns(options = {}) {
   const runsRoot = options.runsRoot ?? RUNS_ROOT;
@@ -32745,7 +33032,7 @@ function scanForeignRuns(options = {}) {
   const now = options.now ?? Date.now();
   let ids;
   try {
-    ids = fs7.readdirSync(runsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+    ids = fs8.readdirSync(runsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
   } catch {
     return [];
   }
@@ -32761,9 +33048,10 @@ function scanForeignRuns(options = {}) {
   found.sort((a, b) => activityRank(a.last_activity_ms) - activityRank(b.last_activity_ms));
   return found;
 }
-function foreignControlRefusal(id, run) {
+function foreignControlRefusal(id, run, owner) {
   const state = run.terminal_at ? `already terminal (${run.terminal_reason ?? "unknown"})` : "still in flight";
-  return `run '${id}' belongs to a different Clanker server process and is ${state}. Each session spawns its own server, and control (wait/cancel/prompt) needs the process that holds the worker's stdio \u2014 it cannot be recovered from disk. You can read its record at ${run.run_dir}${run.result_path ? ` and its verdict at ${run.result_path}` : ""}. Do NOT re-dispatch on the assumption that it never started.`;
+  const ownerClause = owner?.state === "alive" ? ` The owner session is still alive (${owner.detail}) \u2014 cancel or wait for this run from THAT session; control transfers only once the owning server is provably dead.` : owner?.state === "unknown" ? ` Ownership could not be established (${owner.detail}), so this process will not take it over: adoption requires proof the owning server is dead, and an unproven owner is treated as a live one.` : "";
+  return `run '${id}' belongs to a different Clanker server process and is ${state}. Each session spawns its own server, and control (wait/cancel/prompt) needs the process that holds the worker's stdio \u2014 it cannot be recovered from disk. You can read its record at ${run.run_dir}${run.result_path ? ` and its verdict at ${run.result_path}` : ""}. Do NOT re-dispatch on the assumption that it never started.${ownerClause}`;
 }
 
 // src/failure-classifier.ts
@@ -33124,8 +33412,8 @@ function hostLaneBlockedReason(host, lane) {
 
 // src/worktree.ts
 import { execFile } from "node:child_process";
-import fs8 from "node:fs";
-import path8 from "node:path";
+import fs9 from "node:fs";
+import path9 from "node:path";
 import { promisify } from "node:util";
 var exec = promisify(execFile);
 async function git(cwd, args) {
@@ -33135,11 +33423,11 @@ async function git(cwd, args) {
 var OWNER_MARKER = ".clanker-owner";
 var sanitize = (s) => s.replace(/[^A-Za-z0-9._-]/g, "-");
 function deriveWorktreePath(branch, runId) {
-  return path8.join(WORKTREES_ROOT, `${sanitize(branch)}-${sanitize(runId).slice(-6)}`);
+  return path9.join(WORKTREES_ROOT, `${sanitize(branch)}-${sanitize(runId).slice(-6)}`);
 }
 function readWorktreeOwner(worktreePath) {
   try {
-    const first = fs8.readFileSync(path8.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
+    const first = fs9.readFileSync(path9.join(worktreePath, OWNER_MARKER), "utf8").trim().split(/\s+/)[0];
     return first || null;
   } catch {
     return null;
@@ -33210,13 +33498,13 @@ async function headSha(cwd) {
 }
 async function createWorktree(branch, runId, targetRepo = BASE_REPO, base) {
   const wtPath = deriveWorktreePath(branch, runId);
-  if (fs8.existsSync(wtPath)) {
+  if (fs9.existsSync(wtPath)) {
     throw new Error(`worktree path already exists: ${wtPath} (choose a different branch name)`);
   }
   const baseRef = base ?? await resolveBaseRef(targetRepo);
-  fs8.mkdirSync(WORKTREES_ROOT, { recursive: true });
+  fs9.mkdirSync(WORKTREES_ROOT, { recursive: true });
   await git(targetRepo, ["worktree", "add", wtPath, "-b", branch, baseRef]);
-  fs8.writeFileSync(path8.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
+  fs9.writeFileSync(path9.join(wtPath, OWNER_MARKER), `${runId} ${(/* @__PURE__ */ new Date()).toISOString()}
 `);
   return wtPath;
 }
@@ -33258,16 +33546,16 @@ async function holdsUnmergedWork(worktreePath, targetRepo, baseSha) {
   }
 }
 function realpathBestEffort(p) {
-  let cur = path8.resolve(p);
+  let cur = path9.resolve(p);
   const tail = [];
   for (; ; ) {
     try {
-      const real = fs8.realpathSync(cur);
-      return tail.length ? path8.join(real, ...tail) : real;
+      const real = fs9.realpathSync(cur);
+      return tail.length ? path9.join(real, ...tail) : real;
     } catch {
-      const parent = path8.dirname(cur);
-      if (parent === cur) return path8.resolve(p);
-      tail.unshift(path8.basename(cur));
+      const parent = path9.dirname(cur);
+      if (parent === cur) return path9.resolve(p);
+      tail.unshift(path9.basename(cur));
       cur = parent;
     }
   }
@@ -33275,7 +33563,7 @@ function realpathBestEffort(p) {
 function assertWorktreeOutsideRepo(worktreePath, targetRepo) {
   const wt = realpathBestEffort(worktreePath);
   const repo = realpathBestEffort(targetRepo);
-  if (wt === repo || wt.startsWith(repo + path8.sep) || repo.startsWith(wt + path8.sep)) {
+  if (wt === repo || wt.startsWith(repo + path9.sep) || repo.startsWith(wt + path9.sep)) {
     throw new Error(
       `isolated worktree '${wt}' overlaps the target repo's primary checkout '${repo}'; refusing to run a write dispatch on a non-isolated path (set CLANKER_WORKTREES_ROOT outside the repo)`
     );
@@ -33298,7 +33586,7 @@ function matchDoNotTouch(patterns, files) {
   return violations;
 }
 async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runId) {
-  if (fs8.existsSync(worktreePath)) {
+  if (fs9.existsSync(worktreePath)) {
     const owner = readWorktreeOwner(worktreePath);
     if (!runId || owner !== runId) {
       console.error(
@@ -33315,16 +33603,16 @@ async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runI
   } catch {
     if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return false;
   }
-  const markerPath = path8.join(worktreePath, OWNER_MARKER);
+  const markerPath = path9.join(worktreePath, OWNER_MARKER);
   const marker = (() => {
     try {
-      return fs8.readFileSync(markerPath, "utf8");
+      return fs9.readFileSync(markerPath, "utf8");
     } catch {
       return null;
     }
   })();
   try {
-    fs8.rmSync(markerPath, { force: true });
+    fs9.rmSync(markerPath, { force: true });
   } catch {
   }
   try {
@@ -33334,9 +33622,9 @@ async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runI
       await git(targetRepo, ["worktree", "remove", "--force", worktreePath]);
     }
   } catch (err) {
-    if (marker !== null && fs8.existsSync(worktreePath)) {
+    if (marker !== null && fs9.existsSync(worktreePath)) {
       try {
-        fs8.writeFileSync(markerPath, marker);
+        fs9.writeFileSync(markerPath, marker);
       } catch {
       }
     }
@@ -33428,19 +33716,20 @@ function validateDispatchParams(params, minted, host) {
   return { params, profile, readOnly, requiresIsolation };
 }
 function writeTelemetryStub(runDir, stub) {
-  const target = path9.join(runDir, "telemetry.json");
+  const target = path10.join(runDir, "telemetry.json");
   const tmp = `${target}.${process.pid}.tmp`;
   try {
-    fs9.writeFileSync(tmp, JSON.stringify(stub, null, 2));
-    fs9.renameSync(tmp, target);
+    fs10.writeFileSync(tmp, JSON.stringify(stub, null, 2));
+    fs10.renameSync(tmp, target);
   } catch (error40) {
     try {
-      fs9.rmSync(tmp, { force: true });
+      fs10.rmSync(tmp, { force: true });
     } catch {
     }
     console.error(`[clanker] telemetry stub write failed for run dir '${runDir}': ${errMessage(error40)}`);
   }
 }
+var FOREIGN_POLL_MS = 250;
 var DEFAULT_SESSION_TTL_MS = envInt2("CLANKER_SESSION_TTL_MS", 6e5);
 var LaneManager = class {
   host;
@@ -33554,8 +33843,8 @@ ${params.prompt}`;
       );
     }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
-    const runDir = path9.join(this.runsRoot, id);
-    fs9.mkdirSync(runDir, { recursive: true });
+    const runDir = path10.join(this.runsRoot, id);
+    fs10.mkdirSync(runDir, { recursive: true });
     const stub = {
       host: this.host,
       lane: params.lane,
@@ -33578,7 +33867,7 @@ ${params.prompt}`;
       geminiRole: params.lane === "gemini" ? minted.profileId : void 0
     };
     let cwd = params.cwd ?? this.baseRepo;
-    let targetRepo = path9.resolve(this.baseRepo);
+    let targetRepo = path10.resolve(this.baseRepo);
     let baseSha;
     let worktreePath;
     let worktreeBaseSha;
@@ -33948,7 +34237,7 @@ ${grokDetail}` : "";
    */
   async wait(id, timeoutMs, quiet = true) {
     const run = this.runs.get(id);
-    if (!run) this.throwUnknownRun(id);
+    if (!run) return await this.waitForeign(id, timeoutMs);
     if (this.activeWaits.has(id)) {
       throw new Error(`clanker_wait already in progress for '${id}' (one waiter per run)`);
     }
@@ -33965,6 +34254,60 @@ ${grokDetail}` : "";
     } finally {
       this.activeWaits.delete(id);
     }
+  }
+  /**
+   * `clanker_wait` for an orphan whose server is gone — the degraded half of
+   * the adoption protocol (#32 segment 3).
+   *
+   * A wait normally consumes an event stream this process owns. For a foreign
+   * run there is no stream and there never will be one, so this polls the two
+   * durable facts the dead owner left behind — `telemetry.terminal_at` and
+   * `result.md` — for the caller's own timeout budget, and says so in the
+   * payload: `degraded: "disk-poll"`, and an EMPTY digest with an explicit note
+   * that there is no digest to be had. Synthesizing plausible-looking progress
+   * out of file mtimes would be the same lie in a new costume; the caller must
+   * be able to tell "nothing happened" from "I cannot see what happened".
+   *
+   * No `activeWaits` gate here, deliberately: that gate exists because
+   * concurrent waiters race a shared digest CURSOR (CP6), and a read-only poll
+   * of two files has no cursor to race.
+   */
+  async waitForeign(id, timeoutMs) {
+    let foreign = readForeignRun(id, this.runsRoot);
+    if (!foreign) this.throwUnknownRun(id);
+    const owner = probeOwner(foreign.server_pid);
+    if (owner.state !== "dead") throw new Error(foreignControlRefusal(id, foreign, owner));
+    const deadline = Date.now() + clampWait(timeoutMs);
+    while (!foreign.terminal_at && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(FOREIGN_POLL_MS, Math.max(1, deadline - Date.now()))));
+      foreign = readForeignRun(id, this.runsRoot) ?? foreign;
+    }
+    return this.buildForeignWaitResult(foreign, owner.detail);
+  }
+  buildForeignWaitResult(foreign, ownerDetail) {
+    const result = {
+      id: foreign.id,
+      lane: foreign.lane ?? "unknown",
+      status: foreignRunStatus(foreign),
+      // Empty because there is nothing to report, not because the run was
+      // quiet — degraded_note carries that distinction to the reader.
+      digest: "",
+      plan_summary: "(foreign run \u2014 plan state died with the owning process)",
+      last_event_age_ms: foreign.last_activity_ms,
+      suspected_stall: foreign.last_activity_ms >= 0 && foreign.last_activity_ms > this.stallThresholdMs,
+      run_dir: foreign.run_dir,
+      degraded: "disk-poll",
+      degraded_note: `${ownerDetail}, so this wait polled ${foreign.run_dir} instead of an event stream. There is NO digest, no plan and no final_message for this run: those live in the process that spawned it and are not on disk. status/terminal state, the verdict file and observed_model below come straight from telemetry.json; nothing here is inferred.`,
+      observed_model: foreign.observed_model
+    };
+    if (foreign.result_path) {
+      result.result_path = foreign.result_path;
+      try {
+        result.result_bytes = fs10.statSync(foreign.result_path).size;
+      } catch {
+      }
+    }
+    return result;
   }
   buildWaitResult(run) {
     const status = run.turnStatus;
@@ -34097,7 +34440,7 @@ ${grokDetail}` : "";
   // ---- cancel / close -----------------------------------------------------
   async cancel(id) {
     const run = this.runs.get(id);
-    if (!run) this.throwUnknownRun(id);
+    if (!run) return await this.cancelForeign(id);
     if (run.turnStatus !== "running") {
       if (!run.sessionClosed) {
         await this.close(id);
@@ -34140,6 +34483,69 @@ ${grokDetail}` : "";
       run.cancelTurn();
     }
     return { id, status: run.turnStatus };
+  }
+  /**
+   * Cancel a run held by another server process — the orphan-adoption protocol
+   * (#32, design frozen on the issue; mechanics in adopt.ts).
+   *
+   * The pre-adoption behaviour was honest but powerless: a foreign id was
+   * refused, full stop. That is correct while the owning server exists, and
+   * exactly wrong once it does not — a dead session leaves a live worker
+   * holding a worktree with nobody able to stop it, which is the precise
+   * failure the durable pid record was written for.
+   *
+   * Four steps, in this order, none skippable:
+   *
+   *  1. OWNER LIVENESS. Only a provably dead owner (ESRCH) unlocks anything.
+   *     Alive — or unprovable, e.g. a record with no server_pid — keeps the
+   *     old refusal, now with the reason attached.
+   *  2. WORKER IDENTITY. A pid is a number, not a process. Signal it only
+   *     while its observed start time still matches the recorded one.
+   *  3. GROUP KILL with a RE-CHECK between TERM and KILL, because the grace
+   *     window is exactly when the pid becomes reusable.
+   *  4. ARCHIVE — unconditional, and the step whose absence would make the
+   *     other three counterproductive: a killed orphan whose telemetry still
+   *     reads `terminal_at: null` haunts the orphan board forever, so the
+   *     record is closed even when nothing was signalled at all.
+   */
+  async cancelForeign(id) {
+    const foreign = readForeignRun(id, this.runsRoot);
+    if (!foreign) this.throwUnknownRun(id);
+    const owner = probeOwner(foreign.server_pid);
+    if (owner.state !== "dead") throw new Error(foreignControlRefusal(id, foreign, owner));
+    const outcome = await killAdoptedWorker({
+      workerPid: foreign.worker_pid,
+      workerStartedAt: foreign.worker_started_at,
+      lane: foreign.lane,
+      graceMs: this.cancelGraceMs
+    });
+    const archive = archiveAdoptedRun({
+      runDir: foreign.run_dir,
+      id,
+      adopterPid: process.pid,
+      ownerPid: owner.pid,
+      workerPid: foreign.worker_pid,
+      outcome
+    });
+    const after = readForeignRun(id, this.runsRoot) ?? foreign;
+    const note = [
+      `${owner.detail}, so this process (pid ${process.pid}) adopted the run`,
+      outcome.note,
+      archive.result_stub_written ? "wrote a result.md stub" : "left the existing result.md in place",
+      ...archive.problems
+    ].join("; ");
+    return {
+      id,
+      status: foreignRunStatus(after),
+      adopted: true,
+      owner_pid: owner.pid,
+      worker_pid: foreign.worker_pid,
+      killed: outcome.killed,
+      identity_verified: outcome.identity_verified,
+      run_dir: foreign.run_dir,
+      ...after.result_path ? { result_path: after.result_path } : {},
+      note
+    };
   }
   async computeTouched(run) {
     let gitTouched = [];
@@ -34184,7 +34590,7 @@ ${grokDetail}` : "";
       ];
       return;
     }
-    if (!fs9.existsSync(run.worktreePath)) {
+    if (!fs10.existsSync(run.worktreePath)) {
       run.contractViolations = [
         { pattern: "(validation-failed)", files: [`worktree path '${run.worktreePath}' no longer exists`] }
       ];
@@ -34458,8 +34864,8 @@ function registerTools(server, manager) {
 }
 
 // src/retention.ts
-import fs10 from "node:fs";
-import path10 from "node:path";
+import fs11 from "node:fs";
+import path11 from "node:path";
 function sweepRunStreams(options = {}) {
   const runsRoot = options.runsRoot ?? RUNS_ROOT;
   const ttlMs = options.ttlMs ?? RUN_STREAM_TTL_MS;
@@ -34468,21 +34874,21 @@ function sweepRunStreams(options = {}) {
   if (!(ttlMs > 0)) return report;
   let entries;
   try {
-    entries = fs10.readdirSync(runsRoot, { withFileTypes: true });
+    entries = fs11.readdirSync(runsRoot, { withFileTypes: true });
   } catch {
     return report;
   }
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     report.scanned++;
-    const runDir = path10.join(runsRoot, entry.name);
+    const runDir = path11.join(runsRoot, entry.name);
     const streams = [];
     let newestMtimeMs = 0;
     for (const name of RUN_STREAM_FILES) {
-      const file2 = path10.join(runDir, name);
+      const file2 = path11.join(runDir, name);
       let stat;
       try {
-        stat = fs10.statSync(file2);
+        stat = fs11.statSync(file2);
       } catch {
         continue;
       }
@@ -34495,7 +34901,7 @@ function sweepRunStreams(options = {}) {
     let swept = 0;
     for (const stream of streams) {
       try {
-        fs10.rmSync(stream.file);
+        fs11.rmSync(stream.file);
         report.sweptFiles++;
         report.bytesFreed += stream.size;
         swept++;
@@ -34512,14 +34918,14 @@ function sweepRunStreams(options = {}) {
 }
 function isEmptyDir(dir) {
   try {
-    return fs10.readdirSync(dir).length === 0;
+    return fs11.readdirSync(dir).length === 0;
   } catch {
     return false;
   }
 }
 function removeDir(dir) {
   try {
-    fs10.rmdirSync(dir);
+    fs11.rmdirSync(dir);
     return true;
   } catch {
     return false;
