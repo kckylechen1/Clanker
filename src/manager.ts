@@ -245,7 +245,36 @@ function validateDispatchParams(
 interface TelemetryStub {
   host: ClankerHost;
   lane: LaneName;
-  profileId: string;
+  /**
+   * The DISPATCH PROFILE id (`oc-write`, `codex-review`) — the registry row
+   * that minted this run, and the same value `RunTelemetry.profile_id` and the
+   * #27 issue comment's byline carry. Absent means exactly what it means
+   * everywhere else: no registry profile minted this dispatch, so the run's
+   * identity is its lane (plus `oc_profile` below).
+   *
+   * It used to hold `params.profile` — the OpenCode AGENT profile, whose only
+   * values are `worker`/`kimi-crew` — so one field name carried two namespaces
+   * depending on which write you read, and a `codex-review` run's stub claimed
+   * to be a `worker`. The registry id is available here (the profile entrance
+   * resolves it before dispatchStartInternal is entered and hands it over as a
+   * minted capability), so the stub writes the real thing rather than deferring:
+   * a dispatch that dies in the startup window leaves this file and nothing
+   * else, and "which seat shape was this" is the first question asked of it.
+   */
+  profile_id?: string;
+  /**
+   * The OpenCode AGENT profile this dispatch would have run under — the
+   * permission/agent shape named in `profiles.ts` as `ocProfile` and handed to
+   * the backend as `LaneRequestOptions.profile`. A request parameter, not an
+   * identity, so it is stub-only (like `cwd`): once a LaneRun exists its
+   * durable home is the ledger row's `agent_type` (ledger.ts), and duplicating
+   * it into RunTelemetry would make two sources for one fact. It is written
+   * here because a dispatch rejected before the LaneRun exists never reaches
+   * that ledger row — and for a `profile: "kimi-crew"` dispatchStart, which
+   * mints no registry id, this is the only thing beyond the lane that says
+   * what was asked for.
+   */
+  oc_profile: string;
   cwd: string;
   /**
    * The server process that minted this dispatch (#32). Written here — in the
@@ -639,7 +668,14 @@ export class LaneManager {
     const stub: TelemetryStub = {
       host: this.host,
       lane: params.lane,
-      profileId: profile,
+      // Two fields because there are two facts (see TelemetryStub): the
+      // registry row that minted the dispatch, and the OpenCode agent profile
+      // it asked the backend for. Spread rather than `profile_id: minted.profileId`
+      // so "no registry profile" is an absent key on disk and never a written
+      // `undefined`/placeholder — absence is the same signal LaneRun.profileId
+      // and the issue comment already use.
+      ...(minted.profileId !== undefined ? { profile_id: minted.profileId } : {}),
+      oc_profile: profile,
       cwd: params.cwd ?? this.baseRepo,
       server_pid: process.pid,
       created_at: new Date().toISOString(),

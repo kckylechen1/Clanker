@@ -810,6 +810,12 @@ export class LaneRun {
       observed_model: this.observedModel, requested_effort: this.requestOpts.effort,
       observed_effort: this.observedEffort, lane: this.lane, transport: "acp-stdio",
       backend: this.lane, read_only: this.readOnly, sandbox: this.requestOpts.sandbox,
+      // Carried forward from the dispatch stub (manager.ts), which wrote the
+      // same key before this object existed: persistTelemetry overwrites that
+      // file whole, so anything not restated here disappears from disk at the
+      // first turn. Absent = no registry profile minted this run, never "we
+      // lost it".
+      ...(this.profileId !== undefined ? { profile_id: this.profileId } : {}),
       ...(this.baseSha !== undefined ? { base_sha: this.baseSha } : {}),
       ...(this.turnTimeoutMs !== undefined ? { turn_timeout_ms: this.turnTimeoutMs } : {}),
       // Process identity (#32): server_pid is unconditional — every persisted

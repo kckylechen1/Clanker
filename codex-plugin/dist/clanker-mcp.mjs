@@ -27761,7 +27761,7 @@ var RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 864e5;
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.4.2";
+var SERVER_VERSION = "0.4.3";
 var DEFAULT_CODEX_MODEL = "gpt-5.5";
 var DEFAULT_CODEX_EFFORT = "xhigh";
 var WRITE_DISCIPLINE_PREFIX = `Workspace discipline, enforced by the dispatching contract \u2014 these override any
@@ -29349,6 +29349,12 @@ var LaneRun = class {
       backend: this.lane,
       read_only: this.readOnly,
       sandbox: this.requestOpts.sandbox,
+      // Carried forward from the dispatch stub (manager.ts), which wrote the
+      // same key before this object existed: persistTelemetry overwrites that
+      // file whole, so anything not restated here disappears from disk at the
+      // first turn. Absent = no registry profile minted this run, never "we
+      // lost it".
+      ...this.profileId !== void 0 ? { profile_id: this.profileId } : {},
       ...this.baseSha !== void 0 ? { base_sha: this.baseSha } : {},
       ...this.turnTimeoutMs !== void 0 ? { turn_timeout_ms: this.turnTimeoutMs } : {},
       // Process identity (#32): server_pid is unconditional — every persisted
@@ -34951,7 +34957,14 @@ ${params.prompt}`;
     const stub = {
       host: this.host,
       lane: params.lane,
-      profileId: profile,
+      // Two fields because there are two facts (see TelemetryStub): the
+      // registry row that minted the dispatch, and the OpenCode agent profile
+      // it asked the backend for. Spread rather than `profile_id: minted.profileId`
+      // so "no registry profile" is an absent key on disk and never a written
+      // `undefined`/placeholder — absence is the same signal LaneRun.profileId
+      // and the issue comment already use.
+      ...minted.profileId !== void 0 ? { profile_id: minted.profileId } : {},
+      oc_profile: profile,
       cwd: params.cwd ?? this.baseRepo,
       server_pid: process.pid,
       created_at: (/* @__PURE__ */ new Date()).toISOString(),
