@@ -682,6 +682,60 @@ test("#27: the first terminal wait says the comment is IN FLIGHT, never that it 
   }
 });
 
+test("#27: a correction turn does not inherit the previous turn's comment failure", async () => {
+  // Second cold review, read off the source: `beginTurn()` cleared `error` and
+  // `failureClass` but not `issueCommentError`, so a run whose turn-1 comment
+  // failed carried that error into turn 2 — where the terminal flip raises
+  // `issue_comment_pending`. The payload then said "the comment failed" (last
+  // turn's fact) AND "the comment is unknown" (this turn's), which is both a
+  // contract violation and two wrong answers.
+  const failFirst = { code: 4, stdout: "", stderr: "HTTP 403: Resource not accessible by integration" };
+  let attempt = 0;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const rec = recorder(async () => {
+    attempt += 1;
+    if (attempt === 1) return failFirst;
+    await gate; // hold turn 2's comment in flight so `pending` is observable
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-issue-stale-"));
+  const run = new LaneRun({
+    id: "codex-stale-error",
+    lane: "codex",
+    cwd: os.tmpdir(),
+    runDir,
+    readOnly: false,
+    supervised: true,
+    issueRef: parseIssueRef("27"),
+    ghRunner: rec.runner,
+  });
+  try {
+    run.beginTurn("first pass");
+    await run.completeTurn();
+    assert.match(run.telemetry().issue_comment_error!, /`gh` exited 4/, "turn 1's failure is recorded");
+
+    run.reopenForResume();
+    run.beginTurn("you drifted: only touch src/", true);
+    assert.equal(run.telemetry().issue_comment_error, undefined, "a new turn does not owe the old turn's failure");
+
+    const terminal = run.completeTurn();
+    const midFlight = run.telemetry();
+    assert.equal(midFlight.issue_comment_pending, true, "turn 2's comment is in flight");
+    assert.equal(midFlight.issue_comment_error, undefined, "…and NOT accompanied by turn 1's stale error");
+    release();
+    await terminal;
+
+    const settled = run.telemetry();
+    assert.equal(settled.issue_comment_pending, undefined);
+    assert.equal(settled.issue_comment_error, undefined, "turn 2's comment landed, so nothing is owed");
+    assert.equal(rec.calls.length, 2);
+  } finally {
+    release();
+    run.closeStreams();
+  }
+});
+
 test("#27: a landed comment leaves NEITHER field set — silence means kept, only after the fact", async () => {
   const rec = recorder();
   const m = makeManager(rec.runner);
@@ -1077,6 +1131,57 @@ test("mutation: without the in-flight mark, the first terminal wait reads as a k
   } finally {
     release();
     await m.shutdown();
+  }
+});
+
+test("mutation: a turn that keeps the previous turn's comment error reports two wrong things at once", async () => {
+  const mutant = await loadMutantModule<typeof import("../src/run.js")>(
+    "run-stale-comment-error",
+    [{
+      file: "run.ts",
+      find: "    this.issueCommentError = undefined;\n    this.issueCommentPending = false;\n    this.turnsCount += 1;",
+      replace: "    this.turnsCount += 1;",
+    }],
+    "run.ts",
+  );
+  let attempt = 0;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const rec = recorder(async () => {
+    attempt += 1;
+    if (attempt === 1) return { code: 4, stdout: "", stderr: "HTTP 403" };
+    await gate;
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-issue-stale-mutant-"));
+  const run = new mutant.LaneRun({
+    id: "codex-stale-mutant",
+    lane: "codex",
+    cwd: os.tmpdir(),
+    runDir,
+    readOnly: false,
+    supervised: true,
+    issueRef: parseIssueRef("27"),
+    ghRunner: rec.runner,
+  });
+  try {
+    run.beginTurn("first pass");
+    await run.completeTurn();
+    run.reopenForResume();
+    run.beginTurn("correction", true);
+    const terminal = run.completeTurn();
+    const midFlight = run.telemetry();
+    assert.equal(midFlight.issue_comment_pending, true);
+    assert.match(
+      midFlight.issue_comment_error!,
+      /`gh` exited 4/,
+      "the mutant carries turn 1's failure alongside turn 2's pending — the two fields the contract says are exclusive",
+    );
+    release();
+    await terminal;
+  } finally {
+    release();
+    run.closeStreams();
   }
 });
 

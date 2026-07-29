@@ -340,6 +340,16 @@ export class LaneRun {
     this.forcedKill = false;
     this.error = undefined;
     this.failureClass = undefined;
+    // Per-TURN bookkeeping, cleared with the rest of the previous turn's
+    // outcome. Missing this one left a run that had failed to comment on turn 1
+    // carrying that error into turn 2, where the terminal flip raises
+    // `issue_comment_pending` — so telemetry showed the OLD turn's failure and
+    // the NEW turn's unknown at once, breaking the "at most one of these two
+    // fields" contract stated in types.ts and telling the dispatcher two wrong
+    // things at the same time. Cleared here, at the one place a new turn
+    // declares that the last turn's outcome no longer describes this run.
+    this.issueCommentError = undefined;
+    this.issueCommentPending = false;
     this.turnsCount += 1;
     if (correction) this.corrections += 1;
     this.turnStatus = "running";
