@@ -338,13 +338,65 @@ test("#27: an auth header is redacted by its STRUCTURE, whatever the scheme is c
   // the worker's own text replaced by the first parked header — no plaintext
   // leaked, but the verdict was rewritten, and shipping the verdict unaltered
   // is the one promise this whole feature exists to keep.
-  for (const literal of ["[[clanker-auth-0]]", "[[clanker-auth:0]]", "[[clanker-auth:0]] and [[clanker-auth-1:0]]"]) {
+  for (const literal of ["[[clanker-hdr:0]]", "[[clanker-hdr-1:0]]", "[[clanker-hdr:0]] and [[clanker-hdr-1:0]]"]) {
     const line = `the worker wrote ${literal} and also Authorization: Basic ${basic}`;
     const out = redactForPublic(line);
     assert.ok(out.startsWith(`the worker wrote ${literal} and also `), `worker text was rewritten:\n${out}`);
     assert.ok(!out.includes(basic), `and the real header must still be redacted:\n${out}`);
   }
-  assert.equal(redactForPublic("see [[clanker-auth-0]] below"), "see [[clanker-auth-0]] below");
+  assert.equal(redactForPublic("see [[clanker-hdr:0]] below"), "see [[clanker-hdr:0]] below");
+  // A parked header must survive the rules that run while it is parked: the
+  // key-name rule's value would otherwise eat the placeholder standing later on
+  // the same line, deleting a header this function had already redacted.
+  const eaten = redactForPublic(`x-auth: hunter2 then Authorization: Basic ${basic}`);
+  assert.ok(eaten.includes("Authorization: Basic [REDACTED]"), `the parked header was consumed:\n${eaten}`);
+  assert.ok(!eaten.includes("hunter2"), eaten);
+});
+
+test("#27: the public sink's key-name table is longer than the local one, and still bounded", async () => {
+  const { redactForPublic, redact } = await import("../src/util.js");
+  // `X-Auth: hunter2` — a custom header name with no key-ish word and a short,
+  // word-shaped value — used to survive: `redact()`'s table does not contain
+  // `auth`, and every blob rule gates on randomness the value does not have.
+  // The first version of this fix called that unfixable on the grounds that the
+  // only alternative was matching header names as an open set. That was a false
+  // dilemma: NAMES can stay a bounded table, only VALUES are open.
+  for (const [line, secret] of [
+    ["X-Auth: hunter2", "hunter2"],
+    ["x-auth = hunter2", "hunter2"],
+    ["Set-Cookie: sid=hunter2; HttpOnly", "hunter2"],
+    ["session=abc123", "abc123"],
+    ["password: hunter2", "hunter2"],
+    ["PRIVATE_KEY=hunter2", "hunter2"],
+    ["signature: c2ln", "c2ln"],
+    ['{"credentials": "hunter2"}', "hunter2"],
+    ["passphrase = open sesame", "open sesame"],
+  ] as const) {
+    const out = redactForPublic(line);
+    assert.ok(!out.includes(secret), `key-name rule missed: ${line}\n → ${out}`);
+    assert.ok(out.includes("[REDACTED]"), out);
+    // The key name survives, as everywhere else here: a redaction has to stay
+    // legible evidence rather than an unexplained hole.
+    assert.match(out, /^[^[]/, `the key name must not be swallowed: ${out}`);
+  }
+  assert.ok(redact("X-Auth: hunter2").includes("hunter2"), "the LOCAL redactor is deliberately not widened");
+
+  // The bound, which is what keeps this from being the prose-eating rule its
+  // predecessor was accused of being: the keyword has to be in KEY POSITION and
+  // followed by `:` or `=`. Prose about sessions and signatures is not a key.
+  for (const prose of [
+    "the session is stale: nobody resumed it",
+    "authentication failed because the header was missing",
+    "src/session.ts:88 — the session ref is lane-neutral",
+    "the cookie jar lives under ~/.config",
+    "a signature check runs before the write",
+    // Go assignment, quoted as evidence in a verdict — `:=` is not a key
+    // separator, and this exact line was a corpus false positive until it was
+    // excluded.
+    "sig := portfolio.AgentSignal{Kind: kind}",
+  ]) {
+    assert.equal(redactForPublic(prose), prose, `prose must survive: ${prose}`);
+  }
 });
 
 test("#27: unlabelled credential shapes are caught, and a verdict's own evidence is not", async () => {
@@ -1071,20 +1123,39 @@ test("mutation: a scheme-name list instead of the header's structure lets `Basic
   assert.ok(out.includes(basic), `the mutant republishes the credential: ${out}`);
 });
 
+test("mutation: without the public key-name table, a custom auth header publishes its value", async () => {
+  const mutant = await loadMutantModule<typeof import("../src/util.js")>(
+    "util-no-public-key-names",
+    [{
+      file: "util.ts",
+      // Table emptied to the one word the LOCAL redactor already knows, which
+      // is exactly the coverage this rule was added to exceed.
+      find: 'const PUBLIC_KEY_NAMES =\n  "auth|credentials?|creds?|session|cookie|signature|sig|passwords?|passwd|pwd|passphrase|private[_-]?key";',
+      replace: 'const PUBLIC_KEY_NAMES = "authorization";',
+    }],
+    "util.ts",
+  );
+  assert.ok(mutant.redactForPublic("X-Auth: hunter2").includes("hunter2"), "the mutant publishes it");
+  assert.ok(mutant.redactForPublic("password: hunter2").includes("hunter2"));
+  // …and the header rule it shares a file with is untouched, so the assertion
+  // above is about the table and nothing else.
+  assert.ok(!mutant.redactForPublic("Authorization: Basic aGk6dGhlcmU=").includes("aGk6dGhlcmU="));
+});
+
 test("mutation: a constant park token lets worker text be overwritten by a header it never wrote", async () => {
   const mutant = await loadMutantModule<typeof import("../src/util.js")>(
     "util-constant-park-tag",
     [{
       file: "util.ts",
-      find: '  let tag = "clanker-auth";\n  for (let n = 1; text.includes(`[[${tag}:`); n += 1) tag = `clanker-auth-${n}`;',
-      replace: '  const tag = "clanker-auth";\n  void text;',
+      find: '  let tag = "clanker-hdr";\n  for (let n = 1; text.includes(`[[${tag}:`); n += 1) tag = `clanker-hdr-${n}`;',
+      replace: '  const tag = "clanker-hdr";\n  void text;',
     }],
     "util.ts",
   );
   const basic = Buffer.from("user:hunter2").toString("base64");
-  const out = mutant.redactForPublic(`literal [[clanker-auth:0]] plus Authorization: Basic ${basic}`);
+  const out = mutant.redactForPublic(`literal [[clanker-hdr:0]] plus Authorization: Basic ${basic}`);
   assert.ok(
-    !out.startsWith("literal [[clanker-auth:0]] plus"),
+    !out.startsWith("literal [[clanker-hdr:0]] plus"),
     `the mutant rewrites the worker's own text into a header it never wrote: ${out}`,
   );
 });

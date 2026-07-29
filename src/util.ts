@@ -116,7 +116,60 @@ export function redact(text: string): string {
  * short is also not directly usable as a credential, so the trade buys back
  * nothing worth the evidence it would destroy.
  */
+/**
+ * The public sink's own KEY-NAME rule: `redact()`'s bounded keyword table, made
+ * longer for the one sink where a miss cannot be taken back.
+ *
+ * `redact()` matches `api[_-]?key|token|secret|authorization|bearer`, which is
+ * why `X-Api-Key: …` and `X-Auth-Token: …` are already covered and
+ * `X-Auth: hunter2` is not. The first version of this file called that gap
+ * unfixable, on the grounds that the alternative was matching header names as
+ * an OPEN set (`\S+:\s*\S+`, i.e. every line of prose with a colon). That was a
+ * false dilemma and the leader called it: names do not have to be an open set,
+ * the table just has to be longer. Only the VALUE is open.
+ *
+ * Two constraints keep this from becoming the prose-eating rule it could be:
+ *
+ *  1. The keyword must sit in the KEY POSITION — start of line, or right after
+ *     a separator that a key can follow (`,` `{` `(` `-H`, whitespace) — and be
+ *     followed by `:` or `=`. `the session is stale: nobody resumed it` is
+ *     prose about a session, not `session: <value>`, and only the second shape
+ *     matches.
+ *  2. The key name is kept and only the value blanked, as everywhere else here,
+ *     so the redaction stays legible evidence.
+ *
+ * MEASURED before landing, on the same 293-verdict corpus the blob rules were
+ * tuned against, with the agreed bar being "drop this rule if it roughly
+ * doubles the corpus false positives". It does not: ONE span in 293 verdicts,
+ * `signature="…"` in a verdict quoting an HTTP signature header — which is
+ * arguably the rule working rather than misfiring. The number was 3 before the
+ * `:=` exclusion above: the other two were `sig := portfolio.AgentSignal{`,
+ * Go assignment quoted as evidence, and excluding Go's `:=` cost nothing in
+ * coverage. So the total for this whole function stays 10 blob spans + 1 here.
+ */
+const PUBLIC_KEY_NAMES =
+  "auth|credentials?|creds?|session|cookie|signature|sig|passwords?|passwd|pwd|passphrase|private[_-]?key";
 const PUBLIC_SECRET_RULES: readonly { readonly re: RegExp; readonly replace: string }[] = [
+  {
+    re: new RegExp(
+      // key position: line start, or after a character a key can follow —
+      // including the quote of a JSON key (`{"credentials": …`).
+      String.raw`(^|[\s,{(\["'])` +
+        // an optional vendor-ish prefix (`X-`, `HTTP_`) so `X-Auth` counts as `auth`
+        String.raw`((?:[A-Za-z][\w.-]*[_.-])?(?:${PUBLIC_KEY_NAMES}))` +
+        // The separator that makes it a key at all. `:=` is excluded because it
+        // is Go's assignment, not a key separator: the corpus quotes Go, and
+        // `sig := portfolio.AgentSignal{` is a line of evidence, not a secret.
+        String.raw`(["']?\s*(?::(?!=)|=)\s*["']?)` +
+        // …and the value: to end of line, or to the quote that closes it, but
+        // never THROUGH a `[[` — that is where a parked auth header is standing
+        // (see freshParkTag), and a value that ate one would delete the header
+        // this function had already redacted and set aside.
+        String.raw`((?:(?!\[\[)[^\r\n'"\`])+)`,
+      "gi",
+    ),
+    replace: "$1$2$3[REDACTED]",
+  },
   // Known credential prefixes, matched on shape alone: GitHub (`ghp_`/`gho_`/
   // `ghu_`/`ghs_`/`ghr_`), OpenAI-style (`sk-`, which also covers `sk-ant-`,
   // `sk-live-`, `sk-proj-`), Slack, GitLab, npm, AWS access-key ids, Google.
@@ -230,29 +283,16 @@ function looksRandom(span: string, requireDigitOrNoWord: boolean): boolean {
  * have been `Digest`, then `Negotiate`, then `ApiKey`. A rule that has to be
  * extended once per scheme is a rule that is wrong by construction.
  *
- * WHERE THE STRUCTURE STOPS, since the same argument cuts against this rule and
- * the next reader deserves the true boundary rather than the flattering one:
- * SCHEME names are open, and this rule handles them all; HEADER names are open
- * too, and this rule handles exactly one family — `Authorization` and
- * `Proxy-Authorization`. A custom header is covered only incidentally, by two
- * other rules: `X-Api-Key: …` and `X-Auth-Token: …` are caught because
- * `redact()`'s key-name rule sees `api key` / `token` in the NAME, and a value
- * that is long AND random-looking is caught by the blob rules below whatever
- * the name is. Measured, both of these go: `X-Auth: Kd82nQp5vLx7Rt3wZm09` — a synthetic value, gitleaks:allow —
- * and a 32-hex session id.
- * Note the AND: length alone is not enough, because those rules
- * gate on randomness too — `X-Auth: correcthorsebatterystaple` (25 chars, word
- * shaped) and `X-Auth: hunter2hunter2hunter2hunter2` (28 chars, 7 distinct
- * characters) both survive. "20+ characters is covered" would be the
- * comfortable sentence rather than the true one.
- *
- * So the gap that is really left: a CUSTOM header name carrying no key-ish
- * word, holding a value that is short or word-shaped — `X-Auth: hunter2`.
- * Accepted rather than fixed, on the measurement already in this file: closing
- * it means treating header names as an open set, i.e. matching `\S+:\s*\S+`,
- * which is every line of prose with a colon in it — the same move that took
- * corpus false positives from 10 spans to 227. Do not "fix" it by growing a
- * name table, and do not let this comment drift into claiming full coverage.
+ * WHERE THIS RULE STOPS: scheme names are open and it handles them all, but
+ * HEADER names are open too and it handles exactly one family — `Authorization`
+ * and `Proxy-Authorization`. Custom header names are covered by the key-name
+ * rule at the top of PUBLIC_SECRET_RULES instead, which exists because the
+ * earlier version of this comment argued the gap was unfixable and was WRONG:
+ * it claimed the only alternative was matching header names as an open set
+ * (`\S+:\s*\S+`, every line of prose with a colon). Names do not have to be
+ * open — only values do — and a longer bounded table closed `X-Auth: hunter2`
+ * for the price of one corpus false positive. The measurement that made that
+ * call is written where the rule is.
  */
 const AUTH_HEADER =
   /(["'`]?)\b((?:proxy-)?authorization)(["']?[ \t]*[:=][ \t]*["']?)([A-Za-z][A-Za-z0-9._-]*)([ \t]+)([^\r\n]+)/gi;
@@ -310,8 +350,13 @@ function authCredentialEnd(rest: string, wrapper: string): number {
  * adversary is arbitrary worker output.
  */
 function freshParkTag(text: string): string {
-  let tag = "clanker-auth";
-  for (let n = 1; text.includes(`[[${tag}:`); n += 1) tag = `clanker-auth-${n}`;
+  // The tag must not itself look like anything the later rules redact — an
+  // earlier spelling was `clanker-auth`, and the key-name rule added afterwards
+  // promptly ate `[[clanker-auth:0]]` as `auth: <value>`, destroying the parked
+  // header instead of restoring it. `hdr` carries no keyword from any table
+  // here; keep it that way.
+  let tag = "clanker-hdr";
+  for (let n = 1; text.includes(`[[${tag}:`); n += 1) tag = `clanker-hdr-${n}`;
   return tag;
 }
 export function redactForPublic(text: string): string {
