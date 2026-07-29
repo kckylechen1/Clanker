@@ -262,3 +262,120 @@ export function classifyBackendFailure(
   if (ENV_DRIFT_PATTERNS.some((re) => re.test(message))) return ENV_DRIFT_TAG;
   return undefined;
 }
+
+/** Machine-checkable tag for a turn that came back as a vendor policy refusal instead of a verdict. */
+export const VENDOR_REFUSAL_TAG = "CLANKER-VENDOR-REFUSAL";
+
+/** Human-readable guidance carried as the run's `error` when the tag fires. */
+export const VENDOR_REFUSAL_ADVISORY =
+  "该 lane 的 vendor 用安全/政策拒绝页替代了本轮产出：这一单没有产生判决，read result.md 看拒绝页原文。" +
+  "重派同一 prompt 到同一 vendor 无用；改派异厂或改写 prompt。";
+
+/**
+ * ORDER — and this one is not a position in the five-way chain above, it is a
+ * DIFFERENT CHANNEL, which is the whole reason it is a separate function.
+ *
+ * classifyBackendFailure's BOUNDARY note (above) states the rule the five
+ * existing classes live by: they are only ever run against the error/stderr
+ * text a FAILED turn carries, because a string like "HTTP 403" inside content
+ * the agent produced is content, not a backend rejection. A vendor refusal
+ * arrives on the exact opposite channel — a turn that SUCCEEDED
+ * (`stop_reason: end_turn`, `terminal_reason: done`) whose agent_message is
+ * the vendor's policy page. Folding it into classifyBackendFailure would break
+ * that boundary in both directions at once: this predicate would start seeing
+ * arbitrary stderr, and billing/auth/model/env patterns would start seeing
+ * arbitrary model prose. So it is checked FIRST on the success path and never
+ * on the failure path, and the two sets never meet.
+ *
+ * 2026-07-29 (#48), run codex-45fd0: `clanker:codex` came back
+ * `status: done`, 15s, zero tool calls, `final_message` entirely OpenAI's
+ * "flagged for possible cybersecurity risk … Trusted Access for Cyber" page.
+ * At the API layer that is indistinguishable from a clean read-only review
+ * (which also finishes `done` with an empty touched_files). It was caught by a
+ * human noticing the run was too fast; one less suspicious duration and a
+ * review that never happened would have been booked as a review that found
+ * nothing.
+ *
+ * WHY LEXICAL, AND WHY NOT STRUCTURAL — measured over all 588 runs in
+ * ~/.cache/clanker/runs (297 with result.md, 264 carrying a final_message,
+ * 163 real vendor verdicts):
+ *
+ *  - `touched_files` is not on result.md at all (0 of 264), so it cannot gate
+ *    anything here — the #49 trap of reading a tree-level signal as a seat's
+ *    own output.
+ *  - `tool_calls: 0` does NOT mean "did no work". The gemini lane's ACP bridge
+ *    emits one `update` event per turn and reports 0 tool calls for every run,
+ *    including gemini-ccfb4 — a 10,757-character review quoting real
+ *    `src/cursor-acp.ts:167` line numbers. 170 of 178 zero-tool-call `done`
+ *    runs are ordinary. Gating on it would add false negatives and remove no
+ *    false positives.
+ *  - Duration does not separate either: the gemini refusal took 24,518ms and a
+ *    legitimate `DONE` smoke reply took 24,520ms.
+ *
+ * The text is the only thing that separates the two groups, so the rule is
+ * lexical — narrow and vendor-quoted, in the same spirit as
+ * BACKEND_MODEL_PATTERNS.
+ */
+const VENDOR_REFUSAL_PATTERNS: readonly RegExp[] = [
+  // OpenAI's cyber-policy interstitial, verbatim from run codex-45fd0.
+  /\bflagged for possible cybersecurity risk\b/i,
+  /\bTrusted Access for Cyber\b/i,
+  // Gemini's shape, from run gemini-b3dc1: a first-person refusal to do the
+  // job. Generalized only along the axis the two vendors already differ on —
+  // which verb follows — because the sentence frame ("I <cannot> <do the
+  // work>") is what a refusal IS, while `flagged for possible cybersecurity
+  // risk` is one vendor's wording for it.
+  /\bI (?:cannot|can(?:no|')?t|am unable to|'m unable to|will not|won'?t) (?:fulfill|comply with|assist|help|complete|carry out|proceed with|perform|conduct|provide|do)\b/i,
+  /\bI (?:must|have to|will) (?:decline|refuse)\b/i,
+];
+
+/**
+ * How far into the message a refusal phrase may appear. A policy page leads
+ * with its refusal: the two measured samples match at index 18 (OpenAI) and 7
+ * (Gemini), so 200 is generous by an order of magnitude.
+ */
+const VENDOR_REFUSAL_HEAD_CHARS = 200;
+
+/**
+ * Ceiling on the whole message. Both bounds are load-bearing TOGETHER, and the
+ * reason is this classifier's own oldest hazard: the difference between a
+ * signal and content that quotes the signal. A cold review of THIS repo that
+ * cites issue #48 will contain the literal string
+ * `flagged for possible cybersecurity risk` in its verdict, and an unbounded
+ * match would classify that review — a real one, with real findings — as a
+ * refusal and throw its verdict away. The head window alone does not save it
+ * (a review may open by quoting); the ceiling alone does not either (it says
+ * nothing about where the phrase sits).
+ *
+ * 600 is measured, not guessed. In the corpus, `done` final messages fall in
+ * two disjoint clusters: terse machine answers (4–147 chars: `PONG`, `0.4.3`,
+ * an `ABSENT` report) and substantive verdicts (968 chars and up, the smallest
+ * being opencode-f0583's audit table). The two refusal pages are 213 and 263
+ * chars. 600 sits in the empty band between 263 and 968 — above any refusal
+ * observed, below any verdict that could quote one.
+ *
+ * KNOWN FALSE NEGATIVE, stated rather than papered over: a vendor policy page
+ * longer than 600 characters is missed. With n=2 pages of language to go on,
+ * a rule that stays narrow and lets a human catch the next shape is the honest
+ * trade — widening it on speculation is how #27 spent six rounds.
+ */
+const VENDOR_REFUSAL_MAX_CHARS = 600;
+
+/**
+ * Classify a SUCCESSFUL turn's final message as a vendor policy refusal.
+ *
+ * BOUNDARY, the mirror of classifyBackendFailure's: only ever run this against
+ * the agent's own final message on a turn that completed (run.ts
+ * `completeTurn`). It must never see stderr or error text — the guarantee is
+ * structural, from the single call site, not from anything this function can
+ * check.
+ *
+ * Returns undefined for every ordinary verdict, including a short one.
+ */
+export function classifyVendorRefusal(finalMessage: string): typeof VENDOR_REFUSAL_TAG | undefined {
+  const text = finalMessage.trim();
+  if (text.length === 0 || text.length > VENDOR_REFUSAL_MAX_CHARS) return undefined;
+  const head = text.slice(0, VENDOR_REFUSAL_HEAD_CHARS);
+  if (VENDOR_REFUSAL_PATTERNS.some((re) => re.test(head))) return VENDOR_REFUSAL_TAG;
+  return undefined;
+}

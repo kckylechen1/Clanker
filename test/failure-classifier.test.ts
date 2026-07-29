@@ -8,8 +8,10 @@ import {
   ENV_DRIFT_TAG,
   classifyBackendFailure,
   classifyTurnFailure,
+  classifyVendorRefusal,
   INFRA_FAILURE_TAG,
   isCapacityTransient,
+  VENDOR_REFUSAL_TAG,
 } from "../src/failure-classifier.js";
 import { dropMutant, loadMutantModule } from "./helpers.js";
 
@@ -266,6 +268,146 @@ test("mutant: with model checked AFTER auth, the vendor's own 403 misroutes to c
       mutated.classifyBackendFailure("Cannot use this model: composer-2.5"),
       BACKEND_MODEL_TAG,
     );
+  } finally {
+    dropMutant(name);
+  }
+});
+
+// ---- CLANKER-VENDOR-REFUSAL classification (#48) --------------------------
+//
+// Every fixture below is a VERBATIM final_message from ~/.cache/clanker/runs,
+// named by run id, not a guess at what a refusal reads like. The two refusals
+// are the only two in 588 runs; the controls are the real short verdicts that
+// live closest to them on every structural axis, because those are the ones a
+// careless rule turns into the other half of the same mistake.
+
+/** run codex-45fd0, gpt-5.5, 2026-07-29 — a dispatched cold review, verbatim. */
+const OPENAI_REFUSAL_PAGE =
+  "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your " +
+  "request. To get authorized for security work, join the Trusted Access for Cyber program: " +
+  "https://chatgpt.com/cyber";
+
+/** run gemini-b3dc1, gemini-3.6-flash-high, 2026-07-29 — same dispatch class, verbatim. */
+const GEMINI_REFUSAL_PAGE =
+  "Sorry, I cannot fulfill your request to conduct an adversarial security review or analyze attack " +
+  "vectors for specific target code files. You can search online for secure code review guidelines, " +
+  "input validation standards, and permission management best practices.";
+
+test("#48: tags each vendor's real refusal page as CLANKER-VENDOR-REFUSAL", () => {
+  assert.equal(classifyVendorRefusal(OPENAI_REFUSAL_PAGE), VENDOR_REFUSAL_TAG);
+  assert.equal(classifyVendorRefusal(GEMINI_REFUSAL_PAGE), VENDOR_REFUSAL_TAG);
+  // Leading/trailing whitespace is the shape run.ts hands in before its own
+  // trim ever runs on a correction path; it must not change the answer.
+  assert.equal(classifyVendorRefusal(`\n\n${OPENAI_REFUSAL_PAGE}\n`), VENDOR_REFUSAL_TAG);
+});
+
+test("#48: real short verdicts are NOT refusals — the false positive that would trade one error for another", () => {
+  // These are the runs that sit closest to the two refusals structurally: all
+  // `status: done`, all zero tool calls, durations from 5s to 28s — codex-45fd0
+  // itself was only 15s. If duration or tool count were the criterion, every
+  // one of these would be destroyed.
+  assert.equal(classifyVendorRefusal("PONG"), undefined, "codex-1748e, 7.6s, 0 tool calls");
+  assert.equal(classifyVendorRefusal("DONE"), undefined, "gemini-1d548, 17.3s, 0 tool calls");
+  assert.equal(classifyVendorRefusal("0.4.3"), undefined, "codex-a581b, 12.2s — a real one-constant answer");
+  assert.equal(
+    classifyVendorRefusal(
+      "dogfood-announce-partial-loss\n\n74a806943 refactor(runtime): bundle run_tool_call_loop args into a " +
+        "ToolLoop struct (#7969)\n\nABSENT\n\n目标符号不在本 checkout",
+    ),
+    undefined,
+    "codex-1f36d, 11.3s, 147 chars — a real short report, well inside the length ceiling",
+  );
+  assert.equal(classifyVendorRefusal(""), undefined);
+  assert.equal(classifyVendorRefusal("   \n  "), undefined);
+});
+
+test("#48: a real verdict that QUOTES a refusal page is a verdict, not a refusal", () => {
+  // The hazard classifyBackendFailure's BOUNDARY note has warned about since
+  // #9, arriving on the new channel: any cold review of THIS repo that cites
+  // issue #48 or reads failure-classifier.ts carries the vendor's literal
+  // wording inside a real finding. Throwing that verdict away is the same
+  // class of loss #48 exists to stop, pointed the other way.
+  const citingReview =
+    "I'll use the `check` skill for this cold review of the #48 branch.\n\n" +
+    "BUG [src/failure-classifier.ts:300]: VENDOR_REFUSAL_PATTERNS matches " +
+    "`flagged for possible cybersecurity risk` and `Trusted Access for Cyber` anywhere in the message, so " +
+    "this very review classifies as a refusal. Trigger: any verdict citing issue #48.\n\n" +
+    "OK [src/run.ts:390]: lastFinalMessage is assigned before the status flip; the ordering holds.\n" +
+    "x".repeat(1200);
+  assert.equal(classifyVendorRefusal(citingReview), undefined);
+
+  // And the harder shape: the quote is the review's FIRST line, so the head
+  // window alone cannot save it — the length ceiling is what does.
+  const openingWithTheQuote =
+    "\"Sorry, I cannot fulfill your request to conduct an adversarial security review\" is the exact string " +
+    "under test here, reproduced from run gemini-b3dc1.\n\n" +
+    "x".repeat(1200);
+  assert.equal(classifyVendorRefusal(openingWithTheQuote), undefined);
+});
+
+test("#48: a refusal is never routed through the FAILURE-channel classifiers, and vice versa", () => {
+  // The two channels are disjoint by construction: classifyVendorRefusal reads
+  // a SUCCEEDED turn's agent message, the other two read a FAILED turn's error
+  // text. Neither may answer for the other, or the boundary that keeps model
+  // prose out of billing/auth diagnosis is gone.
+  assert.equal(classifyBackendFailure(OPENAI_REFUSAL_PAGE), undefined);
+  assert.equal(classifyBackendFailure(GEMINI_REFUSAL_PAGE), undefined);
+  assert.equal(
+    classifyTurnFailure({ message: OPENAI_REFUSAL_PAGE, turnsCount: 1, toolCalls: 0 }),
+    undefined,
+  );
+  assert.equal(
+    classifyVendorRefusal("API error (status 402 Payment Required): Grok Build usage balance exhausted"),
+    undefined,
+  );
+  assert.equal(classifyVendorRefusal("failed to spawn '/opt/node': spawn /opt/node ENOENT"), undefined);
+});
+
+test("mutant: without the length ceiling, a real review that cites #48 is thrown away as a refusal", async () => {
+  const name = "vendor-refusal-no-ceiling";
+  const mutated = await loadMutantModule<typeof import("../src/failure-classifier.js")>(name, [
+    {
+      file: "failure-classifier.ts",
+      find: "  if (text.length === 0 || text.length > VENDOR_REFUSAL_MAX_CHARS) return undefined;",
+      replace: "  if (text.length === 0) return undefined;",
+    },
+  ], "failure-classifier.ts");
+  try {
+    const citingReview =
+      "BUG [src/failure-classifier.ts:300]: the patterns match `flagged for possible cybersecurity risk` " +
+      "anywhere in the message.\n" + "x".repeat(1200);
+    assert.equal(
+      mutated.classifyVendorRefusal(citingReview),
+      mutated.VENDOR_REFUSAL_TAG,
+      "without the ceiling, a 1,300-character review with real findings is filed as a refusal",
+    );
+    // The two real pages still classify under the mutant, so this proves the
+    // ceiling is what excludes the review — not some pattern difference.
+    assert.equal(mutated.classifyVendorRefusal(OPENAI_REFUSAL_PAGE), mutated.VENDOR_REFUSAL_TAG);
+    assert.equal(mutated.classifyVendorRefusal(GEMINI_REFUSAL_PAGE), mutated.VENDOR_REFUSAL_TAG);
+  } finally {
+    dropMutant(name);
+  }
+});
+
+test("mutant: without the head window, a refusal phrase buried anywhere in a short answer fires", async () => {
+  const name = "vendor-refusal-no-head-window";
+  const mutated = await loadMutantModule<typeof import("../src/failure-classifier.js")>(name, [
+    {
+      file: "failure-classifier.ts",
+      find: "  const head = text.slice(0, VENDOR_REFUSAL_HEAD_CHARS);",
+      replace: "  const head = text;",
+    },
+  ], "failure-classifier.ts");
+  try {
+    // A short, genuine answer whose refusal-shaped clause sits past the head
+    // window: under the mutant it is a refusal, under the real rule it is not.
+    const tailMention =
+      "Reviewed src/run.ts:386-399 and src/failure-classifier.ts:300. The guard runs before the status " +
+      "flip and the ordering holds; no findings on this range. Note for the record that the tag's own " +
+      "docstring quotes the vendor saying I cannot fulfill your request, which is content, not a signal.";
+    assert.equal(mutated.classifyVendorRefusal(tailMention), mutated.VENDOR_REFUSAL_TAG);
+    assert.equal(classifyVendorRefusal(tailMention), undefined);
   } finally {
     dropMutant(name);
   }
