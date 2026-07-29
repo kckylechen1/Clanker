@@ -38,6 +38,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { RUNS_ROOT } from "./constants.js";
 import { RESULT_FILE } from "./run.js";
+import type { RunStatus } from "./types.js";
 
 export interface ForeignRun {
   id: string;
@@ -51,6 +52,16 @@ export interface ForeignRun {
   observed_model: string | null;
   read_only: boolean | null;
   turns: number | null;
+  /**
+   * Process identity, written by the owning server (#32 segment 1) and read
+   * here by the adoption protocol (adopt.ts). `server_pid` decides whether
+   * control may transfer at all; the worker pair decides what may be signalled
+   * once it has. All three are null on records written before PR #40, and that
+   * null is what makes adoption fail closed on them.
+   */
+  server_pid: number | null;
+  worker_pid: number | null;
+  worker_started_at: number | null;
   run_dir: string;
   /** Present only when the verdict file exists and is non-empty. */
   result_path?: string;
@@ -67,6 +78,9 @@ interface Telemetry {
   observed_model?: string | null;
   read_only?: boolean;
   turns?: number;
+  server_pid?: number;
+  worker_pid?: number;
+  worker_started_at?: number;
 }
 
 /** Read one run directory's durable record, or null when there is nothing readable there. */
@@ -107,10 +121,37 @@ export function readForeignRun(id: string, runsRoot = RUNS_ROOT, now = Date.now(
     observed_model: telemetry.observed_model ?? null,
     read_only: telemetry.read_only ?? null,
     turns: telemetry.turns ?? null,
+    server_pid: typeof telemetry.server_pid === "number" ? telemetry.server_pid : null,
+    worker_pid: typeof telemetry.worker_pid === "number" ? telemetry.worker_pid : null,
+    worker_started_at: typeof telemetry.worker_started_at === "number" ? telemetry.worker_started_at : null,
     run_dir: runDir,
     ...(resultPath ? { result_path: resultPath } : {}),
     last_activity_ms: newestMtimeMs > 0 ? Math.max(0, now - newestMtimeMs) : -1,
   };
+}
+
+/**
+ * The run status a durable record implies, for the paths that must answer with
+ * a `RunStatus` for a run they never held (#32: adopted cancel, degraded wait).
+ *
+ * Derived from what is written down, never from what the caller wanted to hear:
+ * a record with no `terminal_at` is still running no matter who is asking, and
+ * an adopting process that just killed a worker must not restate a run the
+ * owner already recorded as `done` — hence the mapping keys off the file, and
+ * the archival path (adopt.ts) never overwrites an existing terminal_at.
+ * `cancelled-foreign` is the adoption protocol's own reason and maps to
+ * `cancelled`, which is what actually happened to it.
+ */
+export function foreignRunStatus(run: ForeignRun): RunStatus {
+  if (!run.terminal_at) return "running";
+  switch (run.terminal_reason) {
+    case "done":
+      return "done";
+    case "error":
+      return "error";
+    default:
+      return "cancelled";
+  }
 }
 
 export interface ScanOptions {
@@ -164,14 +205,32 @@ export function scanForeignRuns(options: ScanOptions = {}): ForeignRun[] {
  * Deliberately a full sentence with the run directory in it: the seat reading
  * it has to be able to tell "not mine" apart from "does not exist" without
  * asking anyone.
+ *
+ * `owner` (adopt.ts's liveness probe) is supplied by the tools that CAN adopt
+ * an orphan — cancel and wait. When it is, the refusal also says why control
+ * did not transfer, because "the owner is alive, go there" and "I cannot tell
+ * whether the owner is alive" call for different next moves from the reader:
+ * one is a redirect, the other is a run too old to carry a server_pid.
  */
-export function foreignControlRefusal(id: string, run: ForeignRun): string {
+export function foreignControlRefusal(
+  id: string,
+  run: ForeignRun,
+  owner?: { state: "alive" | "dead" | "unknown"; pid: number | null; detail: string },
+): string {
   const state = run.terminal_at ? `already terminal (${run.terminal_reason ?? "unknown"})` : "still in flight";
+  const ownerClause =
+    owner?.state === "alive"
+      ? ` The owner session is still alive (${owner.detail}) — cancel or wait for this run from THAT session; ` +
+        `control transfers only once the owning server is provably dead.`
+      : owner?.state === "unknown"
+        ? ` Ownership could not be established (${owner.detail}), so this process will not take it over: ` +
+          `adoption requires proof the owning server is dead, and an unproven owner is treated as a live one.`
+        : "";
   return (
     `run '${id}' belongs to a different Clanker server process and is ${state}. ` +
     `Each session spawns its own server, and control (wait/cancel/prompt) needs the process that holds the ` +
     `worker's stdio — it cannot be recovered from disk. You can read its record at ${run.run_dir}` +
     `${run.result_path ? ` and its verdict at ${run.result_path}` : ""}. ` +
-    `Do NOT re-dispatch on the assumption that it never started.`
+    `Do NOT re-dispatch on the assumption that it never started.${ownerClause}`
   );
 }

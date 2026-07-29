@@ -25,7 +25,8 @@ import {
   WRITE_DISCIPLINE_PREFIX,
 } from "./constants.js";
 import { buildSpawnSpec } from "./backends.js";
-import { foreignControlRefusal, readForeignRun, scanForeignRuns } from "./foreign.js";
+import { archiveAdoptedRun, killAdoptedWorker, probeOwner } from "./adopt.js";
+import { foreignControlRefusal, foreignRunStatus, readForeignRun, scanForeignRuns } from "./foreign.js";
 import { classifyBackendFailure, classifyTurnFailure, isCapacityTransient } from "./failure-classifier.js";
 import { grokFailureDetail } from "./grok-diagnostics.js";
 import { resolveProfileDispatch, type ProfileDispatchInput } from "./profiles.js";
@@ -283,6 +284,35 @@ export interface WaitResult {
   /** Present alongside `error` when classifyTurnFailure tagged it (e.g. CLANKER-INFRA-FAILURE). */
   failure_class?: string;
   telemetry?: import("./types.js").RunTelemetry;
+}
+
+/**
+ * `clanker_cancel`'s payload. The first four fields are the ordinary local
+ * cancel; everything under `adopted` describes a cancel this process performed
+ * on ANOTHER server's orphaned run (#32) and exists so the caller can tell what
+ * actually happened to the worker — a refusal, a kill, or a record closed
+ * without any signal because the pid could no longer be proven to be the
+ * worker. "Cancelled" with `killed: false` is a real and honest outcome.
+ */
+export interface CancelResult {
+  id: string;
+  status: RunStatus;
+  worktree_retained?: string;
+  run_dir?: string;
+  /** Present (and always true) only when this process took over a dead server's run. */
+  adopted?: true;
+  /** The server that started the run, now proven gone. */
+  owner_pid?: number | null;
+  /** The worker this process considered signalling; null when the run never spawned one. */
+  worker_pid?: number | null;
+  /** Did this cancel actually deliver a signal to the worker's process group? */
+  killed?: boolean;
+  /** Did the pid still verify as this run's worker (start-time match)? No verification, no signal. */
+  identity_verified?: boolean;
+  /** The verdict file, if the run left one or archival wrote a stub. */
+  result_path?: string;
+  /** Human-readable account of the four adoption steps, including anything that failed. */
+  note?: string;
 }
 
 export interface LaneListEntry {
@@ -1214,9 +1244,12 @@ export class LaneManager {
 
   // ---- cancel / close -----------------------------------------------------
 
-  async cancel(id: string): Promise<{ id: string; status: RunStatus; worktree_retained?: string; run_dir?: string }> {
+  async cancel(id: string): Promise<CancelResult> {
     const run = this.runs.get(id);
-    if (!run) this.throwUnknownRun(id);
+    // Not in this process's map: either it never existed, or another session's
+    // server owns it. The second case used to end here in a flat refusal; it
+    // now ends there only while that server is alive (#32, adoption).
+    if (!run) return await this.cancelForeign(id);
     // A run whose turn is already terminal has no turn to cancel — but it can
     // still be HOLDING things. The supervised profile deliberately keeps its
     // session (and therefore its worktree) alive past a successful turn so a
@@ -1277,6 +1310,75 @@ export class LaneManager {
       run.cancelTurn();
     }
     return { id, status: run.turnStatus };
+  }
+
+  /**
+   * Cancel a run held by another server process — the orphan-adoption protocol
+   * (#32, design frozen on the issue; mechanics in adopt.ts).
+   *
+   * The pre-adoption behaviour was honest but powerless: a foreign id was
+   * refused, full stop. That is correct while the owning server exists, and
+   * exactly wrong once it does not — a dead session leaves a live worker
+   * holding a worktree with nobody able to stop it, which is the precise
+   * failure the durable pid record was written for.
+   *
+   * Four steps, in this order, none skippable:
+   *
+   *  1. OWNER LIVENESS. Only a provably dead owner (ESRCH) unlocks anything.
+   *     Alive — or unprovable, e.g. a record with no server_pid — keeps the
+   *     old refusal, now with the reason attached.
+   *  2. WORKER IDENTITY. A pid is a number, not a process. Signal it only
+   *     while its observed start time still matches the recorded one.
+   *  3. GROUP KILL with a RE-CHECK between TERM and KILL, because the grace
+   *     window is exactly when the pid becomes reusable.
+   *  4. ARCHIVE — unconditional, and the step whose absence would make the
+   *     other three counterproductive: a killed orphan whose telemetry still
+   *     reads `terminal_at: null` haunts the orphan board forever, so the
+   *     record is closed even when nothing was signalled at all.
+   */
+  private async cancelForeign(id: string): Promise<CancelResult> {
+    const foreign = readForeignRun(id, this.runsRoot);
+    if (!foreign) this.throwUnknownRun(id);
+    const owner = probeOwner(foreign.server_pid);
+    if (owner.state !== "dead") throw new Error(foreignControlRefusal(id, foreign, owner));
+
+    const outcome = await killAdoptedWorker({
+      workerPid: foreign.worker_pid,
+      workerStartedAt: foreign.worker_started_at,
+      lane: foreign.lane,
+      graceMs: this.cancelGraceMs,
+    });
+    const archive = archiveAdoptedRun({
+      runDir: foreign.run_dir,
+      id,
+      adopterPid: process.pid,
+      ownerPid: owner.pid,
+      workerPid: foreign.worker_pid,
+      outcome,
+    });
+    // Re-read rather than assume: the archive decides what the record now says
+    // (it refuses to overwrite a terminal state the owner already wrote), so a
+    // run that was already `done` comes back `done`, not rewritten to
+    // `cancelled` by the act of cancelling it.
+    const after = readForeignRun(id, this.runsRoot) ?? foreign;
+    const note = [
+      `${owner.detail}, so this process (pid ${process.pid}) adopted the run`,
+      outcome.note,
+      archive.result_stub_written ? "wrote a result.md stub" : "left the existing result.md in place",
+      ...archive.problems,
+    ].join("; ");
+    return {
+      id,
+      status: foreignRunStatus(after),
+      adopted: true,
+      owner_pid: owner.pid,
+      worker_pid: foreign.worker_pid,
+      killed: outcome.killed,
+      identity_verified: outcome.identity_verified,
+      run_dir: foreign.run_dir,
+      ...(after.result_path ? { result_path: after.result_path } : {}),
+      note,
+    };
   }
 
   private async computeTouched(run: LaneRun): Promise<void> {
