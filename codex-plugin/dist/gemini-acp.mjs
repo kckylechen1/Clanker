@@ -14505,6 +14505,39 @@ var legacyClientNotificationMethods = /* @__PURE__ */ new Set([
   CLIENT_METHODS.elicitation_complete
 ]);
 
+// src/agy-flags.ts
+var ALL_AGY_FLAGS_SUPPORTED = { mode: true, model: true, effort: true };
+var AGY_FLAGS_ENV = "CLANKER_AGY_FLAGS";
+function decodeAgyFlagSupport(encoded) {
+  if (encoded === void 0) return ALL_AGY_FLAGS_SUPPORTED;
+  const stated = /* @__PURE__ */ new Map();
+  for (const field of encoded.split(",")) {
+    const [name, value] = field.split("=");
+    if (name && value !== void 0) stated.set(name.trim(), value.trim());
+  }
+  const supported = (flag) => stated.get(flag) !== "0";
+  return { mode: supported("mode"), model: supported("model"), effort: supported("effort") };
+}
+function agyDegradationNotices(support, opts = {}) {
+  const notices = [];
+  if (!support.model) {
+    notices.push(
+      "this agy build does not accept --model, so the gemini lane cannot pin a model: the turn runs on agy's own default and observed_model is reported as unknown rather than as the model that was requested"
+    );
+  }
+  if (!support.effort && opts.requestedEffort) {
+    notices.push(
+      `this agy build does not accept --effort, so the requested reasoning effort '${opts.requestedEffort}' is not applied and is not reported as observed_effort`
+    );
+  }
+  if (!support.mode) {
+    notices.push(
+      "this agy build does not accept --mode, so agy is not additionally asked for its own plan-mode posture; the lane's read-only boundary is unchanged and still enforced by the fail-closed sandbox-exec profile that denies file-write* across the workspace and its sibling worktrees"
+    );
+  }
+  return notices;
+}
+
 // src/gemini-acp.ts
 var RECON_ROLE_PREFIX = [
   "You are Clanker: Gemini, a read-only reconnaissance lane.",
@@ -14528,8 +14561,29 @@ function activeModel() {
 function activeEffort() {
   return process.env.CLANKER_GEMINI_EFFORT?.trim() || void 0;
 }
+function agyPath() {
+  return process.env.CLANKER_AGY_PATH || "agy";
+}
+function agyKnobs() {
+  const support = decodeAgyFlagSupport(process.env[AGY_FLAGS_ENV]);
+  noticeDegradation(support);
+  return {
+    mode: support.mode ? "plan" : void 0,
+    model: support.model ? activeModel() : void 0,
+    effort: support.effort ? activeEffort() : void 0
+  };
+}
+var degradationNoticed = false;
+function noticeDegradation(support) {
+  if (degradationNoticed) return;
+  degradationNoticed = true;
+  for (const notice of agyDegradationNotices(support, { requestedEffort: activeEffort() })) {
+    process.stderr.write(`Clanker: Gemini \u2014 ${notice}
+`);
+  }
+}
 function sessionConfigOptions() {
-  const effort = activeEffort();
+  const knobs = agyKnobs();
   const asSelect = (id, name, category, value) => ({
     id,
     name,
@@ -14538,8 +14592,9 @@ function sessionConfigOptions() {
     currentValue: value,
     options: [{ value, name: value }]
   });
-  const options = [asSelect("model", "Model", "model", activeModel())];
-  if (effort) options.push(asSelect("thought_level", "Reasoning effort", "thought_level", effort));
+  const options = [];
+  if (knobs.model) options.push(asSelect("model", "Model", "model", knobs.model));
+  if (knobs.effort) options.push(asSelect("thought_level", "Reasoning effort", "thought_level", knobs.effort));
   return options;
 }
 var sessions = /* @__PURE__ */ new Map();
@@ -14553,24 +14608,18 @@ function textOf(blocks) {
 function runAgy(sessionId, session, prompt) {
   if (session.active) throw new Error(`Clanker: Gemini session '${sessionId}' already has an active turn`);
   session.cancellationRequested = false;
-  const args = [
-    "--mode",
-    "plan",
-    "--sandbox",
-    // Same accessors session/new reports from: argv and telemetry must never be
-    // two independent computations of "what model is this".
-    "--model",
-    activeModel()
-  ];
-  const effort = activeEffort();
-  if (effort) args.push("--effort", effort);
+  const knobs = agyKnobs();
+  const args = [];
+  if (knobs.mode) args.push("--mode", knobs.mode);
+  args.push("--sandbox");
+  if (knobs.model) args.push("--model", knobs.model);
+  if (knobs.effort) args.push("--effort", knobs.effort);
   const printTimeout = process.env.CLANKER_GEMINI_PRINT_TIMEOUT || "10m";
   args.push("--print-timeout", printTimeout, "--print", `${rolePrefix()}
 
 Task:
 ${prompt}`);
-  const agyPath = process.env.CLANKER_AGY_PATH || "agy";
-  const invocation = workspaceReadOnlyInvocation(agyPath, args, session.cwd);
+  const invocation = workspaceReadOnlyInvocation(agyPath(), args, session.cwd);
   const agyEnv = { ...process.env };
   delete agyEnv.GEMINI_API_KEY;
   delete agyEnv.GOOGLE_API_KEY;
