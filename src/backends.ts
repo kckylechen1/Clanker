@@ -118,6 +118,7 @@ import {
   resolveCursorModel,
   resolveOcModel,
 } from "./constants.js";
+import { AGY_FLAGS_ENV, agyDegradationNotices, agyFlagSupport, encodeAgyFlagSupport } from "./agy-flags.js";
 import { resolveGrokHome } from "./grok-diagnostics.js";
 import { resolveNodeBinary } from "./node-binary.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "./types.js";
@@ -462,6 +463,22 @@ export function buildSpawnSpec(
         throw new Error(`Clanker: Gemini effort must be 'medium' or 'high'; received '${effort}'`);
       }
       env.CLANKER_AGY_PATH = process.env.CLANKER_AGY_PATH ?? resolveSystemAgyPath();
+      // agy is the operator's own binary on the operator's own update schedule,
+      // and its flag set has moved: the build this was written against rejects
+      // --model, --effort and --mode outright, which killed every gemini
+      // dispatch at spawn (agy-flags.ts). Probe here — this is already the
+      // component that resolves the binary and builds the sidecar's
+      // environment, and probing here costs one `agy --help` per binary per
+      // server rather than one per sidecar process.
+      const agyFlags = agyFlagSupport(env.CLANKER_AGY_PATH);
+      env[AGY_FLAGS_ENV] = encodeAgyFlagSupport(agyFlags);
+      // A dispatch that stopped honoring the model it was given has to SAY so,
+      // in the same `warnings` channel the unsupported-override paths above
+      // use. The sidecar repeats it on its own stderr, because the gemini relay
+      // card is one of the five that do not report `warnings` (3e42b8b).
+      warnings.push(
+        ...agyDegradationNotices(agyFlags, { requestedEffort: effort }).map((notice) => `lane '${lane}': ${notice}`),
+      );
       env.CLANKER_GEMINI_MODEL = model;
       // Role copy routing: the gemini lane shares one sidecar across the
       // gemini-recon / gemini-research profiles; the sidecar selects its

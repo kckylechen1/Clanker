@@ -10,6 +10,7 @@ import {
   type ContentBlock,
   type SessionConfigOption,
 } from "@agentclientprotocol/sdk";
+import { AGY_FLAGS_ENV, agyDegradationNotices, decodeAgyFlagSupport, type AgyFlagSupport } from "./agy-flags.js";
 
 const RECON_ROLE_PREFIX = [
   "You are Clanker: Gemini, a read-only reconnaissance lane.",
@@ -51,6 +52,61 @@ function activeEffort(): string | undefined {
   return process.env.CLANKER_GEMINI_EFFORT?.trim() || undefined;
 }
 
+function agyPath(): string {
+  return process.env.CLANKER_AGY_PATH || "agy";
+}
+
+/**
+ * The knobs that will actually reach agy's command line on this machine.
+ *
+ * agy's flag set drifts (see agy-flags.ts: the build on the machine this was
+ * written for rejects --mode, --model and --effort outright, exit 2, before
+ * running anything), so "what the operator asked for" and "what this turn can
+ * express" are two different things. Everything downstream — argv AND the
+ * configOptions the session reports — is derived from THIS one function, so
+ * the pair cannot disagree:
+ * a knob that is undefined here is absent from both, which is the whole point.
+ * A model reported but never passed would be a fabricated reading, which the
+ * telemetry contract below calls worse than reporting nothing.
+ */
+interface AgyKnobs {
+  readonly mode?: string;
+  readonly model?: string;
+  readonly effort?: string;
+}
+
+function agyKnobs(): AgyKnobs {
+  // Resolved by backends.ts, which probed the very binary this sidecar is about
+  // to spawn. Unset means no dispatch resolved it (a hand-run or a test
+  // harness), and the safe reading there is the full pre-drift command line —
+  // i.e. unchanged behavior.
+  const support = decodeAgyFlagSupport(process.env[AGY_FLAGS_ENV]);
+  noticeDegradation(support);
+  return {
+    mode: support.mode ? "plan" : undefined,
+    model: support.model ? activeModel() : undefined,
+    effort: support.effort ? activeEffort() : undefined,
+  };
+}
+
+let degradationNoticed = false;
+
+/**
+ * Say out loud, once per sidecar, what this agy build cannot do.
+ *
+ * stderr and not silence: acp-client.ts keeps a 4000-char stderr tail as run
+ * evidence, so this lands in the record of the run it affected. A dispatch that
+ * quietly stopped pinning its model is exactly the kind of invisible
+ * substitution this lane's telemetry exists to catch.
+ */
+function noticeDegradation(support: AgyFlagSupport): void {
+  if (degradationNoticed) return;
+  degradationNoticed = true;
+  for (const notice of agyDegradationNotices(support, { requestedEffort: activeEffort() })) {
+    process.stderr.write(`Clanker: Gemini — ${notice}\n`);
+  }
+}
+
 /**
  * ACP `configOptions` is how run.ts learns what a lane is really running:
  * `observeConfigOptions` maps `category: "model"` to `observed_model` and
@@ -62,7 +118,7 @@ function activeEffort(): string | undefined {
  * place the truth could come from.
  */
 function sessionConfigOptions(): SessionConfigOption[] {
-  const effort = activeEffort();
+  const knobs = agyKnobs();
   // A one-value select: agy takes its model from argv, so there is nothing for
   // a caller to choose here — the option exists to *state* what this turn runs
   // on, which is the reading run.ts turns into `observed_model`.
@@ -74,8 +130,16 @@ function sessionConfigOptions(): SessionConfigOption[] {
     currentValue: value,
     options: [{ value, name: value }],
   });
-  const options = [asSelect("model", "Model", "model", activeModel())];
-  if (effort) options.push(asSelect("thought_level", "Reasoning effort", "thought_level", effort));
+  const options: SessionConfigOption[] = [];
+  // Reported only when it is genuinely on agy's command line. When this build
+  // has no --model flag the turn runs on agy's own default, which this process
+  // does not know and must not guess: `observed_model` stays null, and
+  // constants.ts:modelSwapWarning reads an unknown side as missing evidence
+  // rather than as a swap. Naming the requested model here instead would put a
+  // model we never asked for on the record under a name we did — the precise
+  // failure #25 and #54 exist to make impossible.
+  if (knobs.model) options.push(asSelect("model", "Model", "model", knobs.model));
+  if (knobs.effort) options.push(asSelect("thought_level", "Reasoning effort", "thought_level", knobs.effort));
   return options;
 }
 
@@ -93,15 +157,20 @@ function textOf(blocks: ContentBlock[]): string {
 function runAgy(sessionId: string, session: Session, prompt: string): Promise<string> {
   if (session.active) throw new Error(`Clanker: Gemini session '${sessionId}' already has an active turn`);
   session.cancellationRequested = false;
-  const args = [
-    "--mode", "plan",
-    "--sandbox",
-    // Same accessors session/new reports from: argv and telemetry must never be
-    // two independent computations of "what model is this".
-    "--model", activeModel(),
-  ];
-  const effort = activeEffort();
-  if (effort) args.push("--effort", effort);
+  // Same computation session/new reports from: argv and telemetry must never be
+  // two independent computations of "what model is this". Each knob is omitted
+  // when this agy build has no flag for it — passing one it does not declare
+  // makes Go's flag package reject the ENTIRE command line (exit 2, nothing
+  // runs), which is how the lane died on this machine. See agy-flags.ts.
+  const knobs = agyKnobs();
+  const args: string[] = [];
+  if (knobs.mode) args.push("--mode", knobs.mode);
+  // --sandbox is not conditional: it is present in every agy build seen, and it
+  // is a restriction, so a build that had dropped it should fail loudly here
+  // rather than run a recon turn with one fewer boundary than the lane claims.
+  args.push("--sandbox");
+  if (knobs.model) args.push("--model", knobs.model);
+  if (knobs.effort) args.push("--effort", knobs.effort);
   // Read-only recon turns observed at 178s-338s in practice; a 3m ceiling
   // killed real work and the resulting failure was indistinguishable from a
   // genuine backend crash (see close handler below). 10m gives real recon
@@ -109,8 +178,7 @@ function runAgy(sessionId: string, session: Session, prompt: string): Promise<st
   const printTimeout = process.env.CLANKER_GEMINI_PRINT_TIMEOUT || "10m";
   args.push("--print-timeout", printTimeout, "--print", `${rolePrefix()}\n\nTask:\n${prompt}`);
 
-  const agyPath = process.env.CLANKER_AGY_PATH || "agy";
-  const invocation = workspaceReadOnlyInvocation(agyPath, args, session.cwd);
+  const invocation = workspaceReadOnlyInvocation(agyPath(), args, session.cwd);
   const agyEnv = { ...process.env };
   delete agyEnv.GEMINI_API_KEY;
   delete agyEnv.GOOGLE_API_KEY;
@@ -208,6 +276,20 @@ function runAgy(sessionId: string, session: Session, prompt: string): Promise<st
   });
 }
 
+/**
+ * The lane's read-only boundary, and — since agy's flag drift (agy-flags.ts) —
+ * the only one that is guaranteed to be there.
+ *
+ * `--mode plan` used to ride alongside this as a second, agy-side posture, and
+ * on a build that still declares it, it still does. It was never what made the
+ * lane safe: this is a kernel-enforced deny of `file-write*` across the
+ * workspace, its git dir and every sibling worktree, and it is fail-CLOSED —
+ * a non-darwin host or a missing/unusable `/usr/bin/sandbox-exec` throws here
+ * rather than falling back to an unsandboxed spawn. So a build without `--mode`
+ * loses a layer of defense in depth, not the boundary. Anything that would
+ * relax THIS function is a change to what the lane promises, not a portability
+ * fix.
+ */
 function workspaceReadOnlyInvocation(command: string, args: string[], cwd: string): { command: string; args: string[] } {
   if (process.platform !== "darwin") {
     throw new Error("Clanker: Gemini currently requires macOS sandbox-exec for a fail-closed workspace read-only boundary");
