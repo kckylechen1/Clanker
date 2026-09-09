@@ -1,6 +1,6 @@
 {
   "name": "clanker-codex",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260909063203",
   "description": "Codex-owned external coding workers through Clanker and OpenCode, including self-hosted model providers.",
   "author": {
     "name": "kckylechen1"

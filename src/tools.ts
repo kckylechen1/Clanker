@@ -245,6 +245,8 @@ export function registerTools(server: McpServer, manager: LaneManager): void {
   server.registerTool("clanker_prompt", {
     title: "Send a correction turn to a Clanker job",
     description:
+      "Managed OpenCode profiles allow one follow-up: check continuation.can_prompt in wait/status first. " +
+      "A turn_finishing reason means terminal bookkeeping is still settling; query status again. " +
       "Run another turn on a job that already came back terminal. This is turn-by-turn supervision, not " +
       "mid-flight steering: issue it only after the previous turn has come back terminal, then poll the " +
       "same id with clanker_wait. Two shapes, chosen by the job's lane: a supervised job continues its " +

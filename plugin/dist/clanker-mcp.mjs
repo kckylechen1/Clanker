@@ -27778,9 +27778,10 @@ var FINAL_MESSAGE_CHAR_BUDGET = envInt(
 );
 var CAPACITY_RETRY_BACKOFF_MS = envInt("CLANKER_CAPACITY_RETRY_BACKOFF_MS", 3e4);
 var PROGRESS_EXPERIMENTAL = process.env.CLANKER_PROGRESS_EXPERIMENTAL === "1";
-var RUNS_ROOT = process.env.CLANKER_RUNS_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "runs");
+var CACHE_NAMESPACE = process.argv.includes("--codex-direct") ? "clanker-codex" : "clanker";
+var RUNS_ROOT = process.env.CLANKER_RUNS_ROOT ?? path.join(os.homedir(), ".cache", CACHE_NAMESPACE, "runs");
 var RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 864e5;
-var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
+var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", CACHE_NAMESPACE, "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
 var SERVER_VERSION = "0.4.7";
@@ -34922,7 +34923,7 @@ var LaneManager = class {
   constructor(opts = {}) {
     this.host = opts.host ?? "standalone";
     if (opts.codexDirect && this.host !== "codex") throw new Error("codexDirect requires host=codex");
-    this.dispatchProfiles = opts.codexDirect ? [...DISPATCH_PROFILES, ...CODEX_MANAGED_PROFILES] : DISPATCH_PROFILES;
+    this.dispatchProfiles = opts.codexDirect ? CODEX_MANAGED_PROFILES : DISPATCH_PROFILES;
     this.resolveSpec = opts.resolveSpec ?? buildSpawnSpec;
     this.stallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
     this.sessionTtlMs = opts.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
@@ -35275,7 +35276,7 @@ ${params.prompt}`;
   continuationState(run) {
     if (run.continuationLimit === void 0) return void 0;
     const remaining = Math.max(0, 1 + run.continuationLimit - run.turnsCount);
-    const reason = this.shuttingDown || this.closing.has(run.id) ? "closing" : run.sessionClosed || !this.connections.has(run.id) ? "session_closed" : run.turnStatus === "running" ? "turn_running" : remaining === 0 ? "follow_up_limit" : run.idleMs() >= this.sessionTtlMs ? "expired" : void 0;
+    const reason = this.shuttingDown || this.closing.has(run.id) ? "closing" : run.sessionClosed || !this.connections.has(run.id) ? "session_closed" : run.turnStatus === "running" ? "turn_running" : this.turnDriver.hasDrive(run.id) ? "turn_finishing" : remaining === 0 ? "follow_up_limit" : run.idleMs() >= this.sessionTtlMs ? "expired" : void 0;
     return {
       can_prompt: reason === void 0,
       reason: reason ?? null,
@@ -35863,7 +35864,7 @@ function registerTools(server, manager) {
   });
   server.registerTool("clanker_prompt", {
     title: "Send a correction turn to a Clanker job",
-    description: "Run another turn on a job that already came back terminal. This is turn-by-turn supervision, not mid-flight steering: issue it only after the previous turn has come back terminal, then poll the same id with clanker_wait. Two shapes, chosen by the job's lane: a supervised job continues its still-open session (refused once the idle-TTL reaper closed it, or if the profile was not supervised); a cursor job is re-spawned against the conversation Cursor itself holds, which stays correctable after the session closed and accepts an optional `model` so the next turn runs on another model. Either way the run keeps its id, its worktree and its single ledger row, and result.md is rewritten with the corrected turn's verdict. A hand-off is CONTINUATION, never review: the resumed model reads the previous turn's whole context and is anchored by it, so verification still requires a separately dispatched cold-context job.",
+    description: "Managed OpenCode profiles allow one follow-up: check continuation.can_prompt in wait/status first. A turn_finishing reason means terminal bookkeeping is still settling; query status again. Run another turn on a job that already came back terminal. This is turn-by-turn supervision, not mid-flight steering: issue it only after the previous turn has come back terminal, then poll the same id with clanker_wait. Two shapes, chosen by the job's lane: a supervised job continues its still-open session (refused once the idle-TTL reaper closed it, or if the profile was not supervised); a cursor job is re-spawned against the conversation Cursor itself holds, which stays correctable after the session closed and accepts an optional `model` so the next turn runs on another model. Either way the run keeps its id, its worktree and its single ledger row, and result.md is rewritten with the corrected turn's verdict. A hand-off is CONTINUATION, never review: the resumed model reads the previous turn's whole context and is anchored by it, so verification still requires a separately dispatched cold-context job.",
     inputSchema: {
       id: external_exports.string(),
       prompt: external_exports.string().min(1),

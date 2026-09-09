@@ -508,7 +508,7 @@ export class LaneManager {
   constructor(opts: LaneManagerOptions = {}) {
     this.host = opts.host ?? "standalone";
     if (opts.codexDirect && this.host !== "codex") throw new Error("codexDirect requires host=codex");
-    this.dispatchProfiles = opts.codexDirect ? [...DISPATCH_PROFILES, ...CODEX_MANAGED_PROFILES] : DISPATCH_PROFILES;
+    this.dispatchProfiles = opts.codexDirect ? CODEX_MANAGED_PROFILES : DISPATCH_PROFILES;
     this.resolveSpec = opts.resolveSpec ?? buildSpawnSpec;
     this.stallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
     this.sessionTtlMs = opts.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
@@ -1002,6 +1002,7 @@ export class LaneManager {
     const reason = this.shuttingDown || this.closing.has(run.id) ? "closing"
       : run.sessionClosed || !this.connections.has(run.id) ? "session_closed"
       : run.turnStatus === "running" ? "turn_running"
+      : this.turnDriver.hasDrive(run.id) ? "turn_finishing"
       : remaining === 0 ? "follow_up_limit"
       : run.idleMs() >= this.sessionTtlMs ? "expired" : undefined;
     return {

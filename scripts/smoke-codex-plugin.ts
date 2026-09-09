@@ -36,7 +36,8 @@ async function call(name: string, args: Record<string, unknown>) {
 async function wait(id: string) {
   for (let i = 0; i < 100; i++) {
     const r = await call("clanker_wait", { id, timeout_ms: 55000, quiet: true });
-    if (r.status !== "running") return r;
+    if (r.status !== "running" && r.continuation?.reason !== "turn_finishing") return r;
+    if (r.continuation?.reason === "turn_finishing") await new Promise(resolve => setTimeout(resolve, 50));
   }
   throw new Error("smoke wait budget exhausted");
 }

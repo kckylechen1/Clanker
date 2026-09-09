@@ -1,2 +1,3 @@
 plugin/dist/*.mjs -diff linguist-generated=true -text
 codex-plugin/dist/*.mjs -diff linguist-generated=true -text
+clanker-codex/dist/*.mjs -diff linguist-generated=true -text

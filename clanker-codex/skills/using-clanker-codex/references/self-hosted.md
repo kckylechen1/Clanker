@@ -25,7 +25,7 @@ An illustrative fragment (not installed or enabled by this plugin):
 }
 ```
 
-Replace example endpoints and IDs after deployment. Merge provider entries into the existing OpenCode configuration; do not overwrite the user's configuration. Where authentication is required, use OpenCode's `/connect` custom-provider flow with the matching provider ID. Do not embed an API key in this document or in Clanker configuration.
+Replace example endpoints and IDs after deployment. If OpenCode uses an `enabled_providers` allowlist, explicitly add `dgx-a` and `dgx-b`; also remove either ID from `disabled_providers` if present. Otherwise a configured provider can remain unavailable. Merge provider entries into the existing OpenCode configuration; do not overwrite the user's configuration. Where authentication is required, use OpenCode's `/connect` custom-provider flow with the matching provider ID. Do not embed an API key in this document or in Clanker configuration.
 
 Before dispatch, run `opencode models --pure`, or use `clanker_models(provider="dgx-a")`. Then run a bounded read-only task on `dgx-a/served-model-id` that requires a file/tool round-trip. A configured catalog entry alone does not prove compatibility. Verify the requested and observed model and the actual result. Repeat separately for DGX B. Failures must stay on their chosen route; do not fall back to paid cloud inference automatically.
 

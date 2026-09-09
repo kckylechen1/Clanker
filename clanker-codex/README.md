@@ -2,7 +2,9 @@
 
 A personal Codex plugin using the existing Clanker ACP runtime. Codex directly controls OpenCode workers backed by cloud or self-hosted models. No Claude/Sonnet supervisor is required.
 
-The two new start tools are `clanker_start_oc-managed-review` (read-only, optional worktree) and `clanker_start_oc-managed-write` (mandatory isolated worktree). Both require an explicit model and permit one follow-up turn. `clanker_models` discovers configured OpenCode provider/model IDs with bounded pagination. Existing lifecycle tools handle wait/status/prompt/cancel/list.
+The two new start tools are `clanker_start_oc-managed-review` (read-only, optional worktree) and `clanker_start_oc-managed-write` (mandatory isolated worktree). Both require an explicit model and permit one follow-up turn. `clanker_models` discovers configured OpenCode provider/model IDs with bounded pagination. Existing lifecycle tools handle wait/status/prompt/cancel/list. These eight tools are the entire direct-plugin surface; legacy start profiles are not registered.
+
+The plugin selects the direct registry with `--host codex --codex-direct`. Its default run/worktree roots are `~/.cache/clanker-codex/{runs,worktrees}`, separate from legacy Clanker. Explicit `CLANKER_RUNS_ROOT` / `CLANKER_WORKTREES_ROOT` operator overrides still apply. The shared coding dispatch ledger remains in its existing location.
 
 The host remains `codex`: self-dispatch to the Codex ACP lane and Claude-only Sonnet profiles remain excluded. Existing Claude profiles retain their behavior. Managed-profile authority is minted by the registry and cannot be supplied as a request field.
 

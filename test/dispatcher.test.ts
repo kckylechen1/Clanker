@@ -58,6 +58,28 @@ test("managed profile refuses expiry even before the reaper runs", async () => {
   } finally { await m.shutdown(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("terminal status never advertises a follow-up while its drive is still settling", async () => {
+  const root = repo();
+  const m = new LaneManager({ host: "codex", codexDirect: true, baseRepo: root, disableReaper: true, resolveSpec: () => fakeSpec() });
+  let settle!: () => void;
+  try {
+    const { id } = await m.dispatchProfile({ profile: "oc-managed-review", cwd: root, model: "kimi", prompt: "first" });
+    await until(() => m.status(id).continuation?.can_prompt === true);
+    // A valid terminal-but-driving state: the real driver keeps this promise
+    // tracked until terminal bookkeeping completes. Hold that window open.
+    const driver = (m as any).turnDriver;
+    driver.trackDrive(id, new Promise<void>(resolve => { settle = resolve; }));
+    assert.equal(m.status(id).status, "done");
+    assert.equal(m.status(id).continuation?.can_prompt, false);
+    assert.equal((await m.wait(id, 0)).continuation?.reason, "turn_finishing");
+    await assert.rejects(m.promptExisting(id, "too early"), /already running/);
+    settle();
+    await until(() => m.status(id).continuation?.can_prompt === true);
+    await m.promptExisting(id, "now ready");
+    await until(() => m.status(id).status !== "running");
+  } finally { settle?.(); await m.shutdown(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("running and cancelled workers cannot be corrected", async () => {
   const root = repo();
   const m = new LaneManager({ host: "codex", codexDirect: true, baseRepo: root, disableReaper: true, resolveSpec: () => fakeSpec() });
