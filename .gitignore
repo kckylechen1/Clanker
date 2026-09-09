@@ -33,4 +33,3 @@ clanker-codex/dist/*
 !clanker-codex/dist/codex-acp.mjs
 !clanker-codex/dist/gemini-acp.mjs
 !clanker-codex/dist/cursor-acp.mjs
-.wt-codex-direct-workers/
