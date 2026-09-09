@@ -27778,9 +27778,10 @@ var FINAL_MESSAGE_CHAR_BUDGET = envInt(
 );
 var CAPACITY_RETRY_BACKOFF_MS = envInt("CLANKER_CAPACITY_RETRY_BACKOFF_MS", 3e4);
 var PROGRESS_EXPERIMENTAL = process.env.CLANKER_PROGRESS_EXPERIMENTAL === "1";
-var RUNS_ROOT = process.env.CLANKER_RUNS_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "runs");
+var CACHE_NAMESPACE = process.argv.includes("--codex-direct") ? "clanker-codex" : "clanker";
+var RUNS_ROOT = process.env.CLANKER_RUNS_ROOT ?? path.join(os.homedir(), ".cache", CACHE_NAMESPACE, "runs");
 var RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 864e5;
-var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
+var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", CACHE_NAMESPACE, "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
 var SERVER_VERSION = "0.4.7";
@@ -28867,6 +28868,7 @@ var LaneRun = class {
    * steering an unsupervised worker.
    */
   supervised;
+  continuationLimit;
   /**
    * The ticket this dispatch is being run for (#27), already parsed and
    * validated at dispatch time. Undefined means the dispatcher kept no account
@@ -28988,6 +28990,7 @@ var LaneRun = class {
     this.initialPrompt = init.initialPrompt ?? "";
     this.turnTimeoutMs = init.turnTimeoutMs;
     this.supervised = init.supervised ?? false;
+    this.continuationLimit = init.continuationLimit;
     this.issueRef = init.issueRef;
     this.profileId = init.profileId;
     this.ghRunner = init.ghRunner;
@@ -30449,6 +30452,21 @@ var LANE_NAMES = ["codex", "opencode", "grok", "gemini", "cursor"];
 var GEMINI_TURN_TIMEOUT_MS = 66e4;
 var CURSOR_REVIEW_TURN_TIMEOUT_MS = 9e5;
 var CURSOR_ROUTING_NOTE = "Routing: the default Composer 2.5 is a bounded single-layer-scaffolding tier (composer-2.5 lane card, #1368) \u2014 provenance and identity-critical cores still require a cross-vendor screen, so do not route those here. Model is a free parameter: the same Cursor subscription also serves cursor-grok-4.5-high (alias `grok`) and gpt-5.3-codex-high (alias `codex53`).";
+var CODEX_MANAGED_PROFILES = [true, false].map((readOnly) => ({
+  id: readOnly ? "oc-managed-review" : "oc-managed-write",
+  title: readOnly ? "Dispatcher-managed OpenCode review" : "Dispatcher-managed OpenCode implementation",
+  description: "Codex directly owns this OpenCode worker. Explicit provider/model required, including custom local providers. One follow-up turn is allowed in the same live session; inspect actual artifacts before accepting. " + (readOnly ? "Read-only; optional isolated worktree." : "Writes require an isolated managed worktree; GLM is allowed without a Sonnet relay."),
+  lane: "opencode",
+  model: { kind: "caller-required" },
+  readOnly,
+  isolation: readOnly ? "optional" : "required",
+  secrets: [],
+  turnTimeoutMs: TURN_TIMEOUT_MS,
+  supervision: "dispatcher",
+  roleClass: readOnly ? "reviewer" : "implementer",
+  ocProfile: "worker",
+  status: "active"
+}));
 var DISPATCH_PROFILES = [
   {
     id: "codex-review",
@@ -30629,11 +30647,6 @@ var DISPATCH_PROFILES = [
 ];
 var PROFILE_IDS = DISPATCH_PROFILES.map((p) => p.id);
 var BY_ID = new Map(DISPATCH_PROFILES.map((p) => [p.id, p]));
-function getProfile(id) {
-  const profile = BY_ID.get(id);
-  if (!profile) throw new Error(`unknown profile '${id}'; expected one of ${PROFILE_IDS.join(", ")}`);
-  return profile;
-}
 var ENV_PREFIX = "CLANKER_TURN_TIMEOUT_MS_";
 function profileTurnTimeoutMs(profile, env = process.env) {
   const raw = env[ENV_PREFIX + profile.id.replace(/-/g, "_").toUpperCase()];
@@ -30641,8 +30654,9 @@ function profileTurnTimeoutMs(profile, env = process.env) {
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : profile.turnTimeoutMs;
 }
-function resolveProfileDispatch(input, env = process.env) {
-  const profile = getProfile(input.profile);
+function resolveProfileDispatch(input, env = process.env, registry2 = DISPATCH_PROFILES) {
+  const profile = registry2.find((p) => p.id === input.profile);
+  if (!profile) throw new Error(`unknown profile '${input.profile}' for this adapter`);
   if (profile.isolation === "forbidden" && input.worktree !== void 0) {
     throw new Error(`profile '${profile.id}' runs in place and does not take a worktree`);
   }
@@ -30690,7 +30704,7 @@ function resolveProfileDispatch(input, env = process.env) {
         throw new Error(`profile '${profile.id}' requires an explicit model id`);
       }
       model = input.model.trim();
-      if (!profile.readOnly && profile.supervision !== "sonnet" && isGlmModel(model)) {
+      if (!profile.readOnly && profile.supervision === "none" && isGlmModel(model)) {
         throw new Error(
           `profile '${profile.id}' cannot run a GLM write; GLM writes are supervised and belong to profile 'oc-glm-write'`
         );
@@ -34749,6 +34763,12 @@ ${prompt}`;
         `run '${id}' was not started from a supervised profile, so it takes no correction turn (only the supervised shape accepts one \u2014 see profiles.ts supervision)`
       );
     }
+    if (run.continuationLimit !== void 0 && run.turnsCount >= 1 + run.continuationLimit) {
+      throw new Error("follow-up limit reached; inspect the artifacts and report remaining work to the dispatcher");
+    }
+    if (run.continuationLimit !== void 0 && run.idleMs() >= this.host.sessionTtlMs) {
+      throw new Error("session correction window expired; do not silently redispatch");
+    }
     if (run.sessionClosed) throw new Error(`session for '${id}' is already closed`);
     const conn = this.host.getConnection(id);
     if (!conn) {
@@ -34838,7 +34858,7 @@ function validateDispatchParams(params, minted, host) {
   if (!readOnly && !LANES_WITH_PINNED_WRITE_MODEL.has(params.lane) && !params.model?.trim()) {
     throw new Error(`an explicit model is required for write lane '${params.lane}'`);
   }
-  if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew" && minted.supervision !== "sonnet") {
+  if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew" && minted.supervision === "none") {
     throw new Error(
       "direct GLM write is prohibited; use profile='kimi-crew' for the OpenCode crew, or the supervised 'oc-glm-write' dispatch profile for a GLM write under Sonnet supervision"
     );
@@ -34870,6 +34890,7 @@ var FOREIGN_POLL_MS = 250;
 var DEFAULT_SESSION_TTL_MS = envInt2("CLANKER_SESSION_TTL_MS", 6e5);
 var LaneManager = class {
   host;
+  dispatchProfiles;
   runs = /* @__PURE__ */ new Map();
   connections = /* @__PURE__ */ new Map();
   resolveSpec;
@@ -34901,6 +34922,8 @@ var LaneManager = class {
   counter = 0;
   constructor(opts = {}) {
     this.host = opts.host ?? "standalone";
+    if (opts.codexDirect && this.host !== "codex") throw new Error("codexDirect requires host=codex");
+    this.dispatchProfiles = opts.codexDirect ? CODEX_MANAGED_PROFILES : DISPATCH_PROFILES;
     this.resolveSpec = opts.resolveSpec ?? buildSpawnSpec;
     this.stallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
     this.sessionTtlMs = opts.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
@@ -34984,7 +35007,10 @@ var LaneManager = class {
    * supervision come from the registry row, which the caller cannot reach.
    */
   async dispatchProfile(input) {
-    const resolved = resolveProfileDispatch(input);
+    const resolved = resolveProfileDispatch(input, process.env, this.dispatchProfiles);
+    if (resolved.supervision === "dispatcher" && this.host === "claude") {
+      throw new Error("dispatcher-managed profiles are for Codex; Claude uses its existing relay profiles");
+    }
     return this.dispatchStartInternal(
       {
         lane: resolved.lane,
@@ -35126,7 +35152,8 @@ ${params.prompt}`;
       requestOpts,
       initialPrompt: lanePrompt,
       turnTimeoutMs: minted.turnTimeoutMs,
-      supervised: minted.supervision === "sonnet",
+      supervised: minted.supervision !== "none",
+      continuationLimit: minted.supervision === "dispatcher" ? 1 : void 0,
       issueRef,
       ghRunner: this.ghRunner,
       // The DISPATCH PROFILE id (`codex-review`), not the OpenCode agent
@@ -35246,10 +35273,22 @@ ${params.prompt}`;
     }
     return result;
   }
+  continuationState(run) {
+    if (run.continuationLimit === void 0) return void 0;
+    const remaining = Math.max(0, 1 + run.continuationLimit - run.turnsCount);
+    const reason = this.shuttingDown || this.closing.has(run.id) ? "closing" : run.sessionClosed || !this.connections.has(run.id) ? "session_closed" : run.turnStatus === "running" ? "turn_running" : this.turnDriver.hasDrive(run.id) ? "turn_finishing" : remaining === 0 ? "follow_up_limit" : run.idleMs() >= this.sessionTtlMs ? "expired" : void 0;
+    return {
+      can_prompt: reason === void 0,
+      reason: reason ?? null,
+      follow_ups_remaining: remaining,
+      expires_at: run.turnStatus !== "running" && !run.sessionClosed ? new Date(Date.now() + Math.max(0, this.sessionTtlMs - run.idleMs())).toISOString() : null
+    };
+  }
   buildWaitResult(run) {
     const status = run.turnStatus;
     const telemetry = run.telemetry();
     const result = {
+      continuation: this.continuationState(run),
       id: run.id,
       lane: run.lane,
       status,
@@ -35304,7 +35343,7 @@ ${params.prompt}`;
       view.error = annotatedError(run.error, run.failureClass);
       if (run.failureClass) view.failure_class = run.failureClass;
     }
-    return view;
+    return { ...view, continuation: this.continuationState(run) };
   }
   /**
    * Reject an id this process does not hold — telling the caller WHICH kind of
@@ -35648,6 +35687,49 @@ ${params.prompt}`;
   }
 };
 
+// src/model-catalog.ts
+import { execFile as execFile3 } from "node:child_process";
+import { promisify as promisify2 } from "node:util";
+var execute = promisify2(execFile3);
+async function openCodeModels() {
+  const { stdout } = await execute("opencode", ["models", "--pure"], {
+    timeout: 3e4,
+    maxBuffer: 1048576,
+    encoding: "utf8"
+  });
+  const models = [...new Set(stdout.split(/\r?\n/).map((s) => s.trim()).filter((s) => /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_./:-]+$/.test(s)))].sort();
+  if (!models.length) throw new Error("OpenCode returned no model identifiers");
+  return models;
+}
+function registerModelCatalog(server) {
+  server.registerTool("clanker_models", {
+    title: "List OpenCode model routes",
+    description: "Discover provider/model IDs, including configured DGX or other self-hosted providers. Lists configuration, not endpoint health or remaining credits. Never starts inference. Use the exact returned ID with oc-managed-review or oc-managed-write.",
+    inputSchema: {
+      provider: external_exports.string().regex(/^[a-zA-Z0-9_.-]+$/).optional(),
+      offset: external_exports.number().int().min(0).default(0),
+      limit: external_exports.number().int().min(1).max(200).default(100)
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }, async ({ provider, offset, limit }) => {
+    try {
+      const all = (await openCodeModels()).filter((id) => !provider || id.startsWith(`${provider}/`));
+      const result = {
+        models: all.slice(offset, offset + limit),
+        total: all.length,
+        next_offset: offset + limit < all.length ? offset + limit : null,
+        availability: "configured_only"
+      };
+      return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+    } catch {
+      return { isError: true, content: [{
+        type: "text",
+        text: "CLANKER-MODEL-CATALOG: OpenCode model discovery failed or timed out. Check the local opencode CLI; no inference was started."
+      }] };
+    }
+  });
+}
+
 // src/tools.ts
 var laneEnum = external_exports.enum(LANE_NAMES);
 var promptField = external_exports.string().trim().min(1).describe("The task/prompt to send to the worker");
@@ -35708,9 +35790,10 @@ function progressSender(extra) {
 }
 function profilesForHost(manager) {
   const host = manager.host ?? "standalone";
-  return DISPATCH_PROFILES.filter((profile) => {
+  return (manager.dispatchProfiles ?? DISPATCH_PROFILES).filter((profile) => {
     if (hostLaneBlockedReason(host, profile.lane)) return false;
     if (profile.supervision === "sonnet" && host === "codex") return false;
+    if (profile.supervision === "dispatcher" && host === "claude") return false;
     return true;
   });
 }
@@ -35781,7 +35864,7 @@ function registerTools(server, manager) {
   });
   server.registerTool("clanker_prompt", {
     title: "Send a correction turn to a Clanker job",
-    description: "Run another turn on a job that already came back terminal. This is turn-by-turn supervision, not mid-flight steering: issue it only after the previous turn has come back terminal, then poll the same id with clanker_wait. Two shapes, chosen by the job's lane: a supervised job continues its still-open session (refused once the idle-TTL reaper closed it, or if the profile was not supervised); a cursor job is re-spawned against the conversation Cursor itself holds, which stays correctable after the session closed and accepts an optional `model` so the next turn runs on another model. Either way the run keeps its id, its worktree and its single ledger row, and result.md is rewritten with the corrected turn's verdict. A hand-off is CONTINUATION, never review: the resumed model reads the previous turn's whole context and is anchored by it, so verification still requires a separately dispatched cold-context job.",
+    description: "Managed OpenCode profiles allow one follow-up: check continuation.can_prompt in wait/status first. A turn_finishing reason means terminal bookkeeping is still settling; query status again. Run another turn on a job that already came back terminal. This is turn-by-turn supervision, not mid-flight steering: issue it only after the previous turn has come back terminal, then poll the same id with clanker_wait. Two shapes, chosen by the job's lane: a supervised job continues its still-open session (refused once the idle-TTL reaper closed it, or if the profile was not supervised); a cursor job is re-spawned against the conversation Cursor itself holds, which stays correctable after the session closed and accepts an optional `model` so the next turn runs on another model. Either way the run keeps its id, its worktree and its single ledger row, and result.md is rewritten with the corrected turn's verdict. A hand-off is CONTINUATION, never review: the resumed model reads the previous turn's whole context and is anchored by it, so verification still requires a separately dispatched cold-context job.",
     inputSchema: {
       id: external_exports.string(),
       prompt: external_exports.string().min(1),
@@ -35907,8 +35990,10 @@ function formatSweepReport(report) {
 async function main() {
   const host = parseHostArgs(process.argv.slice(2));
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-  const manager = new LaneManager({ host });
+  const codexDirect = process.argv.includes("--codex-direct");
+  const manager = new LaneManager({ host, codexDirect });
   registerTools(server, manager);
+  if (codexDirect) registerModelCatalog(server);
   const shutdown = async () => {
     try {
       await manager.shutdown();

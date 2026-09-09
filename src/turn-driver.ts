@@ -498,6 +498,12 @@ export class TurnDriver {
           `(only the supervised shape accepts one — see profiles.ts supervision)`,
       );
     }
+    if (run.continuationLimit !== undefined && run.turnsCount >= 1 + run.continuationLimit) {
+      throw new Error("follow-up limit reached; inspect the artifacts and report remaining work to the dispatcher");
+    }
+    if (run.continuationLimit !== undefined && run.idleMs() >= this.host.sessionTtlMs) {
+      throw new Error("session correction window expired; do not silently redispatch");
+    }
     if (run.sessionClosed) throw new Error(`session for '${id}' is already closed`);
     const conn = this.host.getConnection(id);
     if (!conn) {

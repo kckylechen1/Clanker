@@ -54,10 +54,13 @@ export const CAPACITY_RETRY_BACKOFF_MS = envInt("CLANKER_CAPACITY_RETRY_BACKOFF_
 /** Experimental: project ACP plan progress as MCP notifications/progress. */
 export const PROGRESS_EXPERIMENTAL = process.env.CLANKER_PROGRESS_EXPERIMENTAL === "1";
 
+/** The personal Codex adapter must not sweep or control legacy Clanker artifacts. */
+const CACHE_NAMESPACE = process.argv.includes("--codex-direct") ? "clanker-codex" : "clanker";
+
 /** Root under which run artifacts (events.jsonl, chunks.log) are written. */
 export const RUNS_ROOT =
   process.env.CLANKER_RUNS_ROOT ??
-  path.join(os.homedir(), ".cache", "clanker", "runs");
+  path.join(os.homedir(), ".cache", CACHE_NAMESPACE, "runs");
 
 /**
  * Age after which a run's cold forensic streams are reclaimed (see
@@ -70,7 +73,7 @@ export const RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 86_4
 /** Root under which server-managed git worktrees are created. */
 export const WORKTREES_ROOT =
   process.env.CLANKER_WORKTREES_ROOT ??
-  path.join(os.homedir(), ".cache", "clanker", "worktrees");
+  path.join(os.homedir(), ".cache", CACHE_NAMESPACE, "worktrees");
 
 /**
  * Host git repository the MCP server was launched from. Defaults to the

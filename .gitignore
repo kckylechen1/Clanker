@@ -25,3 +25,11 @@ codex-plugin/dist/*
 
 # Isolated agent worktrees (another seat may be working in one right now)
 .claude/worktrees/
+
+clanker-codex/dist/
+!clanker-codex/dist/
+clanker-codex/dist/*
+!clanker-codex/dist/clanker-mcp.mjs
+!clanker-codex/dist/codex-acp.mjs
+!clanker-codex/dist/gemini-acp.mjs
+!clanker-codex/dist/cursor-acp.mjs

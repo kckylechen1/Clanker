@@ -11,6 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SERVER_NAME, SERVER_VERSION } from "./constants.js";
 import { LaneManager } from "./manager.js";
+import { registerModelCatalog } from "./model-catalog.js";
 import { registerTools } from "./tools.js";
 import { parseHostArgs } from "./host.js";
 import { formatSweepReport, sweepRunStreams } from "./retention.js";
@@ -18,8 +19,10 @@ import { formatSweepReport, sweepRunStreams } from "./retention.js";
 async function main(): Promise<void> {
   const host = parseHostArgs(process.argv.slice(2));
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-  const manager = new LaneManager({ host });
+  const codexDirect = process.argv.includes("--codex-direct");
+  const manager = new LaneManager({ host, codexDirect });
   registerTools(server, manager);
+  if (codexDirect) registerModelCatalog(server);
 
   const shutdown = async () => {
     try {

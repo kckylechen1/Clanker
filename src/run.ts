@@ -169,6 +169,7 @@ export class LaneRun {
    * steering an unsupervised worker.
    */
   readonly supervised: boolean;
+  readonly continuationLimit?: number;
   /**
    * The ticket this dispatch is being run for (#27), already parsed and
    * validated at dispatch time. Undefined means the dispatcher kept no account
@@ -300,6 +301,7 @@ export class LaneRun {
     turnTimeoutMs?: number;
     /** True only for the supervised profile shape; gates correction turns. */
     supervised?: boolean;
+    continuationLimit?: number;
     /** Parsed ticket reference (#27); absent means no issue bookkeeping at all. */
     issueRef?: IssueRef;
     /** Dispatch-profile id, minted only by the profile entrance. */
@@ -323,6 +325,7 @@ export class LaneRun {
     this.initialPrompt = init.initialPrompt ?? "";
     this.turnTimeoutMs = init.turnTimeoutMs;
     this.supervised = init.supervised ?? false;
+    this.continuationLimit = init.continuationLimit;
     this.issueRef = init.issueRef;
     this.profileId = init.profileId;
     this.ghRunner = init.ghRunner;

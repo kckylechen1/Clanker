@@ -74,3 +74,9 @@ npm run build
 npm test
 npm run bundle
 ```
+
+## Codex direct-worker plugin
+
+`clanker-codex/` is a separate personal Codex plugin. Its startup flag `--codex-direct` selects a separate Codex-only registry with `oc-managed-review` and `oc-managed-write`, plus `clanker_models`. Both managed profiles accept an explicit OpenCode provider/model, retain a live session for one follow-up, and report continuation availability and expiry. The write profile supports GLM without requiring a Sonnet relay; model-derived Vault authentication and mandatory worktree isolation still apply. Existing adapters omit this flag and retain their original profile registry and tool surface.
+
+Self-hosted inference, including two separate DGX endpoints, uses ordinary OpenCode custom providers. See [the Codex plugin guide](clanker-codex/README.md). The worker's filesystem and tools remain local. This does not deploy models or make cross-process worker control recoverable.

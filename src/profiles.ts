@@ -52,7 +52,7 @@ export type ProfileSandboxPolicy =
   | { readonly kind: "caller"; readonly defaultMode: CodexSandboxMode };
 
 /** `sonnet` marks the supervised-GLM shape: the seat holding it is a Sonnet supervisor with correction/cancel rights. */
-export type ProfileSupervision = "none" | "sonnet";
+export type ProfileSupervision = "none" | "sonnet" | "dispatcher";
 
 export type ProfileRoleClass = "scout" | "reviewer" | "implementer";
 
@@ -154,6 +154,26 @@ const CURSOR_ROUTING_NOTE =
   "#1368) — provenance and identity-critical cores still require a cross-vendor screen, so do not route " +
   "those here. Model is a free parameter: the same Cursor subscription also serves cursor-grok-4.5-high " +
   "(alias `grok`) and gpt-5.3-codex-high (alias `codex53`).";
+
+/** Explicit Codex-direct adapter extension; legacy relay registry stays unchanged. */
+export const CODEX_MANAGED_PROFILES: readonly DispatchProfile[] =
+  ([true, false] as const).map((readOnly): DispatchProfile => ({
+    id: readOnly ? "oc-managed-review" : "oc-managed-write",
+    title: readOnly ? "Dispatcher-managed OpenCode review" : "Dispatcher-managed OpenCode implementation",
+    description: "Codex directly owns this OpenCode worker. Explicit provider/model required, including custom local providers. " +
+      "One follow-up turn is allowed in the same live session; inspect actual artifacts before accepting. " +
+      (readOnly ? "Read-only; optional isolated worktree." : "Writes require an isolated managed worktree; GLM is allowed without a Sonnet relay."),
+    lane: "opencode",
+    model: { kind: "caller-required" },
+    readOnly,
+    isolation: readOnly ? "optional" : "required",
+    secrets: [],
+    turnTimeoutMs: TURN_TIMEOUT_MS,
+    supervision: "dispatcher",
+    roleClass: readOnly ? "reviewer" : "implementer",
+    ocProfile: "worker",
+    status: "active",
+  }));
 
 export const DISPATCH_PROFILES: readonly DispatchProfile[] = [
   {
@@ -521,8 +541,10 @@ export interface ResolvedProfileDispatch {
 export function resolveProfileDispatch(
   input: ProfileDispatchInput,
   env: Record<string, string | undefined> = process.env,
+  registry: readonly DispatchProfile[] = DISPATCH_PROFILES,
 ): ResolvedProfileDispatch {
-  const profile = getProfile(input.profile);
+  const profile = registry.find(p => p.id === input.profile);
+  if (!profile) throw new Error(`unknown profile '${input.profile}' for this adapter`);
 
   if (profile.isolation === "forbidden" && input.worktree !== undefined) {
     throw new Error(`profile '${profile.id}' runs in place and does not take a worktree`);
@@ -591,7 +613,7 @@ export function resolveProfileDispatch(
       // manager ever saw them (tools.ts clanker_dispatch_write_start), so the
       // caller got a routing answer rather than a policy error. The manager's
       // own gate stays authoritative underneath.
-      if (!profile.readOnly && profile.supervision !== "sonnet" && isGlmModel(model)) {
+      if (!profile.readOnly && profile.supervision === "none" && isGlmModel(model)) {
         throw new Error(
           `profile '${profile.id}' cannot run a GLM write; GLM writes are supervised and belong to profile 'oc-glm-write'`,
         );
