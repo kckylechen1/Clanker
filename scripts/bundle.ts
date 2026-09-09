@@ -63,7 +63,7 @@ export const BUNDLES: readonly Bundle[] = [
 ];
 
 /** Every plugin adapter that ships a copy of the artifacts. */
-export const PLUGIN_DIST_DIRS: readonly string[] = ["plugin/dist", "codex-plugin/dist"];
+export const PLUGIN_DIST_DIRS: readonly string[] = ["plugin/dist", "codex-plugin/dist", "clanker-codex/dist"];
 
 /**
  * Builds one artifact to `outfile`.

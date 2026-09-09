@@ -155,9 +155,10 @@ function progressSender(extra: unknown): ((r: WaitResult) => void) | undefined {
  */
 export function profilesForHost(manager: LaneManager): DispatchProfile[] {
   const host = manager.host ?? "standalone";
-  return DISPATCH_PROFILES.filter((profile) => {
+  return (manager.dispatchProfiles ?? DISPATCH_PROFILES).filter((profile) => {
     if (hostLaneBlockedReason(host, profile.lane)) return false;
     if (profile.supervision === "sonnet" && host === "codex") return false;
+    if (profile.supervision === "dispatcher" && host === "claude") return false;
     return true;
   });
 }

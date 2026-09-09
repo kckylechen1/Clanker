@@ -1,0 +1,26 @@
+{
+  "name": "clanker-codex",
+  "version": "0.1.0",
+  "description": "Codex-owned external coding workers through Clanker and OpenCode, including self-hosted model providers.",
+  "author": {
+    "name": "kckylechen1"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Clanker for Codex",
+    "shortDescription": "Use cloud and self-hosted models as external workers",
+    "longDescription": "Codex dispatches isolated OpenCode workers, inspects their artifacts, and can send one follow-up turn without a Sonnet relay. Configure future DGX inference endpoints in OpenCode.",
+    "developerName": "kckylechen1",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "List my available external model routes.",
+      "Dispatch a bounded task through Clanker."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

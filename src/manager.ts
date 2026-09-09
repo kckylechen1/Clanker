@@ -42,7 +42,7 @@ import {
   type ForeignRun,
 } from "./foreign.js";
 import { parseIssueRef, type GhRunner, type IssueRef } from "./issue-comment.js";
-import { resolveProfileDispatch, type ProfileDispatchInput } from "./profiles.js";
+import { DISPATCH_PROFILES, CODEX_MANAGED_PROFILES, type DispatchProfile, resolveProfileDispatch, type ProfileDispatchInput } from "./profiles.js";
 import { LaneRun } from "./run.js";
 import type {
   LaneName,
@@ -129,7 +129,7 @@ export interface DispatchParams extends Omit<LaneRequestOptions, "secrets"> {
  * gate (reproduced by cold review on 4a8a718).
  */
 interface MintedCapabilities {
-  supervision: "none" | "sonnet";
+  supervision: "none" | "sonnet" | "dispatcher";
   /** Per-profile hard turn ceiling; undefined falls back to the global TURN_TIMEOUT_MS. */
   turnTimeoutMs?: number;
   /** Vault-sourced env vars the profile declares. */
@@ -211,7 +211,7 @@ function validateDispatchParams(
   // reachable from any tool schema) is that same key. The kimi-crew escape
   // stays because 0.3.x callers were told to use it, but it is NOT the GLM
   // path: kimi-crew welds model=kimi and runs a different model entirely.
-  if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew" && minted.supervision !== "sonnet") {
+  if (!readOnly && isGlmModel(params.model) && profile !== "kimi-crew" && minted.supervision === "none") {
     throw new Error(
       "direct GLM write is prohibited; use profile='kimi-crew' for the OpenCode crew, " +
         "or the supervised 'oc-glm-write' dispatch profile for a GLM write under Sonnet supervision",
@@ -309,6 +309,7 @@ function writeTelemetryStub(runDir: string, stub: TelemetryStub): void {
 const FOREIGN_POLL_MS = 250;
 
 export interface WaitResult {
+  continuation?: { can_prompt: boolean; reason: string | null; follow_ups_remaining: number; expires_at: string | null };
   id: string;
   /**
    * Widened past `LaneName` for the degraded foreign path only (#32): a run
@@ -439,6 +440,8 @@ export interface LaneListEntry {
 export type SpecResolver = (lane: LaneName, opts: LaneRequestOptions, runDir: string) => SpawnSpec;
 
 export interface LaneManagerOptions {
+  /** Trusted startup configuration, never a tool argument. */
+  codexDirect?: boolean;
   host?: ClankerHost;
   resolveSpec?: SpecResolver;
   stallThresholdMs?: number;
@@ -471,6 +474,7 @@ const DEFAULT_SESSION_TTL_MS = envInt("CLANKER_SESSION_TTL_MS", 600_000);
 
 export class LaneManager {
   readonly host: ClankerHost;
+  readonly dispatchProfiles: readonly DispatchProfile[];
   private readonly runs = new Map<string, LaneRun>();
   private readonly connections = new Map<string, LaneConnection>();
   private readonly resolveSpec: SpecResolver;
@@ -503,6 +507,8 @@ export class LaneManager {
 
   constructor(opts: LaneManagerOptions = {}) {
     this.host = opts.host ?? "standalone";
+    if (opts.codexDirect && this.host !== "codex") throw new Error("codexDirect requires host=codex");
+    this.dispatchProfiles = opts.codexDirect ? [...DISPATCH_PROFILES, ...CODEX_MANAGED_PROFILES] : DISPATCH_PROFILES;
     this.resolveSpec = opts.resolveSpec ?? buildSpawnSpec;
     this.stallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
     this.sessionTtlMs = opts.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
@@ -590,7 +596,10 @@ export class LaneManager {
    * supervision come from the registry row, which the caller cannot reach.
    */
   async dispatchProfile(input: ProfileDispatchInput): Promise<{ id: string; warnings: string[] }> {
-    const resolved = resolveProfileDispatch(input);
+    const resolved = resolveProfileDispatch(input, process.env, this.dispatchProfiles);
+    if (resolved.supervision === "dispatcher" && this.host === "claude") {
+      throw new Error("dispatcher-managed profiles are for Codex; Claude uses its existing relay profiles");
+    }
     return this.dispatchStartInternal(
       {
         lane: resolved.lane,
@@ -829,7 +838,8 @@ export class LaneManager {
       requestOpts,
       initialPrompt: lanePrompt,
       turnTimeoutMs: minted.turnTimeoutMs,
-      supervised: minted.supervision === "sonnet",
+      supervised: minted.supervision !== "none",
+      continuationLimit: minted.supervision === "dispatcher" ? 1 : undefined,
       issueRef,
       ghRunner: this.ghRunner,
       // The DISPATCH PROFILE id (`codex-review`), not the OpenCode agent
@@ -986,10 +996,28 @@ export class LaneManager {
     return result;
   }
 
+  private continuationState(run: LaneRun) {
+    if (run.continuationLimit === undefined) return undefined;
+    const remaining = Math.max(0, 1 + run.continuationLimit - run.turnsCount);
+    const reason = this.shuttingDown || this.closing.has(run.id) ? "closing"
+      : run.sessionClosed || !this.connections.has(run.id) ? "session_closed"
+      : run.turnStatus === "running" ? "turn_running"
+      : remaining === 0 ? "follow_up_limit"
+      : run.idleMs() >= this.sessionTtlMs ? "expired" : undefined;
+    return {
+      can_prompt: reason === undefined,
+      reason: reason ?? null,
+      follow_ups_remaining: remaining,
+      expires_at: run.turnStatus !== "running" && !run.sessionClosed
+        ? new Date(Date.now() + Math.max(0, this.sessionTtlMs - run.idleMs())).toISOString() : null,
+    };
+  }
+
   private buildWaitResult(run: LaneRun): WaitResult {
     const status = run.turnStatus;
     const telemetry = run.telemetry();
     const result: WaitResult = {
+      continuation: this.continuationState(run),
       id: run.id,
       lane: run.lane,
       status,
@@ -1032,7 +1060,7 @@ export class LaneManager {
 
   // ---- cheap queries ------------------------------------------------------
 
-  status(id: string): LaneStatusView {
+  status(id: string): LaneStatusView & { continuation?: ReturnType<LaneManager["continuationState"]> } {
     const run = this.runs.get(id);
     if (!run) this.throwUnknownRun(id);
     const view: LaneStatusView = {
@@ -1054,7 +1082,7 @@ export class LaneManager {
       view.error = annotatedError(run.error, run.failureClass);
       if (run.failureClass) view.failure_class = run.failureClass;
     }
-    return view;
+    return { ...view, continuation: this.continuationState(run) };
   }
 
   /**
