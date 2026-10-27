@@ -66,7 +66,7 @@ test("each generated tool exposes only its own profile's free parameters", () =>
   // model were one policy, and no entrance to Codex's other models existed.
   // Optional, not required: profiles.test.ts pins that distinction against
   // oc-review's required one, and units.test.ts pins that omitting it still
-  // runs the same gpt-5.5.
+  // runs the same pinned default.
   assert.deepEqual(Object.keys(tools.get("clanker_start_codex-review")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "model", "effort", "issue"]);
   // Write codex: adds a caller-selectable sandbox, and worktree is mandatory.
   assert.deepEqual(Object.keys(tools.get("clanker_start_codex-write")!.config.inputSchema), ["prompt", "cwd", "worktree", "base", "doNotTouch", "model", "sandbox", "effort", "issue"]);
