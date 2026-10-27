@@ -517,7 +517,7 @@ test("codex lane defaults model/effort in CODEX_CONFIG when no override is given
   // Asserted against the Captain-pinned literals, not the imported constant —
   // comparing against the constant it was pulled from would make this
   // tautological (it would still pass if DEFAULT_CODEX_MODEL itself drifted).
-  assert.equal(cfg.model, "gpt-5.5", "omitting model must NOT fall back to ~/.codex/config.toml");
+  assert.equal(cfg.model, "gpt-6-astra", "omitting model must NOT fall back to ~/.codex/config.toml");
   assert.equal(cfg.model_reasoning_effort, "xhigh");
 });
 
