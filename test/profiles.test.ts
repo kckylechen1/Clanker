@@ -362,7 +362,7 @@ test("#53: omitting model on the codex pair still lands on the pinned default, u
     // Captain-pinned literals, not the imported constant (same anti-tautology
     // rule as units.test.ts): comparing against DEFAULT_CODEX_MODEL would stay
     // green if the constant itself drifted.
-    assert.equal(cfg.model, "gpt-5.5", `${input.profile}: omitting model must NOT change what runs`);
+    assert.equal(cfg.model, "gpt-6-astra", `${input.profile}: omitting model must NOT change what runs`);
     assert.equal(cfg.model_reasoning_effort, "xhigh", `${input.profile}: effort must be untouched by the model change`);
   }
 });

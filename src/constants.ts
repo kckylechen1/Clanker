@@ -98,7 +98,7 @@ export const SERVER_VERSION = "0.4.7";
  * if the model it names can drift underneath it. Same shape as the gemini
  * lane's `|| "gemini-3.6-flash-high"` default in backends.ts.
  */
-export const DEFAULT_CODEX_MODEL = "gpt-5.5";
+export const DEFAULT_CODEX_MODEL = "gpt-6-astra";
 export const DEFAULT_CODEX_EFFORT = "xhigh";
 
 /**

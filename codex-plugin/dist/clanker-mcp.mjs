@@ -27784,7 +27784,7 @@ var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
 var SERVER_VERSION = "0.4.7";
-var DEFAULT_CODEX_MODEL = "gpt-5.5";
+var DEFAULT_CODEX_MODEL = "gpt-6-astra";
 var DEFAULT_CODEX_EFFORT = "xhigh";
 var WRITE_DISCIPLINE_PREFIX = `Workspace discipline, enforced by the dispatching contract \u2014 these override any
 convenience you would otherwise prefer:
