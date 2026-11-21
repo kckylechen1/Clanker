@@ -84,7 +84,7 @@ export const WORKTREES_ROOT =
 export const BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 
 export const SERVER_NAME = "clanker-mcp-server";
-export const SERVER_VERSION = "0.4.8";
+export const SERVER_VERSION = "0.4.9";
 
 /**
  * Load-bearing default: without an explicit override, the codex lane must
@@ -98,7 +98,7 @@ export const SERVER_VERSION = "0.4.8";
  * if the model it names can drift underneath it. Same shape as the gemini
  * lane's `|| "gemini-3.6-flash-high"` default in backends.ts.
  */
-export const DEFAULT_CODEX_MODEL = "gpt-6-astra";
+export const DEFAULT_CODEX_MODEL = "gpt-6.2-astra";
 export const DEFAULT_CODEX_EFFORT = "xhigh";
 
 /**
