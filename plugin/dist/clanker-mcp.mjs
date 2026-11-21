@@ -27783,7 +27783,7 @@ var RUN_STREAM_TTL_MS = envInt("CLANKER_RUN_STREAM_TTL_DAYS", 3) * 864e5;
 var WORKTREES_ROOT = process.env.CLANKER_WORKTREES_ROOT ?? path.join(os.homedir(), ".cache", "clanker", "worktrees");
 var BASE_REPO = process.env.CLANKER_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "clanker-mcp-server";
-var SERVER_VERSION = "0.4.9";
+var SERVER_VERSION = "0.4.10";
 var DEFAULT_CODEX_MODEL = "gpt-6.2-astra";
 var DEFAULT_CODEX_EFFORT = "xhigh";
 var WRITE_DISCIPLINE_PREFIX = `Workspace discipline, enforced by the dispatching contract \u2014 these override any
@@ -30297,6 +30297,56 @@ function matchDoNotTouch(patterns, files) {
   }
   return violations;
 }
+function listTargetDirs(worktreePath) {
+  const found = [];
+  const stack = [worktreePath];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    if (!dir) continue;
+    let entries;
+    try {
+      entries = fs8.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      if (!entry.isDirectory()) continue;
+      if (entry.name === ".git") continue;
+      const full = path8.join(dir, entry.name);
+      if (entry.name === "target") found.push(full);
+      else stack.push(full);
+    }
+  }
+  return found;
+}
+async function isWhollyIgnored(worktreePath, rel) {
+  try {
+    await git(worktreePath, ["check-ignore", "-q", "--", rel]);
+  } catch {
+    return false;
+  }
+  try {
+    const tracked = await git(worktreePath, ["ls-files", "-z", "--", rel]);
+    return tracked.length === 0;
+  } catch {
+    return false;
+  }
+}
+async function dropIgnoredTargets(worktreePath) {
+  for (const abs of listTargetDirs(worktreePath)) {
+    const rel = path8.relative(worktreePath, abs);
+    if (!rel || rel.startsWith("..") || path8.isAbsolute(rel)) continue;
+    try {
+      if (!await isWhollyIgnored(worktreePath, rel)) continue;
+      fs8.rmSync(abs, { recursive: true, force: true });
+    } catch (err) {
+      console.error(
+        `[clanker] keeping build dir '${abs}': ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+}
 async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runId) {
   if (fs8.existsSync(worktreePath)) {
     const owner = readWorktreeOwner(worktreePath);
@@ -30307,13 +30357,17 @@ async function removeIfClean(worktreePath, targetRepo = BASE_REPO, baseSha, runI
       return false;
     }
   }
+  const retain = async () => {
+    await dropIgnoredTargets(worktreePath);
+    return false;
+  };
   const changes = await changedFiles(worktreePath);
-  if (changes.length > 0) return false;
+  if (changes.length > 0) return retain();
   try {
     const ahead = (await git(worktreePath, ["rev-list", "--count", "@{upstream}..HEAD"])).trim();
-    if (ahead !== "0") return false;
+    if (ahead !== "0") return retain();
   } catch {
-    if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return false;
+    if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return retain();
   }
   const markerPath = path8.join(worktreePath, OWNER_MARKER);
   const marker = (() => {
