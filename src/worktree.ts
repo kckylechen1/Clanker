@@ -479,73 +479,60 @@ export function matchDoNotTouch(
  * it lives here, keyed on a fact that survives on disk.
  */
 /**
- * Directories named `target` under `worktreePath`, not descending into a
- * `target` once found and not following symlinks. Build output lives there;
- * walking into it is how a sweep spends minutes stating gigabytes it is about
- * to delete.
+ * Build-output directory names a retained worktree may shed. Only names whose
+ * contents are pure, regenerable build output belong here (`node_modules` and
+ * virtualenvs are not: they cost a network install to get back).
  */
-function listTargetDirs(worktreePath: string): string[] {
-  const found: string[] = [];
-  const stack = [worktreePath];
-  while (stack.length > 0) {
-    const dir = stack.pop();
-    if (!dir) continue;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (entry.isSymbolicLink()) continue;
-      if (!entry.isDirectory()) continue;
-      if (entry.name === ".git") continue;
-      const full = path.join(dir, entry.name);
-      if (entry.name === "target") found.push(full);
-      else stack.push(full);
-    }
-  }
-  return found;
+const RECLAIMABLE_BUILD_DIRS = new Set(["target"]);
+
+/**
+ * Reclaimable build dirs in `worktreePath`, as git itself reports them.
+ * `ls-files --others --ignored --exclude-standard --directory` collapses every
+ * directory that is ignored and holds no tracked file into one `dir/` entry,
+ * in a single pass that git already optimizes. So an entry named `target/`
+ * contains nothing but ignored, untracked files. A `target` dir holding any
+ * tracked file never appears as a directory (only its ignored children do),
+ * and a new, unignored `target` dir never appears at all.
+ */
+async function listReclaimableBuildDirs(worktreePath: string): Promise<string[]> {
+  const out = await git(worktreePath, [
+    "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z",
+  ]);
+  return out
+    .split("\0")
+    .filter((entry) => entry.endsWith("/"))
+    .map((entry) => entry.slice(0, -1))
+    .filter((rel) => rel !== "" && !rel.split("/").includes("..") && RECLAIMABLE_BUILD_DIRS.has(path.posix.basename(rel)));
 }
 
 /**
- * True only when git ignores `rel` AND no tracked file sits under it. A
- * `target` directory that holds even one tracked file is source, not build
- * output, and is never deleted.
+ * A worktree that has to be RETAINED (uncommitted or unshipped work) does not
+ * need its build output. Rust `target/` dirs reach gigabytes per tree, and
+ * retained trees accumulate; drop the reclaimable ones so a kept tree keeps
+ * only what someone could still want. Best effort: a listing or removal
+ * failure keeps the dir and is reported, never thrown.
  */
-async function isWhollyIgnored(worktreePath: string, rel: string): Promise<boolean> {
+async function dropReclaimableBuildDirs(worktreePath: string): Promise<void> {
+  let dirs: string[];
   try {
-    await git(worktreePath, ["check-ignore", "-q", "--", rel]);
-  } catch {
-    return false;
+    dirs = await listReclaimableBuildDirs(worktreePath);
+  } catch (err) {
+    console.error(`[clanker] keeping build dirs in '${worktreePath}': ${err instanceof Error ? err.message : String(err)}`);
+    return;
   }
-  try {
-    const tracked = await git(worktreePath, ["ls-files", "-z", "--", rel]);
-    return tracked.length === 0;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * A worktree that has to be RETAINED (uncommitted or unshipped work) still
- * does not need its build output. Rust `target/` dirs reach gigabytes per
- * tree, and retained trees pile up; drop the ones git wholly ignores so a
- * kept tree keeps only what someone could still want. Best effort: a dir
- * that cannot be checked or removed is kept and reported.
- */
-async function dropIgnoredTargets(worktreePath: string): Promise<void> {
-  for (const abs of listTargetDirs(worktreePath)) {
-    const rel = path.relative(worktreePath, abs);
-    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue;
+  let dropped = 0;
+  for (const rel of dirs) {
+    const abs = path.join(worktreePath, rel);
     try {
-      if (!(await isWhollyIgnored(worktreePath, rel))) continue;
+      if (fs.lstatSync(abs).isSymbolicLink()) continue;
       fs.rmSync(abs, { recursive: true, force: true });
+      dropped++;
     } catch (err) {
-      console.error(
-        `[clanker] keeping build dir '${abs}': ${err instanceof Error ? err.message : String(err)}`,
-      );
+      console.error(`[clanker] keeping build dir '${abs}': ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+  if (dropped > 0) {
+    console.error(`[clanker] retained worktree '${worktreePath}': dropped ${dropped} ignored build dir(s)`);
   }
 }
 
@@ -572,9 +559,9 @@ export async function removeIfClean(
       return false;
     }
   }
-  // Retained trees still shed ignored build output (see dropIgnoredTargets).
+  // Retained trees still shed ignored build output (see dropReclaimableBuildDirs).
   const retain = async (): Promise<boolean> => {
-    await dropIgnoredTargets(worktreePath);
+    await dropReclaimableBuildDirs(worktreePath);
     return false;
   };
   const changes = await changedFiles(worktreePath);

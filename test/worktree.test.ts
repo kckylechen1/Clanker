@@ -166,7 +166,7 @@ function makeRepoWithTargets(): string {
   const base = path.join(root, "base");
   git(root, ["init", "--bare", "-b", "main", origin]);
   git(root, ["clone", origin, seed]);
-  fs.writeFileSync(path.join(seed, ".gitignore"), "target/\n");
+  fs.writeFileSync(path.join(seed, ".gitignore"), "/target/\ncrates/*/target/\nfixtures/target/\nnode_modules/\n");
   fs.mkdirSync(path.join(seed, "fixtures", "target"), { recursive: true });
   fs.writeFileSync(path.join(seed, "fixtures", "target", "golden.txt"), "tracked\n");
   git(seed, ["add", "."]);
@@ -188,6 +188,14 @@ test("a retained worktree sheds wholly-ignored target/ build dirs and keeps ever
     fs.mkdirSync(path.join(wtPath, dir), { recursive: true });
     fs.writeFileSync(path.join(wtPath, dir, "blob.bin"), "x".repeat(1024));
   }
+  // New source that happens to be named target/ is not ignored: never touched.
+  fs.mkdirSync(path.join(wtPath, "src", "target"), { recursive: true });
+  fs.writeFileSync(path.join(wtPath, "src", "target", "mod.rs"), "// new source\n");
+  // node_modules is ignored but is not reclaimable build output.
+  fs.mkdirSync(path.join(wtPath, "node_modules", "pkg"), { recursive: true });
+  fs.writeFileSync(path.join(wtPath, "node_modules", "pkg", "index.js"), "x\n");
+  // An ignored target dir that also holds a tracked file: ignored extras must stay too.
+  fs.writeFileSync(path.join(wtPath, "fixtures", "target", "scratch.bin"), "x\n");
   // Uncommitted work keeps the tree.
   fs.writeFileSync(path.join(wtPath, "work.txt"), "work\n");
   const cutSha = git(wtPath, ["rev-parse", "HEAD"]);
@@ -197,7 +205,11 @@ test("a retained worktree sheds wholly-ignored target/ build dirs and keeps ever
   assert.equal(fs.existsSync(path.join(wtPath, "crates", "a", "target")), false, "nested ignored target/ dropped");
   assert.equal(fs.readFileSync(path.join(wtPath, "fixtures", "target", "golden.txt"), "utf8"), "tracked\n",
     "a target dir holding a tracked file is source, never deleted");
+  assert.ok(fs.existsSync(path.join(wtPath, "fixtures", "target", "scratch.bin")), "that dir is not dropped piecemeal either");
   assert.equal(fs.readFileSync(path.join(wtPath, "work.txt"), "utf8"), "work\n", "the retained work is untouched");
+  assert.equal(fs.readFileSync(path.join(wtPath, "src", "target", "mod.rs"), "utf8"), "// new source\n",
+    "an unignored target dir is source, never deleted");
+  assert.ok(fs.existsSync(path.join(wtPath, "node_modules", "pkg", "index.js")), "only reclaimable build dir names are dropped");
 });
 
 test("a worktree refused for ownership keeps its target/ dirs", async () => {
