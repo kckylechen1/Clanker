@@ -478,6 +478,77 @@ export function matchDoNotTouch(
  * therefore cannot live in the CALLER (a bypassing caller is the failure mode);
  * it lives here, keyed on a fact that survives on disk.
  */
+/**
+ * Directories named `target` under `worktreePath`, not descending into a
+ * `target` once found and not following symlinks. Build output lives there;
+ * walking into it is how a sweep spends minutes stating gigabytes it is about
+ * to delete.
+ */
+function listTargetDirs(worktreePath: string): string[] {
+  const found: string[] = [];
+  const stack = [worktreePath];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    if (!dir) continue;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      if (!entry.isDirectory()) continue;
+      if (entry.name === ".git") continue;
+      const full = path.join(dir, entry.name);
+      if (entry.name === "target") found.push(full);
+      else stack.push(full);
+    }
+  }
+  return found;
+}
+
+/**
+ * True only when git ignores `rel` AND no tracked file sits under it. A
+ * `target` directory that holds even one tracked file is source, not build
+ * output, and is never deleted.
+ */
+async function isWhollyIgnored(worktreePath: string, rel: string): Promise<boolean> {
+  try {
+    await git(worktreePath, ["check-ignore", "-q", "--", rel]);
+  } catch {
+    return false;
+  }
+  try {
+    const tracked = await git(worktreePath, ["ls-files", "-z", "--", rel]);
+    return tracked.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A worktree that has to be RETAINED (uncommitted or unshipped work) still
+ * does not need its build output. Rust `target/` dirs reach gigabytes per
+ * tree, and retained trees pile up; drop the ones git wholly ignores so a
+ * kept tree keeps only what someone could still want. Best effort: a dir
+ * that cannot be checked or removed is kept and reported.
+ */
+async function dropIgnoredTargets(worktreePath: string): Promise<void> {
+  for (const abs of listTargetDirs(worktreePath)) {
+    const rel = path.relative(worktreePath, abs);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue;
+    try {
+      if (!(await isWhollyIgnored(worktreePath, rel))) continue;
+      fs.rmSync(abs, { recursive: true, force: true });
+    } catch (err) {
+      console.error(
+        `[clanker] keeping build dir '${abs}': ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+}
+
 export async function removeIfClean(
   worktreePath: string,
   targetRepo = BASE_REPO,
@@ -501,8 +572,13 @@ export async function removeIfClean(
       return false;
     }
   }
+  // Retained trees still shed ignored build output (see dropIgnoredTargets).
+  const retain = async (): Promise<boolean> => {
+    await dropIgnoredTargets(worktreePath);
+    return false;
+  };
   const changes = await changedFiles(worktreePath);
-  if (changes.length > 0) return false;
+  if (changes.length > 0) return retain();
   // A clean tree can still hold UNPUSHED commits (the lane committed its
   // work but nothing has shipped it yet). Removing the tree then is how a
   // finished lane's deliverable vanished mid-review on 2026-07-10 — the
@@ -516,7 +592,7 @@ export async function removeIfClean(
     const ahead = (
       await git(worktreePath, ["rev-list", "--count", "@{upstream}..HEAD"])
     ).trim();
-    if (ahead !== "0") return false;
+    if (ahead !== "0") return retain();
   } catch {
     // NO UPSTREAM IS THE NORMAL STATE, NOT AN EXCEPTION (#17).
     //
@@ -534,7 +610,7 @@ export async function removeIfClean(
     // otherwise a fresh resolution. That works with
     // no remote at all, and it stays correct when the base has since advanced:
     // a branch whose commits are already merged into it counts zero.
-    if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return false;
+    if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return retain();
   }
   // Drop the ownership marker only now, with every retention question already
   // answered. Leaving it in place would make the plain `git worktree remove`

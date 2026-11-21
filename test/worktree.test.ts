@@ -157,3 +157,56 @@ test("#12: resolveTargetRepo returns the repo toplevel and throws loudly outside
   await assert.rejects(() => resolveTargetRepo(nonRepo), /not inside a git work tree/);
   fs.rmSync(nonRepo, { recursive: true, force: true });
 });
+
+/** A base repo whose main ignores `target/` and tracks one `target` dir as source. */
+function makeRepoWithTargets(): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "clanker-wt-target-"));
+  const origin = path.join(root, "origin.git");
+  const seed = path.join(root, "seed");
+  const base = path.join(root, "base");
+  git(root, ["init", "--bare", "-b", "main", origin]);
+  git(root, ["clone", origin, seed]);
+  fs.writeFileSync(path.join(seed, ".gitignore"), "target/\n");
+  fs.mkdirSync(path.join(seed, "fixtures", "target"), { recursive: true });
+  fs.writeFileSync(path.join(seed, "fixtures", "target", "golden.txt"), "tracked\n");
+  git(seed, ["add", "."]);
+  git(seed, ["add", "-f", "fixtures/target/golden.txt"]);
+  git(seed, ["commit", "-m", "init"]);
+  git(seed, ["push", "origin", "main"]);
+  git(root, ["clone", origin, base]);
+  return base;
+}
+
+test("a retained worktree sheds wholly-ignored target/ build dirs and keeps everything else", async () => {
+  const base = makeRepoWithTargets();
+  const branch = `lane-target-${Math.random().toString(36).slice(2, 8)}`;
+  const run = runId("target");
+  const wtPath = await createWorktree(branch, run, base);
+
+  // Build output at two depths, ignored by .gitignore.
+  for (const dir of ["target/debug", "crates/a/target/release"]) {
+    fs.mkdirSync(path.join(wtPath, dir), { recursive: true });
+    fs.writeFileSync(path.join(wtPath, dir, "blob.bin"), "x".repeat(1024));
+  }
+  // Uncommitted work keeps the tree.
+  fs.writeFileSync(path.join(wtPath, "work.txt"), "work\n");
+  const cutSha = git(wtPath, ["rev-parse", "HEAD"]);
+
+  assert.equal(await removeIfClean(wtPath, base, cutSha, run), false, "dirty worktree is retained");
+  assert.equal(fs.existsSync(path.join(wtPath, "target")), false, "top-level ignored target/ dropped");
+  assert.equal(fs.existsSync(path.join(wtPath, "crates", "a", "target")), false, "nested ignored target/ dropped");
+  assert.equal(fs.readFileSync(path.join(wtPath, "fixtures", "target", "golden.txt"), "utf8"), "tracked\n",
+    "a target dir holding a tracked file is source, never deleted");
+  assert.equal(fs.readFileSync(path.join(wtPath, "work.txt"), "utf8"), "work\n", "the retained work is untouched");
+});
+
+test("a worktree refused for ownership keeps its target/ dirs", async () => {
+  const base = makeRepoWithTargets();
+  const branch = `lane-target-own-${Math.random().toString(36).slice(2, 8)}`;
+  const wtPath = await createWorktree(branch, runId("owner"), base);
+  fs.mkdirSync(path.join(wtPath, "target"), { recursive: true });
+  fs.writeFileSync(path.join(wtPath, "target", "blob.bin"), "x");
+
+  assert.equal(await removeIfClean(wtPath, base, git(wtPath, ["rev-parse", "HEAD"]), runId("intruder")), false);
+  assert.ok(fs.existsSync(path.join(wtPath, "target", "blob.bin")), "another run's tree is not touched at all");
+});

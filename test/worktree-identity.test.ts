@@ -294,8 +294,8 @@ test("#33 A2 mutation: dropping the recorded SHA re-resolves the drifted base an
     [
       {
         file: "worktree.ts",
-        find: "    if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return false;",
-        replace: "    if (await holdsUnmergedWork(worktreePath, targetRepo, undefined)) return false;",
+        find: "    if (await holdsUnmergedWork(worktreePath, targetRepo, baseSha)) return retain();",
+        replace: "    if (await holdsUnmergedWork(worktreePath, targetRepo, undefined)) return retain();",
       },
     ],
     "worktree.ts",
